@@ -1,0 +1,8 @@
+# Разделы flash для VDAC4 A3.1: ESP32-S3-PICO-1-N8R8, 8 МБ.
+# Два слота приложения по 3 МБ (обновление по Wi-Fi с откатом, как в ZiFi) и LittleFS.
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x5000,
+otadata,    data, ota,     0xE000,   0x2000,
+app0,       app,  ota_0,   0x10000,  0x300000,
+app1,       app,  ota_1,   0x310000, 0x300000,
+littlefs,   data, spiffs,  0x610000, 0x1F0000,

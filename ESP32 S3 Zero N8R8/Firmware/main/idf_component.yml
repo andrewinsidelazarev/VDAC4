@@ -1,0 +1,18 @@
+## Зависимости прошивки VDAC4 (менеджер компонентов ESP-IDF)
+dependencies:
+  idf:
+    version: ">=6.0.0,<6.1.0"
+  # Arduino-ядро как компонент: WiFi, LittleFS, Update, WiFiClientSecure — всё, на чём написан ZiFi.
+  # Версия закреплена: поведение сети проверяется именно с ней.
+  espressif/arduino-esp32:
+    version: "3.3.12"
+  # Декодер MP3 (Helix, целочисленный). Arduino-ядро само требует ровно эту версию;
+  # здесь он назван явно, потому что проигрыватель прошивки вызывает его напрямую.
+  chmorgan/esp-libhelix-mp3:
+    version: "1.0.3"
+  # USB-хост (в ESP-IDF 6 вынесен из ESP-IDF в реестр) и драйвер флешек USB MSC:
+  # ресурсы музыки (банк MIDI, ПЗУ OPL4) ядро кэширует на флешке в разъёме модуля.
+  espressif/usb:
+    version: "1.6.0"
+  espressif/usb_host_msc:
+    version: "1.3.0"

@@ -1,0 +1,11 @@
+https://github.com/richgel999/jpeg-compressor
+Commit aeb7d3b463aa8228b87a28013c15ee50a7e6fcf3
+jpgd.cpp/jpgd.h: Richard Geldreich, 1994-2020.
+Public Domain OR Apache-2.0; Apache-2.0 selected (see LICENSE).
+The optional SSE IDCT header retains Intel's own permissive notice; it is
+not compiled on the ESP32-S3 (JPGD_USE_SSE2=0).
+Local changes: callback-only input/allocation; no stdio convenience API or
+virtual stream classes; per MCU-row checkpoint; dimensions limited to 4096;
+JPGD_ASSERT permits debug assertions on the host without requiring the
+unexported __assert_func in an ELF module. Runtime format checks are retained.
+The scalar implementation is included privately by src/cover_jpeg.cpp.
