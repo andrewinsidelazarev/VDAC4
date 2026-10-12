@@ -1,0 +1,110 @@
+# Локальная корзина и промежуточные каталоги сборки и тестов
+.to-delete/
+.test-build/
+baselines/
+
+# Python и служебные файлы ОС
+__pycache__/
+*.py[cod]
+*.etl
+*.pcapng
+*.cab
+*.log
+*.tmp
+*.bak
+smb-*.txt
+zifi-*.txt
+
+# Листинги и символы ассемблера (готовые .WMF, .spg и .sna хранятся)
+*.lst
+*.sym
+*.l
+
+# Настройки Wi-Fi для ZiFi (SSID, пароль, токен): только локально.
+zifi.ini
+
+# Учётные данные для curl (netrc) — только локально.
+pass.txt
+*.netrc
+_netrc
+
+# Рабочая память проекта: только локально.
+MEMORY.md
+
+# Прошивка (ESP-IDF): каталог сборки, sdkconfig и то, что скачивает менеджер
+# компонентов. dependencies.lock хранится: он закрепляет версии компонентов.
+/ESP32 S3 Zero N8R8/Firmware/build/
+/ESP32 S3 Zero N8R8/Firmware/build-*/
+/ESP32 S3 Zero N8R8/Firmware/sdkconfig
+/ESP32 S3 Zero N8R8/Firmware/sdkconfig.old
+/ESP32 S3 Zero N8R8/Firmware/managed_components/
+/ESP32 S3 Zero N8R8/Firmware/firmware/update.sna
+
+# Модули ESP (Sound/modules/<имя>, Firmware/modules/hello): деревья сборки
+# ESP-IDF, sdkconfig (его создаёт build_modules.ps1 командой set-target) и
+# скачанные компоненты. Готовые modules/out/*.ELF и пробный hello.app.elf (его
+# вшивает прошивка) хранятся, как .WMF.
+/ESP32 S3 Zero N8R8/*/modules/*/build/
+/ESP32 S3 Zero N8R8/*/modules/*/sdkconfig
+/ESP32 S3 Zero N8R8/*/modules/*/sdkconfig.old
+/ESP32 S3 Zero N8R8/*/modules/*/managed_components/
+
+# Чужие материалы — музыка, банки звуков, ПЗУ, картинки для проверок — в
+# репозиторий не выкладываются: проверки берут их снаружи (E:\zx\Music и т. п.).
+# Публикуются только плейлисты радио (*.M3U): это не авторский материал.
+# Сжатые и потоковые форматы
+*.mp3
+*.wav
+*.ogg
+*.oga
+*.opus
+*.aac
+*.m4a
+*.flac
+# MIDI и банки звуков
+*.mid
+*.midi
+*.rmi
+*.kar
+*.sf2
+*.sf3
+# Трекерная музыка
+*.xm
+*.it
+*.mod
+*.s3m
+*.mtm
+*.mo
+# OPL и MoonSound
+*.vgm
+*.vgz
+*.dro
+*.imf
+*.wlf
+*.mwm
+*.mfm
+# AY, TurboSound и TurboSound FM
+*.as0
+*.asc
+*.ftc
+*.gtr
+*.psc
+*.psm
+*.pt1
+*.pt2
+*.pt3
+*.sqt
+*.st3
+*.stc
+*.stp
+*.ts
+*.tfc
+*.tfd
+*.mtc
+# SAA1099
+*.saa
+*.cop
+# ПЗУ и картинки
+*.rom
+*.scr
+*.sxg

@@ -1,0 +1,11 @@
+# Генерирует tools/gen_assets.py при каждой сборке (build.bat).
+/src/assets.inc
+/src/layout.inc
+/src/strings.inc
+
+# Промежуточные файлы сборки и тестов; в git — только готовый
+# build/vdac4/VDAC4WT2.WMF (заставка собирается для платы VDAC4).
+/build/*
+!/build/vdac4/
+/build/vdac4/*
+!/build/vdac4/VDAC4WT2.WMF
