@@ -7,8 +7,8 @@
 картой Evo. С ESP они говорят двоичным протоколом ZiFi по SPI — общий драйвер
 канала лежит в [`shared/z80`](shared/z80).
 
-Описание платы, канала SPI и наладки — [`Docs/VDAC4.md`](../../Docs/VDAC4.md);
-протокол кадров — [`Docs/PROTOCOL.md`](../../Docs/PROTOCOL.md).
+Описание платы, канала SPI и наладки — [`Docs/VDAC4.md`](../Docs/VDAC4.md);
+протокол кадров — [`Docs/PROTOCOL.md`](../Docs/PROTOCOL.md).
 
 ## Что умеет
 

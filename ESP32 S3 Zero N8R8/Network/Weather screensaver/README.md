@@ -37,7 +37,7 @@
    по-русски (`city: Рим`) — тогда и на экране он будет по-русски.
    Прежняя запись `country:` + `zip:` (почтовый индекс) тоже работает.
 4. Нужна прошивка платы VDAC4 из этого репозитория: в ней есть команда
-   `WEATHER_GET` с поиском по городу, см. [`Docs/PROTOCOL.md`](../../../Docs/PROTOCOL.md).
+   `WEATHER_GET` с поиском по городу, см. [`Docs/PROTOCOL.md`](../../Docs/PROTOCOL.md).
 
 Часы и дата берутся из часов Mr.Gluk. Чтобы они шли точно, держите в
 `[PLUGINS]` плагин [`VDAC4NTP.WMF`](../NTP%20Time%20Sync/build/vdac4/VDAC4NTP.WMF) — он

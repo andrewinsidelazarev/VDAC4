@@ -8,8 +8,8 @@ ESP (ELF с карты: декодеры и проигрыватель лежа�
 программы Z80 сетевой части — в [`../Network`](../Network)).
 
 Подробное описание платы, канала SPI, команд звука и наладки —
-[`Docs/VDAC4.md`](../../Docs/VDAC4.md); протокол кадров —
-[`Docs/PROTOCOL.md`](../../Docs/PROTOCOL.md).
+[`Docs/VDAC4.md`](../Docs/VDAC4.md); протокол кадров —
+[`Docs/PROTOCOL.md`](../Docs/PROTOCOL.md).
 
 ## Файлы
 
@@ -32,7 +32,7 @@ python -m esptool --chip esp32s3 --port COM5 write-flash 0x0 firmware/vdac4/firm
 > Одновременно с питанием от Evo USB не подключать: такая работа проектом платы
 > не проверялась.
 
-Подробности — в [`Docs/VDAC4.md`](../../Docs/VDAC4.md#запись-в-модуль-через-usb).
+Подробности — в [`Docs/VDAC4.md`](../Docs/VDAC4.md#запись-в-модуль-через-usb).
 
 ## Обновление прошивки по сети
 
@@ -59,7 +59,7 @@ Python 3 и [sjasmplus](https://github.com/z00m128/sjasmplus).
 
 Окружение ESP-IDF берётся из «ESP-IDF PowerShell» или из скрипта, указанного в
 переменной `ZIFI_IDF_ENV`. Подробности, ключи и тонкости сборки —
-[`Docs/VDAC4.md`](../../Docs/VDAC4.md#сборка).
+[`Docs/VDAC4.md`](../Docs/VDAC4.md#сборка).
 
 ## Тесты
 

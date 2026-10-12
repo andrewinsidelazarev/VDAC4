@@ -174,7 +174,7 @@ python -m unittest discover -s tests -p "test_*.py"
 (`tests/sound_paths.py`). Музыки для проверок в репозитории нет: тесты берут её
 снаружи.
 
-Команды звука прошивки — [`Docs/VDAC4.md`](../../Docs/VDAC4.md).
+Команды звука прошивки — [`Docs/VDAC4.md`](../Docs/VDAC4.md).
 
 ## Сторонние компоненты
 

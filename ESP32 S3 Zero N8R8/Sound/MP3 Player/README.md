@@ -23,7 +23,7 @@ TFC и TFD вместе; плагин 1.18, PLAYER 1.19, TSFM.ELF 1.12) и ин�
 32 места) больше не нужен — его строку из `[PLUGINS]` в `wc.ini` надо убрать.
 Расширения длиннее трёх букв WC сравнивает целиком: `.flac` и `.midi` играют
 под полными именами. Проверка ЦАП тонами и тест линий — отдельная программа
-`tools/audio_test_vdac4.sna` (см. [`Docs/VDAC4.md`](../../../Docs/VDAC4.md)).
+`tools/audio_test_vdac4.sna` (см. [`Docs/VDAC4.md`](../../Docs/VDAC4.md)).
 
 Плагин ничего не декодирует: он читает файл с карты и отдаёт его ESP кадрами
 `AUDIO_DATA`, а декодирует проигрыватель на ESP — приложение `PLAYER.ELF` с
@@ -55,7 +55,7 @@ TFC и TFD вместе; плагин 1.18, PLAYER 1.19, TSFM.ELF 1.12) и ин�
 (`METADATA_BLOCK_PICTURE` в комментариях Vorbis, лицевая важнее прочих) находит
 декодер, и она важнее картинки из папки; название, исполнитель, альбом и год —
 тоже из комментариев. JPEG — только baseline (progressive и PNG миниатюрой не
-сводятся). Как это устроено — [`Docs/VDAC4.md`](../../../Docs/VDAC4.md),
+сводятся). Как это устроено — [`Docs/VDAC4.md`](../../Docs/VDAC4.md),
 «Обложка MP3».
 
 FLAC поддерживается с плагина 1.8 и PLAYER 1.11. Декодер FLAC.ELF читает
@@ -119,7 +119,7 @@ Commander: плагин возвращается с кодом 2 (следующ
 плеер, встроенный в прошивку, а MIDI, OPL, AAC, Ogg и FLAC — нет (ошибка с именем того,
 чего не хватило). Радио нужен `MP3.ELF`; `AAC.ELF` и `OGG.ELF` плагин
 присылает ему, если они есть, — без них станции AAC и Ogg не играют
-(`No AAC.ELF in /WC/ESP`). Как это устроено — [`Docs/VDAC4.md`](../../../Docs/VDAC4.md), «Модули
+(`No AAC.ELF in /WC/ESP`). Как это устроено — [`Docs/VDAC4.md`](../../Docs/VDAC4.md), «Модули
 ESP».
 
 Набор волн песни MWM: его имя записано в самой песне (8 знаков, например
@@ -246,7 +246,7 @@ not supported`), тогда — на другую станцию.
 Сообщения об отказе:
 
 - `ERROR: no ESP on the SPI` — прошивка VDAC4 не найдена (см. проверку
-  `esp_info_vdac4.sna` в [`Docs/VDAC4.md`](../../../Docs/VDAC4.md));
+  `esp_info_vdac4.sna` в [`Docs/VDAC4.md`](../../Docs/VDAC4.md));
 - `ERROR: ESP does not answer` — ESP перестала отвечать на команды;
 - `ERROR: ESP audio (I2S) is off` — I2S на ESP не запустился;
 - `ERROR: ESP closed the stream` — ESP закрыла поток посреди файла;
