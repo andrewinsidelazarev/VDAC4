@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="860" viewBox="0 0 680 430" role="img"><style>
+svg{--b:#b4b2a9;--p:#1f1e1d;--s:#5f5e5a;--t:#888780;--bg2:#f7f6f2}
+text{font-family:"Segoe UI",Arial,sans-serif}
+.t{font-size:14px;fill:#1f1e1d}
+.ts{font-size:12px;fill:#5f5e5a}
+.th{font-size:14px;font-weight:600;fill:#1f1e1d}
+.box{fill:#f7f6f2;stroke:#b4b2a9}
+.arr{stroke:#73726c;stroke-width:1.5;fill:none}
+.c-amber>rect,rect.c-amber{fill:#FAEEDA;stroke:#854F0B}
+.c-amber>.th{fill:#633806}
+.c-amber>.ts{fill:#854F0B}
+.c-purple>rect,rect.c-purple{fill:#EEEDFE;stroke:#534AB7}
+.c-purple>.th{fill:#3C3489}
+.c-purple>.ts{fill:#534AB7}
+.c-teal>rect,rect.c-teal{fill:#E1F5EE;stroke:#0F6E56}
+.c-teal>.th{fill:#085041}
+.c-teal>.ts{fill:#0F6E56}
+.c-coral>rect,rect.c-coral{fill:#FAECE7;stroke:#993C1D}
+.c-coral>.th{fill:#712B13}
+.c-coral>.ts{fill:#993C1D}
+.c-gray>rect,rect.c-gray{fill:#F1EFE8;stroke:#5F5E5A}
+.c-gray>.th{fill:#444441}
+.c-gray>.ts{fill:#5F5E5A}
+.c-blue>rect,rect.c-blue{fill:#E6F1FB;stroke:#185FA5}
+.c-blue>.th{fill:#0C447C}
+.c-blue>.ts{fill:#185FA5}
+</style><rect x="0" y="0" width="680" height="430" fill="#ffffff"/><title>Линия SPI между разъёмом IDE-40 ZX Evolution и ESP32 на плате A4</title><desc>SCK, MOSI и CS идут от буфера D12 Эво через контакты 35, 33 и 1 разъёма IDE-40 и буфер U3 платы к GPIO12, GPIO11 и GPIO10 модуля ESP32. Обратно MISO идёт от GPIO13 через селектор U6 и преобразователь уровня U8 на контакт 27 и вход ПЛИС Эво.</desc><defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#73726c" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="arrow_1D9E75" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#1D9E75" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker><marker id="arrow_534AB7" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M2 1L8 5L2 9" fill="none" stroke="#534AB7" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker></defs>
+<rect x="40" y="40" width="156" height="252" rx="8" fill="none" stroke="var(--b)" stroke-width="0.5" stroke-dasharray="4 4"/>
+<text class="th" x="52" y="62" dominant-baseline="central">ZX Evolution</text>
+<rect x="296" y="40" width="252" height="336" rx="8" fill="none" stroke="var(--b)" stroke-width="0.5" stroke-dasharray="4 4"/>
+<text class="th" x="308" y="62" dominant-baseline="central">Плата A4</text>
+<rect class="box" x="50" y="84" width="78" height="112" rx="4" stroke-width="0.5"/>
+<text class="th" x="89" y="120" text-anchor="middle" dominant-baseline="central">D12</text>
+<text class="ts" x="89" y="140" text-anchor="middle" dominant-baseline="central">74HCT245</text>
+<text class="ts" x="89" y="158" text-anchor="middle" dominant-baseline="central">5 В</text>
+<rect class="box" x="144" y="162" width="42" height="28" rx="4" stroke-width="0.5"/>
+<text class="th" x="165" y="176" text-anchor="middle" dominant-baseline="central">J1</text>
+<rect class="box" x="50" y="220" width="136" height="56" rx="4" stroke-width="0.5"/>
+<text class="th" x="118" y="238" text-anchor="middle" dominant-baseline="central">Вход ПЛИС</text>
+<text class="ts" x="118" y="258" text-anchor="middle" dominant-baseline="central">R20 1 кОм к +5 В</text>
+<rect class="c-gray" x="208" y="84" width="76" height="192" rx="4" stroke-width="0.5"/>
+<text class="ts" x="246" y="104" text-anchor="middle" dominant-baseline="central">35 SCK</text>
+<text class="ts" x="246" y="140" text-anchor="middle" dominant-baseline="central">33 MOSI</text>
+<text class="ts" x="246" y="176" text-anchor="middle" dominant-baseline="central">1 CS</text>
+<text class="th" x="246" y="212" text-anchor="middle" dominant-baseline="central">IDE-40</text>
+<text class="ts" x="246" y="248" text-anchor="middle" dominant-baseline="central">27 MISO</text>
+<rect class="box" x="308" y="84" width="120" height="112" rx="4" stroke-width="0.5"/>
+<text class="th" x="368" y="130" text-anchor="middle" dominant-baseline="central">U3 74LVC245</text>
+<text class="ts" x="368" y="150" text-anchor="middle" dominant-baseline="central">3,3 В, A→B</text>
+<rect class="box" x="308" y="220" width="104" height="56" rx="4" stroke-width="0.5"/>
+<text class="th" x="360" y="238" text-anchor="middle" dominant-baseline="central">U8 TXU0101</text>
+<text class="ts" x="360" y="258" text-anchor="middle" dominant-baseline="central">3,3 → 5 В</text>
+<rect class="box" x="436" y="220" width="100" height="56" rx="4" stroke-width="0.5"/>
+<text class="th" x="486" y="238" text-anchor="middle" dominant-baseline="central">U6 1G97</text>
+<text class="ts" x="486" y="258" text-anchor="middle" dominant-baseline="central">ESP / Tang</text>
+<rect class="box" x="308" y="304" width="104" height="56" rx="4" stroke-width="0.5"/>
+<text class="th" x="360" y="322" text-anchor="middle" dominant-baseline="central">U7 NAND</text>
+<text class="ts" x="360" y="342" text-anchor="middle" dominant-baseline="central">включает U8</text>
+<rect class="box" x="436" y="304" width="100" height="56" rx="4" stroke-width="0.5"/>
+<text class="th" x="486" y="322" text-anchor="middle" dominant-baseline="central">Tang MISO</text>
+<text class="ts" x="486" y="342" text-anchor="middle" dominant-baseline="central">FPGA79</text>
+<rect class="c-gray" x="564" y="84" width="76" height="192" rx="4" stroke-width="0.5"/>
+<text class="ts" x="602" y="104" text-anchor="middle" dominant-baseline="central">GPIO12</text>
+<text class="ts" x="602" y="140" text-anchor="middle" dominant-baseline="central">GPIO11</text>
+<text class="ts" x="602" y="176" text-anchor="middle" dominant-baseline="central">GPIO10</text>
+<text class="th" x="602" y="212" text-anchor="middle" dominant-baseline="central">ESP32</text>
+<text class="ts" x="602" y="248" text-anchor="middle" dominant-baseline="central">GPIO13</text>
+<line x1="128" y1="104" x2="206" y2="104" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="284" y1="104" x2="306" y2="104" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="428" y1="104" x2="562" y2="104" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="128" y1="140" x2="206" y2="140" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="284" y1="140" x2="306" y2="140" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="428" y1="140" x2="562" y2="140" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="128" y1="176" x2="142" y2="176" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="186" y1="176" x2="206" y2="176" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="284" y1="176" x2="306" y2="176" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="428" y1="176" x2="562" y2="176" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<line x1="564" y1="248" x2="538" y2="248" class="arr" style="stroke:#1D9E75" marker-end="url(#arrow_1D9E75)"/>
+<line x1="436" y1="248" x2="414" y2="248" class="arr" style="stroke:#1D9E75" marker-end="url(#arrow_1D9E75)"/>
+<line x1="308" y1="248" x2="286" y2="248" class="arr" style="stroke:#1D9E75" marker-end="url(#arrow_1D9E75)"/>
+<line x1="208" y1="248" x2="188" y2="248" class="arr" style="stroke:#1D9E75" marker-end="url(#arrow_1D9E75)"/>
+<line x1="360" y1="304" x2="360" y2="278" class="arr" marker-end="url(#arrow)"/>
+<line x1="486" y1="304" x2="486" y2="278" class="arr" style="stroke:#1D9E75" marker-end="url(#arrow_1D9E75)"/>
+<line x1="52" y1="404" x2="82" y2="404" class="arr" style="stroke:#534AB7" marker-end="url(#arrow_534AB7)"/>
+<text class="ts" x="92" y="404" dominant-baseline="central">от Эво к ESP</text>
+<line x1="230" y1="404" x2="260" y2="404" class="arr" style="stroke:#1D9E75" marker-end="url(#arrow_1D9E75)"/>
+<text class="ts" x="270" y="404" dominant-baseline="central">обратно, MISO</text>
+</svg>
