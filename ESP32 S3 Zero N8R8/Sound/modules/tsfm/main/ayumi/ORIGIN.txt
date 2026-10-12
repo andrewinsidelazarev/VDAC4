@@ -1,0 +1,9 @@
+https://github.com/true-grue/ayumi
+Commit 07c08b4874c359169e4a028edf73f046d8b763e2
+Local changes: single precision arithmetic for ESP32-S3.
+Local changes (VDAC4, 2026-10-12): ayumi_process_fast - event-driven box-filtered output of the same counters (TSFM.ELF real time on ESP32-S3).
+Local changes (VDAC4, 2026-10-12): ayumi_process_blep - band-limited steps (32-tap Blackman sinc, 64 phases) at the exact event times (TSFM.ELF 1.2).
+Local changes (VDAC4, 2026-10-12): lazy_level_at - the step phase (ticks - left) / ticks is divided only when the level changes (TSFM.ELF 1.9); output unchanged.
+Local changes (VDAC4, 2026-10-12): blep_add loads each coefficient once and walks the ring in two contiguous parts (TSFM.ELF 1.10); output unchanged.
+Local changes (VDAC4, 2026-10-12): fast_level ABC short form (abc flag from ayumi_set_pan), ticks_to_event as max(1, period - counter), fast_advance without recomputing distances, events/steps counters (TSFM.ELF 1.11); output unchanged.
+Local changes (VDAC4, 2026-10-12): inaudible sources (tone of a disabled or silent channel, unheard noise, unused or holding envelope) leave the lazy event schedule and are caught up arithmetically (lazy_audibility, lazy_wake_*, skip_events; TSFM.ELF 1.12). Schedule time is now whole steps (passed, next) plus a step fraction x < 1 instead of a float remainder `until`, which lost precision when the next event was thousands of steps away.

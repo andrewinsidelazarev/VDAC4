@@ -1,0 +1,17 @@
+dependencies:
+  cmake_utilities:
+    dependencies: []
+    source:
+      path: ../../../Firmware/components/cmake_utilities
+      type: local
+    version: 0.5.3
+  idf:
+    source:
+      type: idf
+    version: 6.0.2
+direct_dependencies:
+- espressif/cmake_utilities
+- idf
+manifest_hash: ae6b1d5288a479bd59a3add20a0460f93754182c0ec8aa54666b352051ebd9e9
+target: esp32s3
+version: 3.0.0
