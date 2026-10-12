@@ -1,18 +1,18 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1400" viewBox="0 0 1920 1400" role="img" aria-labelledby="title description">
-<title id="title">Tang Nano 20K VDAC — структурная схема A3.1-P6</title>
-<desc id="description">Видеовход ZX Evolution через два мультиплексора и буфер управления поступает в Tang Nano 20K с HDMI. ESP32 подключён к Evo по общей SPI-шине и к Tang по полудуплексному QSPI. ESP32 выдаёт I2S в GY-PCM5102. Ниже показаны возвраты MISO и FT_INT, питание и аналоговая земля.</desc>
+<title id="title">VDAC4 — структурная схема платы, ревизия A4</title>
+<desc id="description">Видеовход ZX Evolution через два мультиплексора и буфер управления поступает в Tang Nano 20K с HDMI. ESP32 подключён к Evo по общей SPI-шине, к Tang по полудуплексному QSPI и к сети по Wi-Fi. ESP32 выдаёт I2S в GY-PCM5102, уровень на J2 выбирается перемычками. Ниже показаны возвраты MISO и FT_INT, питание и аналоговая земля.</desc>
 <g font-family="Arial, sans-serif">
 <rect x="0" y="0" width="1920" height="1400" rx="0" fill="#f6f8fb" stroke="none" stroke-width="2"/>
-<text x="48" y="58" font-size="40" fill="#173047" font-weight="700" text-anchor="start">Tang Nano 20K VDAC</text>
-<text x="48" y="96" font-size="24" fill="#596d7c" font-weight="400" text-anchor="start">Структурная схема платы • соединения A3.1 / PCB A3.1-P6</text>
+<text x="48" y="58" font-size="40" fill="#173047" font-weight="700" text-anchor="start">VDAC4 · Tang Nano 20K VDAC</text>
+<text x="48" y="96" font-size="24" fill="#596d7c" font-weight="400" text-anchor="start">Структурная схема платы • ревизия A4</text>
 <rect x="1480" y="30" width="390" height="75" rx="12" fill="#e8eff5" stroke="none" stroke-width="2"/>
 <text x="1503" y="60" font-size="22" fill="#173047" font-weight="700" text-anchor="start">ZX Evolution · TS-Config</text>
-<text x="1503" y="88" font-size="19" fill="#596d7c" font-weight="400" text-anchor="start">58 × 75 мм · 4 слоя · 16.09.2026</text>
+<text x="1503" y="88" font-size="19" fill="#596d7c" font-weight="400" text-anchor="start">58 × 75 мм · 4 слоя · 12.10.2026</text>
 <rect x="30" y="128" width="1860" height="905" rx="18" fill="white" stroke="#d8e2e9" stroke-width="2"/>
 <text x="56" y="165" font-size="18" fill="#596d7c" font-weight="700" text-anchor="start">01  СИГНАЛЬНЫЕ СВЯЗИ</text>
-<text x="965" y="165" font-size="19" fill="#596d7c" font-weight="400" text-anchor="start">Готовые модули на плате</text>
+<text x="965" y="165" font-size="19" fill="#596d7c" font-weight="400" text-anchor="start">Готовые модули на гнёздах</text>
 <text x="1510" y="165" font-size="19" fill="#596d7c" font-weight="400" text-anchor="start">Видео и аудио</text>
-<rect x="60" y="210" width="230" height="515" rx="14" fill="#f2f5f8" stroke="#7a8994" stroke-width="2"/>
+<rect x="60" y="210" width="250" height="515" rx="14" fill="#f2f5f8" stroke="#7a8994" stroke-width="2"/>
 <text x="82" y="246" font-size="26" fill="#7a8994" font-weight="700" text-anchor="start">ZX Evolution</text>
 <text x="82" y="277" font-size="20" fill="#173047" font-weight="600" text-anchor="start">J1 · TS-PORT40</text>
 <text x="82" y="311" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">Разъём 2 × 20</text>
@@ -23,19 +23,18 @@
 <text x="82" y="456" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">PCLK, HS, VS</text>
 <text x="82" y="485" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">M_SEL</text>
 <text x="82" y="514" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">SPI: SCK / MOSI</text>
-<text x="82" y="543" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">CS_FT_n</text>
-<text x="82" y="572" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">CS_ESP_n</text>
-<text x="82" y="601" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start"></text>
-<text x="82" y="630" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">Входы возврата:</text>
-<text x="82" y="659" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">MISO / FT_INT_n</text>
+<text x="82" y="543" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">CS_FT_n / CS_ESP_n</text>
+<text x="82" y="572" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start"></text>
+<text x="82" y="601" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">Входы возврата:</text>
+<text x="82" y="630" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">MISO / FT_INT_n</text>
 <rect x="400" y="210" width="300" height="165" rx="14" fill="#eff8fd" stroke="#167bb6" stroke-width="2"/>
-<text x="422" y="246" font-size="26" fill="#167bb6" font-weight="700" text-anchor="start">Мультиплексор RGB</text>
+<text x="422" y="246" font-size="23" fill="#167bb6" font-weight="700" text-anchor="start">Видеомультиплексор</text>
 <text x="422" y="277" font-size="20" fill="#173047" font-weight="600" text-anchor="start">U1, U2 · 2 × 74LVC257</text>
 <text x="422" y="311" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">16 → 8 линий, две фазы</text>
 <text x="422" y="340" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">RGB555 + PAL · 5 → 3,3 В</text>
-<polyline points="290,280 400,280" fill="none" stroke="#167bb6" stroke-width="3" stroke-linejoin="round"/>
+<polyline points="310,280 400,280" fill="none" stroke="#167bb6" stroke-width="3" stroke-linejoin="round"/>
 <polygon points="400.00,280.00 388.00,275.00 388.00,285.00" fill="#167bb6"/>
-<text x="305" y="263" font-size="19" fill="#167bb6" font-weight="400" text-anchor="start">16 бит</text>
+<text x="318" y="263" font-size="19" fill="#167bb6" font-weight="400" text-anchor="start">16 бит</text>
 <polyline points="700,280 960,280" fill="none" stroke="#167bb6" stroke-width="3" stroke-linejoin="round"/>
 <polygon points="960.00,280.00 948.00,275.00 948.00,285.00" fill="#167bb6"/>
 <text x="720" y="252" font-size="22" fill="#167bb6" font-weight="600" text-anchor="start">MUX_D[7:0]</text>
@@ -49,9 +48,9 @@
 <text x="422" y="581" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">8 каналов · 5 → 3,3 В</text>
 <text x="422" y="610" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">PCLK, HS/VS идут прямо</text>
 <text x="422" y="639" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">Общие SCK и MOSI</text>
-<polyline points="290,545 400,545" fill="none" stroke="#167bb6" stroke-width="3" stroke-linejoin="round"/>
+<polyline points="310,545 400,545" fill="none" stroke="#167bb6" stroke-width="3" stroke-linejoin="round"/>
 <polygon points="400.00,545.00 388.00,540.00 388.00,550.00" fill="#167bb6"/>
-<text x="305" y="528" font-size="18" fill="#167bb6" font-weight="400" text-anchor="start">8 линий</text>
+<text x="318" y="528" font-size="18" fill="#167bb6" font-weight="400" text-anchor="start">8 линий</text>
 <polyline points="700,521 813,521 813,356 960,356" fill="none" stroke="#167bb6" stroke-width="3" stroke-linejoin="round"/>
 <polygon points="960.00,356.00 948.00,351.00 948.00,361.00" fill="#167bb6"/>
 <text x="827" y="451" font-size="15" fill="#167bb6" font-weight="400" text-anchor="start">PCLK, HS, VS</text>
@@ -90,30 +89,40 @@
 <text x="982" y="687" font-size="20" fill="#173047" font-weight="600" text-anchor="start">Готовый модуль N8R8-M</text>
 <text x="982" y="721" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">SPI slave для Evo · QSPI master</text>
 <text x="982" y="750" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">I²S-источник цифрового звука</text>
-<text x="982" y="779" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">Wi-Fi · Flash 8 МБ · PSRAM 8 МБ</text>
 <text x="982" y="803" font-size="19" fill="#b9661a" font-weight="600" text-anchor="start">Выход: MISO_ESP [2]</text>
+<polyline points="1175,822 1175,858" fill="none" stroke="#7853b5" stroke-width="3" stroke-linejoin="round" stroke-dasharray="7 5"/>
+<polygon points="1175.00,858.00 1180.00,846.00 1170.00,846.00" fill="#7853b5"/>
+<polygon points="1175.00,822.00 1170.00,834.00 1180.00,834.00" fill="#7853b5"/>
+<text x="1196" y="846" font-size="17" fill="#7853b5" font-weight="600" text-anchor="start">Wi-Fi</text>
+<rect x="960" y="858" width="430" height="82" rx="14" fill="#f6f0fc" stroke="#7853b5" stroke-width="2"/>
+<text x="982" y="892" font-size="24" fill="#7853b5" font-weight="700" text-anchor="start">Сеть Wi-Fi · 2,4 ГГц</text>
+<text x="982" y="922" font-size="19" fill="#596d7c" font-weight="400" text-anchor="start">Антенна на модуле ESP32-S3-Zero</text>
+<text x="963" y="968" font-size="17" fill="#596d7c" font-weight="400" text-anchor="start">Назначение линий показано по схеме; работа функций</text>
+<text x="963" y="991" font-size="17" fill="#596d7c" font-weight="400" text-anchor="start">зависит от прошивок Tang и ESP.</text>
+<text x="963" y="1017" font-size="16" fill="#596d7c" font-weight="400" text-anchor="start">[1]–[3] — логические метки, не разъёмы.</text>
 <polyline points="1390,670 1510,670" fill="none" stroke="#138367" stroke-width="3" stroke-linejoin="round"/>
 <polygon points="1510.00,670.00 1498.00,665.00 1498.00,675.00" fill="#138367"/>
 <text x="1415" y="648" font-size="22" fill="#138367" font-weight="700" text-anchor="start">I²S</text>
 <text x="1408" y="699" font-size="17" fill="#138367" font-weight="400" text-anchor="start">BCK</text>
 <text x="1408" y="722" font-size="17" fill="#138367" font-weight="400" text-anchor="start">LRCK</text>
 <text x="1408" y="745" font-size="17" fill="#138367" font-weight="400" text-anchor="start">DATA</text>
-<rect x="1510" y="600" width="330" height="160" rx="14" fill="#eef8f2" stroke="#138367" stroke-width="2"/>
+<rect x="1510" y="600" width="330" height="190" rx="14" fill="#eef8f2" stroke="#138367" stroke-width="2"/>
 <text x="1532" y="636" font-size="26" fill="#138367" font-weight="700" text-anchor="start">GY-PCM5102 · A3</text>
 <text x="1532" y="667" font-size="20" fill="#173047" font-weight="600" text-anchor="start">Готовый стерео ЦАП</text>
 <text x="1532" y="701" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">I²S → аналоговые L / R</text>
 <text x="1532" y="730" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">SCK = A_GND · внутренняя PLL</text>
-<polyline points="1675,760 1675,810" fill="none" stroke="#138367" stroke-width="3" stroke-linejoin="round"/>
-<polygon points="1675.00,810.00 1680.00,798.00 1670.00,798.00" fill="#138367"/>
-<text x="1694" y="793" font-size="19" fill="#138367" font-weight="400" text-anchor="start">L / R</text>
-<rect x="1510" y="810" width="330" height="62" rx="14" fill="#eef8f2" stroke="#138367" stroke-width="2"/>
-<text x="1530" y="836" font-size="23" fill="#138367" font-weight="700" text-anchor="start">R17 / R18 · по 27 кОм</text>
-<text x="1530" y="859" font-size="17" fill="#596d7c" font-weight="400" text-anchor="start">Согласование с входом Evo</text>
-<polyline points="1675,872 1675,910" fill="none" stroke="#138367" stroke-width="3" stroke-linejoin="round"/>
-<polygon points="1675.00,910.00 1680.00,898.00 1670.00,898.00" fill="#138367"/>
-<rect x="1510" y="910" width="330" height="70" rx="14" fill="#eef8f2" stroke="#138367" stroke-width="2"/>
-<text x="1530" y="939" font-size="21" fill="#138367" font-weight="700" text-anchor="start">J2 · L / A_GND / A_GND / R</text>
-<text x="1530" y="965" font-size="19" fill="#596d7c" font-weight="400" text-anchor="start">К AUDIO IN / микшеру ZX Evo</text>
+<text x="1532" y="759" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">Настройка: перемычки JP1–JP4</text>
+<polyline points="1675,790 1675,820" fill="none" stroke="#138367" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="1675.00,820.00 1680.00,808.00 1670.00,808.00" fill="#138367"/>
+<text x="1694" y="811" font-size="19" fill="#138367" font-weight="400" text-anchor="start">L / R</text>
+<rect x="1510" y="820" width="330" height="70" rx="14" fill="#eef8f2" stroke="#138367" stroke-width="2"/>
+<text x="1530" y="848" font-size="22" fill="#138367" font-weight="700" text-anchor="start">R17/R18 27 кОм ∥ JP5/JP6</text>
+<text x="1530" y="874" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">Уровень: 27k / 15k / 9,1k</text>
+<polyline points="1675,890 1675,918" fill="none" stroke="#138367" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="1675.00,918.00 1680.00,906.00 1670.00,906.00" fill="#138367"/>
+<rect x="1510" y="918" width="330" height="70" rx="14" fill="#eef8f2" stroke="#138367" stroke-width="2"/>
+<text x="1530" y="947" font-size="21" fill="#138367" font-weight="700" text-anchor="start">J2 · L / A_GND / A_GND / R</text>
+<text x="1530" y="973" font-size="19" fill="#596d7c" font-weight="400" text-anchor="start">К AUDIO IN / микшеру ZX Evo</text>
 <text x="60" y="786" font-size="17" fill="#b9661a" font-weight="700" text-anchor="start">ВОЗВРАТ К EVO · метки [1]–[3] соответствуют выходам модулей выше</text>
 <rect x="60" y="802" width="850" height="201" rx="12" fill="#fffaf4" stroke="#ead8c5" stroke-width="2"/>
 <rect x="82" y="824" width="180" height="64" rx="8" fill="white" stroke="#d8c4ae" stroke-width="2"/>
@@ -139,16 +148,11 @@
 <polyline points="744,958 678,958" fill="none" stroke="#b9661a" stroke-width="3" stroke-linejoin="round"/>
 <polygon points="678.00,958.00 690.00,963.00 690.00,953.00" fill="#b9661a"/>
 <text x="756" y="964" font-size="18" fill="#b9661a" font-weight="400" text-anchor="start">[3] FT_INT_n</text>
-<text x="963" y="865" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">Назначение линий показано по схеме.</text>
-<text x="963" y="894" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">Работоспособность полного набора функций</text>
-<text x="963" y="922" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">зависит от прошивок Tang и ESP.</text>
-<text x="963" y="950" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">Аппаратные испытания не подтверждены.</text>
-<text x="963" y="993" font-size="17" fill="#596d7c" font-weight="400" text-anchor="start">[1]–[3] — логические метки, не разъёмы.</text>
 <rect x="30" y="1050" width="1860" height="284" rx="18" fill="white" stroke="#d8e2e9" stroke-width="2"/>
 <text x="56" y="1087" font-size="18" fill="#596d7c" font-weight="700" text-anchor="start">02  ПИТАНИЕ И ЗЕМЛЯ</text>
 <rect x="60" y="1120" width="225" height="90" rx="14" fill="#fff8eb" stroke="#b9661a" stroke-width="2"/>
 <text x="80" y="1150" font-size="23" fill="#b9661a" font-weight="700" text-anchor="start">J5 · питание FDD</text>
-<text x="80" y="1177" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">+5 В от БП Evo</text>
+<text x="80" y="1177" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">+5 В от БП Evo: конт. 4</text>
 <text x="80" y="1200" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">+12 В не подключено</text>
 <rect x="360" y="1128" width="175" height="74" rx="14" fill="#fff8eb" stroke="#b9661a" stroke-width="2"/>
 <text x="380" y="1156" font-size="23" fill="#b9661a" font-weight="700" text-anchor="start">F1 · PTC</text>
@@ -174,10 +178,10 @@
 <text x="685" y="1306" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">+5V_FUSED также питает выходные стороны U8 / U11.</text>
 <rect x="1268" y="1112" width="575" height="192" rx="12" fill="#f4f7f8" stroke="#d8e2e9" stroke-width="2"/>
 <text x="1290" y="1145" font-size="25" fill="#138367" font-weight="700" text-anchor="start">GND  —  NT1  —  A_GND</text>
-<text x="1290" y="1177" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">NT1: единственное соединение на carrier.</text>
-<text x="1290" y="1206" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">A_GND: земля и экран аудиомодуля / J2.</text>
-<text x="1290" y="1235" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">Под ESP и на 5 мм вокруг — без заливок.</text>
-<text x="1290" y="1264" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">Строгое RF-окно антенны — без меди.</text>
-<text x="49" y="1367" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">Основа: TS_VDAC_A3.json / нетлист KiCad · a3-interface-pinmap.md · a3-routing.md</text>
+<text x="1290" y="1177" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">NT1: единственное соединение на carrier,</text>
+<text x="1290" y="1206" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">площадки 2 мм под провод-перемычку.</text>
+<text x="1290" y="1235" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">A_GND: земля и экран аудиомодуля / J2.</text>
+<text x="1290" y="1264" font-size="20" fill="#596d7c" font-weight="400" text-anchor="start">Под ESP и RF-окно антенны — без меди.</text>
+<text x="49" y="1367" font-size="18" fill="#596d7c" font-weight="400" text-anchor="start">Основа: нетлист KiCad A4 · CHANGES_A4.md · a3-interface-pinmap.md</text>
 <text x="1870" y="1367" font-size="18" fill="#596d7c" font-weight="400" text-anchor="end">Блочная схема · без масштаба</text>
 </g></svg>
