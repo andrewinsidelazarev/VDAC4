@@ -108,6 +108,10 @@ void ayumi_set_mixer(struct ayumi* ay, int index, int t_off, int n_off, int e_on
 void ayumi_set_volume(struct ayumi* ay, int index, int volume);
 void ayumi_set_envelope(struct ayumi* ay, int period);
 void ayumi_set_envelope_shape(struct ayumi* ay, int shape);
+/* VDAC4 TSFM.ELF: сдвинуть регистр шума на shifts шагов вперёд по его
+ * последовательности (как если бы генератор уже проработал). У нескольких
+ * микросхем (TurboSound) генераторы шума независимы, а не в одной фазе. */
+void ayumi_advance_noise(struct ayumi* ay, unsigned shifts);
 void ayumi_process(struct ayumi* ay);
 /* VDAC4 TSFM.ELF: тот же генератор, отсчёт — точное среднее уровня за свой
  * интервал (прямоугольное окно), без восьмикратной передискретизации и

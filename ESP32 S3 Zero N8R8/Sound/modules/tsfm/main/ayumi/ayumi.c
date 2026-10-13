@@ -217,6 +217,16 @@ void ayumi_set_tone(struct ayumi* ay, int index, int period) {
   ay->channels[index].tone_period = (period == 0) | period;
 }
 
+void ayumi_advance_noise(struct ayumi* ay, unsigned shifts) {
+  /* Регистр сдвига AY (17 бит, обратная связь от битов 0 и 3) повторяется через
+   * 2^17 - 1 шагов. */
+  shifts %= 131071u;
+  while (shifts--) {
+    const int bit0x3 = ((ay->noise ^ (ay->noise >> 3)) & 1);
+    ay->noise = (ay->noise >> 1) | (bit0x3 << 16);
+  }
+}
+
 void ayumi_set_noise(struct ayumi* ay, int period) {
   lazy_catch_up(ay);
   lazy_wake_noise(ay);

@@ -10,7 +10,7 @@ MSX MoonSound (MWM — таблицы волн, MFM — FM; OPL4), E-Tracker д�
 (`SAA`, `COP`), компилированную музыку AY и TurboSound (`AS0`, `ASC`, `FTC`,
 `GTR`, `PSC`, `PSM`, `PT1`, `PT2`, `PT3`, `SQT`, `ST3`, `STC`, `STP`, `TS`),
 TurboSound FM (`TFC`, `TFD` — два YM2203), многодорожечные `MTC` ZXTune (AY,
-TFC и TFD вместе; плагин 1.18, PLAYER 1.19, TSFM.ELF 1.12) и интернет-радио по
+TFC и TFD вместе; плагин 1.18, PLAYER 1.19, TSFM.ELF 1.13) и интернет-радио по
 плейлисту M3U (поток MP3, AAC или Ogg Vorbis ESP качает сама, по Wi-Fi).
 Работает только с
 прошивкой VDAC4.

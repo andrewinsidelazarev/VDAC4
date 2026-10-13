@@ -341,6 +341,11 @@ void reset_chips(Source* s){
     // ABC, как у настоящего TSFM: A — влево, B — в центр, C — вправо (с 1.3;
     // прежние 10/50/90 % давали стерео заметно уже записи с платы).
     for(unsigned ch=0;ch<3;++ch)ayumi_set_pan(s->ay[c],ch,0.5f*float(ch),0);
+    // Шум каждой следующей микросхемы — на 32768 шагов дальше по последовательности
+    // регистра сдвига (с 1.13). У настоящих микросхем TurboSound генераторы шума
+    // независимы; из одного состояния два одинаковых шума со сдвигом в кадр
+    // складывались в гребёнку (провалы через 75-300 Гц) и звучали почти тоном.
+    ayumi_advance_noise(s->ay[c],32768u*c);
   }
   s->frame=0;s->error=false;s->limit=1.0f;
 }
@@ -710,7 +715,7 @@ extern "C" int main(int argc,char* argv[]){
   if(argc<3 || !argv[1] || !argv[2])return 0;host=reinterpret_cast<const zm_host_t*>(argv[1]);
   if(host->abi_major!=ZM_SOURCE_ABI_MAJOR || host->size<offsetof(zm_host_t,free)+sizeof(host->free) || !host->alloc || !host->free)return 0;
   memset(&table,0,sizeof(table));table.size=sizeof(table);table.abi_major=ZM_SOURCE_ABI_MAJOR;table.abi_minor=ZM_SOURCE_ABI_MINOR;
-  table.name="tsfm";table.version="1.12";table.extensions="AS0 ASC FTC GTR PSC PSM PT1 PT2 PT3 SQT ST3 STC STP TS TFC TFD MTC";
+  table.name="tsfm";table.version="1.13";table.extensions="AS0 ASC FTC GTR PSC PSM PT1 PT2 PT3 SQT ST3 STC STP TS TFC TFD MTC";
   table.input=ZM_INPUT_WHOLE;table.keeps_file=1;table.seek_unit=ZM_SEEK_MS;
   table.probe=probe;table.open=open_source;table.render=render;table.seek=seek;table.info=info;table.levels=levels;table.close=close_source;
   *reinterpret_cast<const zm_source_t**>(argv[2])=&table;return ZM_SOURCE_ABI_MAJOR;
