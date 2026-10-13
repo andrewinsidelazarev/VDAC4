@@ -9,6 +9,14 @@
 //
 // Номера выводов VDAC4 взяты из docs/a3-interface-pinmap.md проекта платы.
 
+// Каталог публикации образа VDAC4 на raw.githubusercontent.com: репозиторий VDAC4,
+// ветка main, папка Firmware/firmware/vdac4 (firmware.sha256 и firmware.bin; пробелы
+// в пути — %20, строка запроса уходит как есть). Обновление из сети берёт образ
+// только для своей платы. Вне блока платы — чтобы тот же адрес брала программа
+// ESP для Unreal (tools/unreal), которая собирается без ZIFI_BOARD_VDAC4.
+#define ZIFI_UPDATE_DIRECTORY \
+  "/andrewinsidelazarev/VDAC4/refs/heads/main/ESP32%20S3%20Zero%20N8R8/Firmware/firmware/vdac4/"
+
 #if defined(ZIFI_BOARD_VDAC4) && ZIFI_BOARD_VDAC4
 
 #define ZIFI_HAS_SPI_LINK 1
@@ -16,10 +24,6 @@
 #define ZIFI_HAS_STATUS_LED 1
 // Флешка в разъёме USB-C модуля (USB OTG хостом): кэш ресурсов музыки.
 #define ZIFI_HAS_USB_DRIVE 1
-// Обновление из сети берёт образ только для своей платы. Прошивка переходника ZiFi
-// на VDAC4 запустилась бы, но связи с Evo у неё не было бы (там UART, здесь SPI).
-#define ZIFI_UPDATE_DIRECTORY \
-  "/andrewinsidelazarev/ZiFi-ESP32-S3-Zero/refs/heads/main/firmware/vdac4/"
 
 namespace zifi {
 namespace board {

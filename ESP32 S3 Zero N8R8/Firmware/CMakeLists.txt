@@ -13,7 +13,7 @@ cmake_minimum_required(VERSION 3.22)
 # Версию прошивки видит и main/CMakeLists.txt (ZIFI_BUILD_VERSION), и упаковщик
 # (через CMakeCache.txt). FORCE: значение в кэше уже настроенной сборки всегда
 # повторяет записанное здесь, иначе правка версии не дошла бы до прошивки.
-set(ZIFI_VDAC4_VERSION "vdac4-0.1.49" CACHE STRING "Версия прошивки для платы VDAC4" FORCE)
+set(ZIFI_VDAC4_VERSION "vdac4-0.1.50" CACHE STRING "Версия прошивки для платы VDAC4" FORCE)
 
 # Собирать только main и то, от чего он зависит, а не все компоненты ESP-IDF подряд.
 set(COMPONENTS main)

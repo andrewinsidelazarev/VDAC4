@@ -107,6 +107,8 @@ def build(out_dir: pathlib.Path) -> pathlib.Path:
         (firmware, 'src/spsc_ring.cpp', 'spsc_ring.obj'),
         (firmware, 'src/z80_transport.cpp', 'z80_transport.obj'),
         (firmware, 'src/diagnostic_log.cpp', 'diagnostic_log.obj'),
+        # Онлайн-обновление: проверка заголовка образа, как у прошивки VDAC4.
+        (firmware, 'src/ota_image.cpp', 'ota_image.obj'),
     ]
     # SAA.ELF (E-Tracker на SAASound) и TSFM.ELF (AY/TurboSound на AYumi, TFC на
     # ymfm OPN) — те же исходники и ключи, что у стенда плеера (tests/test_player_host.py).
@@ -146,7 +148,7 @@ def build(out_dir: pathlib.Path) -> pathlib.Path:
     lines += [f'cl {flags} "{short(at(source))}" /Fo:{obj} || exit /b 1'
               for flags, source, obj in units]
     lines.append('cl /nologo ' + ' '.join(obj for _, _, obj in units) +
-                 ' winmm.lib ole32.lib windowscodecs.lib winhttp.lib ws2_32.lib /Fe:vdac4_esp_host.exe || exit /b 1')
+                 ' winmm.lib ole32.lib windowscodecs.lib winhttp.lib ws2_32.lib bcrypt.lib /Fe:vdac4_esp_host.exe || exit /b 1')
     script = BUILD / 'build.bat'
     script.write_text('\r\n'.join(lines) + '\r\n', encoding='ascii')
     result = subprocess.run(['cmd.exe', '/c', short(script)], capture_output=True, cwd=short(BUILD))

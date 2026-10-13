@@ -42,7 +42,14 @@
 //   (банк MIDI, ПЗУ OPL4) ядро ищет и кладёт в <папка>/SYSTEM/CACHE/MUSIC тем же кодом,
 //   что прошивка (src/resource_disk_cache.cpp); без переменной флешки нет;
 // - SYS_CLOCK (часы ESP по RTC Evo): проверка, как в прошивке, и запись в журнал —
-//   часы ПК не трогаются.
+//   часы ПК не трогаются;
+// - обновление прошивки с GitHub (плагин VDAC4 Online Update, ONLINE_UPDATE_CHECK и
+//   ONLINE_UPDATE): манифест и firmware.bin качаются по-настоящему с того же адреса,
+//   что у прошивки (ZIFI_UPDATE_DIRECTORY в board.hpp), заголовок образа проверяет
+//   src/ota_image.cpp, SHA-256 — BCrypt Windows; в flash ничего не пишется, после
+//   успеха — модель перезапуска. Версия «установленной» прошивки — VDAC4_FW_VERSION
+//   (по умолчанию vdac4-unreal: отношение «другая сборка»); после установки — та,
+//   что поставлена.
 // Кадры от Unreal принимает отдельный поток. Главный поток — «ядро 1» прошивки: по
 // очереди исполняет заявку сеанса обновлятора к карте (мост VFS) и разбирает команду
 // Z80, поэтому кадр, пришедший во время обмена с картой, видит транспорт моста.
@@ -58,6 +65,7 @@
 #include <string.h>
 
 #include <windows.h>
+#include <bcrypt.h>
 #include <mmsystem.h>
 #include <wincodec.h>
 #include <winhttp.h>
@@ -71,8 +79,10 @@
 #include <thread>
 #include <vector>
 
+#include "zifi/board.hpp"
 #include "zifi/config.hpp"
 #include "zifi/cover_art.hpp"
+#include "zifi/ota_image.hpp"
 #include "zifi/protocol.hpp"
 #include "zifi/resource_disk_cache.hpp"
 #include "zifi/weather_parse.hpp"
@@ -624,7 +634,12 @@ uint8_t coreVolume() {
 
 uint16_t corePcmFaults() { return 0; }
 
-int16_t coreTemperature() { return 452; }   // 45,2 °C: индикатор плагина в Unreal
+// Температура кристалла для индикатора плагина, десятые °C: 45,2 °C или
+// VDAC4_TEMP=<°C> (проверка жёлтого и красного цвета в плеере).
+int16_t coreTemperature() {
+  const char* text = getenv("VDAC4_TEMP");
+  return text ? static_cast<int16_t>(atof(text) * 10.0) : 452;
+}
 
 // --- сеть (net_*): интернет-радио через WinHTTP ------------------------------------------
 // Как ядро прошивки (src/http_stream.cpp): GET с заголовками модуля, переадресации — сам
@@ -1720,10 +1735,19 @@ void handleNetNtp() {
   send(kRespNetNtp, reinterpret_cast<const uint8_t*>(text), 14);
 }
 
+// Версия «установленной» прошивки: VDAC4_FW_VERSION или vdac4-unreal; модель
+// онлайн-обновления меняет её на поставленную.
+std::mutex firmwareVersionLock;
+std::string& installedVersionSlot();
+std::string firmwareVersion() {
+  std::lock_guard<std::mutex> lock(firmwareVersionLock);
+  return installedVersionSlot();
+}
+
 void handleSysInfo() {
   send(kAck);
-  static const char kInfo[] = "RAM:host Flash:host FW:vdac4-unreal";
-  send(kRespSysInfo, reinterpret_cast<const uint8_t*>(kInfo), sizeof(kInfo) - 1);
+  const std::string info = "RAM:host Flash:host FW:" + firmwareVersion();
+  send(kRespSysInfo, reinterpret_cast<const uint8_t*>(info.data()), static_cast<uint16_t>(info.size()));
 }
 
 // Прокси выключен: [0].
@@ -1856,6 +1880,262 @@ void handleWcu(const PacketView& packet) {
               std::vector<uint8_t>(packet.data, packet.data + packet.length)).detach();
 }
 
+// --- обновление прошивки с GitHub: ONLINE_UPDATE_CHECK, ONLINE_UPDATE ---------------
+// Как Application::processOnlineUpdateCheck/processOnlineUpdate и OnlineUpdater
+// прошивки: ACK, работа на «сетевом ядре» (здесь — поток), события
+// ONLINE_UPDATE_PROGRESS [этап][проценты] (1 — манифест, 2 — образ, 3 — проверка),
+// отказ — доклад #EE «update-check:…» / «update:…» и ответ [0]. Ответ CHECK —
+// [1][отношение][версия], ONLINE_UPDATE — [1][SHA-256 образа]. Образ проверяется
+// целиком, но не пишется никуда; затем — модель перезапуска (как SYS_RESET).
+constexpr char kGithubRawHost[] = "raw.githubusercontent.com";
+
+std::string& installedVersionSlot() {
+  static std::string version = getenv("VDAC4_FW_VERSION") ? getenv("VDAC4_FW_VERSION") : "vdac4-unreal";
+  return version;
+}
+
+void onlineProgress(uint8_t stage, uint8_t percent) {
+  const uint8_t data[2] = {stage, percent};
+  send(kEventOnlineUpdateProgress, data, 2);
+}
+
+// Манифест: строка «VERSION версия» и строка sha256sum для firmware.bin (как
+// parseManifest прошивки: повтор строки — отказ).
+bool parseOnlineManifest(const std::string& text, std::string& version, uint8_t digest[32]) {
+  bool haveVersion = false;
+  bool haveDigest = false;
+  size_t line = 0;
+  while (line < text.size()) {
+    size_t end = text.find_first_of("\r\n", line);
+    if (end == std::string::npos) end = text.size();
+    size_t at = line;
+    while (at < end && (text[at] == ' ' || text[at] == '\t')) ++at;
+    if (end - at > 7 && text.compare(at, 7, "VERSION") == 0 && (text[at + 7] == ' ' || text[at + 7] == '\t')) {
+      if (haveVersion) return false;
+      at += 7;
+      while (at < end && (text[at] == ' ' || text[at] == '\t')) ++at;
+      size_t stop = end;
+      while (stop > at && (text[stop - 1] == ' ' || text[stop - 1] == '\t')) --stop;
+      version = text.substr(at, stop - at);
+      if (version.empty() || version.size() >= 32) return false;
+      for (char c : version) {
+        if (!isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '_' && c != '+' && c != '-') return false;
+      }
+      haveVersion = true;
+    } else if (end - at >= 64) {
+      uint8_t parsed[32];
+      bool valid = true;
+      for (int i = 0; i < 32 && valid; ++i) {
+        unsigned value = 0;
+        valid = sscanf(text.substr(at + i * 2, 2).c_str(), "%2x", &value) == 1 &&
+                isxdigit(static_cast<unsigned char>(text[at + i * 2])) &&
+                isxdigit(static_cast<unsigned char>(text[at + i * 2 + 1]));
+        parsed[i] = static_cast<uint8_t>(value);
+      }
+      at += 64;
+      if (valid && at < end && (text[at] == ' ' || text[at] == '\t')) {
+        while (at < end && (text[at] == ' ' || text[at] == '\t')) ++at;
+        if (at < end && text[at] == '*') ++at;
+        size_t stop = at;
+        while (stop < end && text[stop] != ' ' && text[stop] != '\t') ++stop;
+        if (text.compare(at, stop - at, "firmware.bin") == 0 && stop - at == 12) {
+          if (haveDigest) return false;
+          memcpy(digest, parsed, 32);
+          haveDigest = true;
+        }
+      }
+    }
+    line = end;
+    while (line < text.size() && (text[line] == '\r' || text[line] == '\n')) ++line;
+  }
+  return haveVersion && haveDigest;
+}
+
+// Формат номера версии VDAC4 — как board::kReleaseVersionFormat (namespace board
+// есть только при ZIFI_BOARD_VDAC4, а эта программа собирается без него).
+constexpr char kHostReleaseVersionFormat[] = "vdac4-%u.%u.%u%n";
+
+// Отношение опубликованной версии к установленной — как comparePublishedVersion.
+uint8_t compareOnlineVersion(const std::string& installed, const std::string& published) {
+  if (installed == published) return kOnlineUpdateSame;
+  unsigned a[3] = {}, b[3] = {};
+  int used = 0;
+  if (sscanf(installed.c_str(), kHostReleaseVersionFormat, &a[0], &a[1], &a[2], &used) != 3 ||
+      installed[used] != 0) {
+    return kOnlineUpdateDifferent;
+  }
+  used = 0;
+  if (sscanf(published.c_str(), kHostReleaseVersionFormat, &b[0], &b[1], &b[2], &used) != 3 ||
+      published[used] != 0) {
+    return kOnlineUpdateDifferent;
+  }
+  for (int i = 0; i < 3; ++i) {
+    if (a[i] != b[i]) return b[i] > a[i] ? kOnlineUpdateNewer : kOnlineUpdateOlder;
+  }
+  return kOnlineUpdateDifferent;
+}
+
+bool onlineLoadManifest(std::string& version, uint8_t digest[32], char* error, size_t size) {
+  onlineProgress(1, 0);
+  static uint8_t buffer[4096];
+  size_t length = 0;
+  uint16_t status = 0;
+  if (!wcuHttpGet(kGithubRawHost, ZIFI_UPDATE_DIRECTORY "firmware.sha256", buffer, sizeof(buffer) - 1,
+                  length, status, error, size, nullptr)) {
+    return false;
+  }
+  if (status < 200 || status >= 300) {
+    snprintf(error, size, "manifest http %u", static_cast<unsigned>(status));
+    return false;
+  }
+  if (!parseOnlineManifest(std::string(reinterpret_cast<char*>(buffer), length), version, digest)) {
+    snprintf(error, size, "manifest version or sha");
+    return false;
+  }
+  onlineProgress(1, 100);
+  return true;
+}
+
+// firmware.bin потоком: заголовок — проверка образа ESP32-S3 этой платы, всё — в SHA-256.
+bool onlineDownload(const uint8_t expected[32], uint8_t digest[32], char* error, size_t size) {
+  onlineProgress(2, 0);
+  char url[512];
+  snprintf(url, sizeof(url), "https://%s%sfirmware.bin", kGithubRawHost, ZIFI_UPDATE_DIRECTORY);
+  int code = 0;
+  HostNet* net = netOpen(url, "Accept-Encoding: identity", 60000, &code, true);
+  if (net == nullptr) {
+    snprintf(error, size, "no connection");
+    return false;
+  }
+  if (code < 200 || code >= 300) {
+    netFree(net);
+    snprintf(error, size, "firmware http %d", code);
+    return false;
+  }
+  const char* lengthText = coreNetHeader(net, "Content-Length");
+  const unsigned long total = lengthText != nullptr ? strtoul(lengthText, nullptr, 10) : 0;
+  if (total < 112 || total > 0x300000) {
+    netFree(net);
+    snprintf(error, size, "firmware does not fit");
+    return false;
+  }
+  BCRYPT_ALG_HANDLE algorithm = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0 ||
+      BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0) != 0) {
+    if (algorithm != nullptr) BCryptCloseAlgorithmProvider(algorithm, 0);
+    netFree(net);
+    snprintf(error, size, "sha256 init");
+    return false;
+  }
+  std::vector<uint8_t> header;
+  std::vector<uint8_t> chunk(16 * 1024);
+  unsigned long received = 0;
+  int shown = 0;
+  bool ok = true;
+  while (received < total) {
+    const int got = coreNetRead(net, chunk.data(), static_cast<uint32_t>(chunk.size()), 30000);
+    if (got <= 0) {
+      snprintf(error, size, "firmware short body");
+      ok = false;
+      break;
+    }
+    if (header.size() < 112) {
+      header.insert(header.end(), chunk.begin(), chunk.begin() + (got < 112 ? got : 112));
+      if (header.size() >= 112 && !zifi::isEsp32S3ApplicationImage(header.data(), header.size())) {
+        snprintf(error, size, "not ESP32-S3 application");
+        ok = false;
+        break;
+      }
+    }
+    BCryptHashData(hash, chunk.data(), static_cast<ULONG>(got), 0);
+    received += static_cast<unsigned long>(got);
+    const int percent = static_cast<int>(received * 100ull / total);
+    if (percent != shown) {
+      shown = percent;
+      onlineProgress(2, static_cast<uint8_t>(percent));
+    }
+  }
+  netFree(net);
+  if (ok) {
+    onlineProgress(3, 0);
+    BCryptFinishHash(hash, digest, 32, 0);
+    if (memcmp(digest, expected, 32) != 0) {
+      snprintf(error, size, "sha256 mismatch");
+      ok = false;
+    } else {
+      onlineProgress(3, 100);
+    }
+  }
+  BCryptDestroyHash(hash);
+  BCryptCloseAlgorithmProvider(algorithm, 0);
+  return ok;
+}
+
+void processOnlineUpdate(uint8_t command) {
+  const bool check = command == kOnlineUpdateCheck;
+  const uint8_t response = check ? kRespOnlineUpdateCheck : kRespOnlineUpdate;
+  const char* prefix = check ? "update-check" : "update";
+  char error[64] = {};
+  std::string version;
+  uint8_t expected[32] = {};
+  uint8_t digest[32] = {};
+  wifiPoll();
+  bool ok = false;
+  if (!wifi.connected) {
+    snprintf(error, sizeof(error), "no wifi");
+  } else if (onlineLoadManifest(version, expected, error, sizeof(error))) {
+    ok = check || onlineDownload(expected, digest, error, sizeof(error));
+  }
+  if (!ok) {
+    char text[80];
+    snprintf(text, sizeof(text), "%s:%s", prefix, error);
+    hostLog("zifi-ota", "%s", text);
+    sendError(text);
+    const uint8_t failed = 0;
+    send(response, &failed, 1);
+    networkBusy = false;
+    return;
+  }
+  if (check) {
+    std::vector<uint8_t> reply = {1, compareOnlineVersion(firmwareVersion(), version)};
+    reply.insert(reply.end(), version.begin(), version.end());
+    hostLog("zifi-ota", "check: installed %s, published %s, relation %u", firmwareVersion().c_str(),
+            version.c_str(), reply[1]);
+    send(response, reply.data(), static_cast<uint16_t>(reply.size()));
+    networkBusy = false;
+    return;
+  }
+  uint8_t reply[33] = {1};
+  memcpy(reply + 1, digest, 32);
+  send(response, reply, sizeof(reply));
+  hostLog("zifi-ota", "update: firmware.bin %s verified (SHA-256 ok), nothing written; restart modelled",
+          version.c_str());
+  // Перезапуск: ответ ушёл, прошивка перезагружается в новый раздел. Модель — как
+  // SYS_RESET (Wi-Fi с известной сетью заново) и новая версия в SYS_INFO.
+  Sleep(1500);
+  {
+    std::lock_guard<std::mutex> lock(firmwareVersionLock);
+    installedVersionSlot() = version;
+  }
+  const bool knownNetwork = !wifi.activeSsid.empty() || wifi.bootOnline;
+  wifi.connected = false;
+  wifi.readyAt = knownNetwork ? uptimeMs() + wifi.connectMs : 0;
+  wifi.beganMs = knownNetwork ? (uptimeMs() | 1) : 0;
+  networkBusy = false;
+}
+
+void handleOnlineUpdate(const PacketView& packet) {
+  send(kAck);
+  if (networkBusy.exchange(true)) {
+    sendError("network busy");
+    const uint8_t failed = 0;
+    send(packet.command == kOnlineUpdateCheck ? kRespOnlineUpdateCheck : kRespOnlineUpdate, &failed, 1);
+    return;
+  }
+  std::thread(processOnlineUpdate, packet.command).detach();
+}
+
 // SYS_CLOCK: [год LE16][месяц][число][часы][минуты][секунды] — местное время с RTC Evo.
 // Проверка — как Application::handleSysClock прошивки (дата позже 1.10.2026); часы ПК
 // не трогаются, итог — в журнал.
@@ -1945,14 +2225,16 @@ void handlePacketBody(const PacketView& packet) {
     case kSmbStop:
     case kUpdateStart:
     case kUpdateStop:
-    case kOnlineUpdateCheck:
-    case kOnlineUpdate:
     case kNetOpen:
     case kNetSend:
     case kNetPing:
     case kNetIpConfig:
     case kSysReset:
       handleReset();
+      break;
+    case kOnlineUpdateCheck:
+    case kOnlineUpdate:
+      handleOnlineUpdate(packet);
       break;
     case kSysClock:
       handleSysClock(packet);

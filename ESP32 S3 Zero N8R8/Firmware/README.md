@@ -47,6 +47,17 @@ python tools/esp_tool.py --net <IP платы>
 SHA-256, переключает раздел OTA и перезапускается, при неудаче остаётся прежняя
 прошивка.
 
+## Обновление с GitHub
+
+Без ПК: плагин WC `VDAC4UPD.WMF`
+([`../Network/Online Update`](../Network/Online%20Update/README.md)). ESP сама
+читает [`firmware/vdac4/firmware.sha256`](firmware/vdac4/firmware.sha256) и
+`firmware.bin` из ветки `main` этого репозитория, сверяет SHA-256 и
+перезапускается; опубликованная версия старше установленной не ставится. Адрес
+публикации — `ZIFI_UPDATE_DIRECTORY` в `include/zifi/board.hpp`; на этот
+репозиторий он указывает с `vdac4-0.1.50`, прошивку старше один раз обновляют по
+сети с ПК.
+
 ## Сборка
 
 Нужны ESP-IDF 6.0 (Arduino-ядро 3.3.12 подключается менеджером компонентов),

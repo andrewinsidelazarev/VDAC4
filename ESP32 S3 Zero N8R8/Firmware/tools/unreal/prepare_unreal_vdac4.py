@@ -9,7 +9,7 @@ ESP, банк MIDI (MIDI.SF2 — TimGM6mb из E:\\zx\\esp\\soundfonts) и ПЗ�
 
 Запуск: python tools/unreal/prepare_unreal_vdac4.py [--fresh-image] [--media IT,MOD]
                                                 [--weather | --weather2] [--wcu [--wcu-stale]]
-                                                [--ntp]
+                                                [--ntp] [--online]
 (--media — только эти папки unreal_media: в образе 100 МБ всё сразу не помещается;
 --weather — заставка погоды VDAC4WTH.WMF первой в [PLUGINS], ScreenSaver=1 и
 тестовый /zifi/zifi.ini: сеть и город для модели WIFI_INI и WEATHER_GET хоста ESP;
@@ -25,6 +25,10 @@ main). --wcu-stale — в образе один файл WC (STALE_FILE) отл�
 [PLUGINS] и тестовый /zifi/zifi.ini; с VDAC4_NTP=fail у хоста ESP NTP не отвечает, и
 плагин выставляет часы ESP по RTC Evo (SYS_CLOCK, в журнале хоста). Флешку модуля
 изображает папка из VDAC4_USB (кэш ресурсов музыки, прошивка 0.1.43).
+--online — плагин VDAC4 Online Update VDAC4UPD.WMF в /WC и в [PLUGINS] и тестовый
+/zifi/zifi.ini; хост ESP читает настоящие манифест и firmware.bin с GitHub (репозиторий
+VDAC4), проверяет образ и SHA-256 и ничего не пишет. «Установленную» версию задаёт
+VDAC4_FW_VERSION (по умолчанию vdac4-unreal — другая сборка).
 """
 import argparse
 import re
@@ -88,6 +92,7 @@ WEATHERS = {"ts": NETWORK / "Weather screensaver" / "build" / "vdac4" / "VDAC4WT
 ZIFI_INI = "ssid: unreal\r\npassword: test1234\r\ntime: 3\r\ncity: Kyiv\r\ncountry: UA\r\n"
 WCU = NETWORK / "WC Update" / "build" / "vdac4" / "VDAC4WCU.WMF"
 NTP = NETWORK / "NTP Time Sync" / "build" / "vdac4" / "VDAC4NTP.WMF"
+UPD = NETWORK / "Online Update" / "build" / "vdac4" / "VDAC4UPD.WMF"
 # Файл WC, который --wcu-stale портит: двоичный и в [PLUGINS] закомментирован — WC его при
 # запуске не грузит. Текстовые файлы (.LIC, .txt) не годятся: из git они выходят с CRLF
 # и отличаются от GitHub уже длиной.
@@ -95,7 +100,8 @@ STALE_FILE = "SCRSAVER.WMF"
 
 
 def image(fresh: bool, media: set[str] | None = None, weather: str | None = None,
-          wcu: bool = False, stale: bool = False, ntp: bool = False) -> None:
+          wcu: bool = False, stale: bool = False, ntp: bool = False,
+          online: bool = False) -> None:
     target = RUN / "vdac4_sd.img"
     if fresh or not target.exists():
         shutil.copy2(UNREAL / "wc.img", target)
@@ -138,6 +144,8 @@ def image(fresh: bool, media: set[str] | None = None, weather: str | None = None
         lines.insert(lines.index("VDAC4MP3.WMF") + 1, WCU.name)
     if ntp and NTP.name not in lines:
         lines.insert(lines.index("VDAC4MP3.WMF") + 1, NTP.name)
+    if online and UPD.name not in lines:
+        lines.insert(lines.index("VDAC4MP3.WMF") + 1, UPD.name)
     config = newline.join(lines)
     temp = RUN / "wc.ini.tmp"
     temp.write_bytes(config.encode("cp866"))
@@ -148,9 +156,11 @@ def image(fresh: bool, media: set[str] | None = None, weather: str | None = None
         img.write_file(wc_dir, WCU.name, WCU)
     if ntp:
         img.write_file(wc_dir, NTP.name, NTP)
+    if online:
+        img.write_file(wc_dir, UPD.name, UPD)
     if weather:
         img.write_file(wc_dir, saver, WEATHERS[weather])
-    if weather or wcu or ntp:
+    if weather or wcu or ntp or online:
         zifi = img.ensure_dir(root, "zifi")
         temp = RUN / "zifi.ini.tmp"
         temp.write_bytes(ZIFI_INI.encode("ascii"))
@@ -191,6 +201,8 @@ def main() -> None:
                         help="плагин WC Update VDAC4WCU.WMF и тестовый /zifi/zifi.ini")
     parser.add_argument("--ntp", action="store_true",
                         help="плагин NTP Time Sync VDAC4NTP.WMF и тестовый /zifi/zifi.ini")
+    parser.add_argument("--online", action="store_true",
+                        help="плагин VDAC4 Online Update VDAC4UPD.WMF и тестовый /zifi/zifi.ini")
     parser.add_argument("--wcu-stale", action="store_true",
                         help=f"{STALE_FILE} в образе отличается одним байтом (есть что обновить)")
     args = parser.parse_args()
@@ -208,7 +220,7 @@ def main() -> None:
     image(args.fresh_image,
           {name.strip().upper() for name in args.media.split(",")} if args.media else None,
           "ft812" if args.weather2 else ("ts" if args.weather else None),
-          args.wcu, args.wcu_stale, args.ntp)
+          args.wcu, args.wcu_stale, args.ntp, args.online)
     print(RUN)
 
 
