@@ -31,6 +31,15 @@ _netrc
 # Рабочая память проекта: только локально.
 MEMORY.md
 
+# Прошивка Tang (Gowin, Icarus): каталоги сборки и симуляции. Готовое ядро
+# Firmware/firmware/*.fs хранится.
+/Tang Nano 20k/Firmware/impl/
+/Tang Nano 20k/Firmware/gowin/
+/Tang Nano 20k/Firmware/sim/
+*.vvp
+*.vcd
+*.ppm
+
 # Прошивка (ESP-IDF): каталог сборки, sdkconfig и то, что скачивает менеджер
 # компонентов. dependencies.lock хранится: он закрепляет версии компонентов.
 /ESP32 S3 Zero N8R8/Firmware/build/

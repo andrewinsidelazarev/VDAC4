@@ -14,6 +14,8 @@ ESP32-S3-Zero-N8R8 и ЦАП PCM5102. ESP32-S3 подключена к Evo по 
 | [`ESP32 S3 Zero N8R8/Firmware`](ESP32%20S3%20Zero%20N8R8/Firmware) | прошивка ESP32-S3: канал SPI, Wi-Fi, серверы, вывод звука, загрузчик модулей |
 | [`ESP32 S3 Zero N8R8/Network`](ESP32%20S3%20Zero%20N8R8/Network) | сетевые программы Z80: `zifi.spg`, плагины FTP, SMB, NTP, WC Update, заставки погоды, утилиты |
 | [`ESP32 S3 Zero N8R8/Sound`](ESP32%20S3%20Zero%20N8R8/Sound) | VDAC4 Media Player: модули ESP (декодеры) и плагин |
+| [`Tang Nano 20k/Docs`](Tang%20Nano%2020k/Docs) | Tang Nano 20K: кадровый буфер TS-Config → HDMI 720p50, LINK с ESP, настройки во flash Tang, обновление через ESP ([`a3-fpga-framebuffer.md`](Tang%20Nano%2020k/Docs/a3-fpga-framebuffer.md)); генлок-тракт ([`a3-fpga-video.md`](Tang%20Nano%2020k/Docs/a3-fpga-video.md)); распиновка ESP/Tang ([`a3-interface-pinmap.md`](Tang%20Nano%2020k/Docs/a3-interface-pinmap.md)) |
+| [`Tang Nano 20k/Firmware`](Tang%20Nano%2020k/Firmware) | прошивка Tang (GW2AR-18): RTL, тестбенчи, сборка в Gowin; готовое ядро [`firmware/ts_fb_hdmi_top.fs`](Tang%20Nano%2020k/Firmware/firmware/ts_fb_hdmi_top.fs) |
 
 Что нужно на стороне Evo — в
 [README сетевой части](ESP32%20S3%20Zero%20N8R8/Network/README.md#что-нужно).

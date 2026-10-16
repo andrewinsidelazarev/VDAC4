@@ -1,0 +1,70 @@
+// Физические ограничения: Tang Nano 20K (GW2AR-LV18QN88C8/I7) на carrier A3.1.
+//
+// Номера выводов carrier взяты из docs/a3-interface-pinmap.md (столбец FPGA),
+// выводы HDMI, кнопки и усилителя — из примеров Sipeed для Tang Nano 20K.
+// Не занимать здесь выводы 49 и 51 под carrier: 49 — бортовой, 51 — PA_EN усилителя.
+
+// ---------------------------------------------------------------------------
+// Видео с мультиплексоров U1/U2 (3,3 В, приходят через гребёнки J5/J6 модуля)
+// ---------------------------------------------------------------------------
+IO_LOC  "mux_d[0]" 27;
+IO_PORT "mux_d[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[1]" 28;
+IO_PORT "mux_d[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[2]" 29;
+IO_PORT "mux_d[2]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[3]" 30;
+IO_PORT "mux_d[3]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[4]" 41;
+IO_PORT "mux_d[4]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[5]" 42;
+IO_PORT "mux_d[5]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[6]" 48;
+IO_PORT "mux_d[6]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[7]" 54;
+IO_PORT "mux_d[7]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+
+// Управление выбором фазы мультиплексора: меандр 28 МГц
+IO_LOC  "mux_sel" 56;
+IO_PORT "mux_sel" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+
+// ---------------------------------------------------------------------------
+// Синхронизация и тактирование входа (через U3)
+// ---------------------------------------------------------------------------
+IO_LOC  "hsync_in" 15;
+IO_PORT "hsync_in" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "vsync_in" 16;
+IO_PORT "vsync_in" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+// PCLK от Evo; вывод 80 — глобальный клоковый вход GCLKT_0
+IO_LOC  "pclk_in" 80;
+IO_PORT "pclk_in" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+
+// Режим порта: 0 — базовое видео TS-Config, 1 — эмуляция FT812
+IO_LOC  "m_sel" 73;
+IO_PORT "m_sel" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+
+// ---------------------------------------------------------------------------
+// Обратные линии: в этой прошивке держатся неактивными
+// ---------------------------------------------------------------------------
+IO_LOC  "ft_int_n" 74;
+IO_PORT "ft_int_n" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+IO_LOC  "link_irq_n" 85;
+IO_PORT "link_irq_n" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+
+// ---------------------------------------------------------------------------
+// Бортовое: запрет усилителя звука (кнопки Tang не используются)
+// ---------------------------------------------------------------------------
+IO_LOC  "pa_en" 51;
+IO_PORT "pa_en" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=DOWN;
+
+// ---------------------------------------------------------------------------
+// HDMI: дифференциальные пары TMDS (эмулированный LVDS: ELVDS_OBUF + LVCMOS33D)
+// ---------------------------------------------------------------------------
+IO_LOC  "tmds_clk_p" 33,34;
+IO_PORT "tmds_clk_p" IO_TYPE=LVCMOS33D PULL_MODE=NONE DRIVE=8;
+IO_LOC  "tmds_data_p[0]" 35,36;
+IO_PORT "tmds_data_p[0]" IO_TYPE=LVCMOS33D PULL_MODE=NONE DRIVE=8;
+IO_LOC  "tmds_data_p[1]" 37,38;
+IO_PORT "tmds_data_p[1]" IO_TYPE=LVCMOS33D PULL_MODE=NONE DRIVE=8;
+IO_LOC  "tmds_data_p[2]" 39,40;
+IO_PORT "tmds_data_p[2]" IO_TYPE=LVCMOS33D PULL_MODE=NONE DRIVE=8;
