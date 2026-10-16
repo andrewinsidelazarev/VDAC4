@@ -57,6 +57,7 @@
 | [`NTP Time Sync/build/vdac4/VDAC4NTP.WMF`](NTP%20Time%20Sync/build/vdac4/VDAC4NTP.WMF) | `/WC` | часы RTC по NTP |
 | [`WC Update/build/vdac4/VDAC4WCU.WMF`](WC%20Update/build/vdac4/VDAC4WCU.WMF) | `/WC` | проверка и обновление Wild Commander с GitHub |
 | [`Online Update/build/vdac4/VDAC4UPD.WMF`](Online%20Update/build/vdac4/VDAC4UPD.WMF) | `/WC` | обновление прошивки ESP с GitHub ([README](Online%20Update/README.md)) |
+| [`Video Settings/build/vdac4/VDAC4VID.WMF`](Video%20Settings/build/vdac4/VDAC4VID.WMF) | `/WC` | настройки видеотракта Tang: экранное меню Tang с клавиатуры Evo ([README](Video%20Settings/README.md)) |
 | [`Weather screensaver/build/vdac4/VDAC4WTH.WMF`](Weather%20screensaver/build/vdac4/VDAC4WTH.WMF) | `/WC` | заставка: часы, календарь, погода |
 | [`Weather screensaver VDAC2/build/vdac4/VDAC4WT2.WMF`](Weather%20screensaver%20VDAC2/build/vdac4/VDAC4WT2.WMF) | `/WC` | та же заставка в 1024×768 на FT812 |
 | [`tools/esp_info_vdac4.sna`](tools/esp_info_vdac4.sna) | `/zifi/tools` | проверка связи с ESP и сведения о прошивке, без Wi-Fi |
@@ -86,6 +87,7 @@ city:Kyiv
 & ".\SMB Server\build.bat" vdac4
 & ".\NTP Time Sync\build.bat" vdac4
 & ".\WC Update\build.bat" vdac4
+& ".\Video Settings\build.bat"
 & ".\Weather screensaver\build.bat" vdac4
 & ".\Weather screensaver VDAC2\build.bat" vdac4
 & ".\tools\build_esp_info.bat"   # esp_info, update, dma_probe, audio_test

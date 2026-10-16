@@ -99,6 +99,15 @@ enum Command : uint8_t {
   kVfsReadDir = 0x42,
   kVfsFsInfo = 0x43,
   kVfsFatWindow = 0x44,
+
+  // Регистры Tang по LINK (tang_link.hpp) — для плагина настроек видео. Ответ сразу, без ACK.
+  // READ: [адрес LE16][число слов 1…16] -> kRespTangRead [1 — прочитано / 0 — нет LINK]
+  // [слова LE32]. WRITE: [адрес LE16][число слов][слова LE32] -> kRespTangWrite [1 / 0].
+  // Писать можно только регистры настроек SCRATCH 0x3C, CTRL 0x40, ADJUST 0x44, UI_KEY 0x50
+  // (нажатия для меню Tang, ядро 1.3) и таблицу поправок 0x60…0x7C: мост к flash Tang
+  // (0x48, 0x80…) с Z80 недоступен.
+  kTangRead = 0x45,
+  kTangWrite = 0x46,
   kVfsOpen = 0x50,
   kVfsRead = 0x51,
   kVfsWriteLegacy = 0x52,
@@ -160,6 +169,8 @@ enum Command : uint8_t {
   kRespWcuApply = 0xA6,  // [1 — принято]
   kRespWcuStop = 0xA7,   // [1 — сеанс остановлен]
   kRespSysClock = 0xA9,  // [1 — часы ESP выставлены, 0 — время негодное]
+  kRespTangRead = 0xC5,  // [1 — прочитано / 0 — LINK к Tang не работает][слова LE32]
+  kRespTangWrite = 0xC6, // [1 — записано / 0 — нет LINK или регистр не настройка]
   kRespWcuSync = 0xA8,   // [1 — повтор списка поставлен в очередь]
   kRespAudioView = 0xAF,    // [вид][число][длительность с LE16][позиция с LE16][значения 0..12]
   kRespAudioOpen = 0xB0,    // [1 — поток открыт][свободно LE32]

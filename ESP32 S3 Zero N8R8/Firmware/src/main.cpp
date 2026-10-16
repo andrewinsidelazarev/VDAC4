@@ -32,6 +32,8 @@
 #include "zifi/elf_probe.hpp"
 #include "zifi/ftp_server.hpp"
 #include "zifi/link_watchdog.hpp"
+#include "zifi/tang_link.hpp"
+#include "zifi/tang_update.hpp"
 #include "zifi/net_client.hpp"
 #include "zifi/crash_record.hpp"
 #include "zifi/net_console.hpp"
@@ -274,6 +276,10 @@ class Application : private AppHost {
   // Пояс ESP — из time: файла zifi.ini (localtime, время файлов на флешке).
   void applyTimezone();
   void handleSysClock(const PacketView& packet);
+#if ZIFI_HAS_SPI_LINK
+  void handleTangRead(const PacketView& packet);
+  void handleTangWrite(const PacketView& packet);
+#endif
   void pollNetworkResponse();
   void pollNetworkEvent();
   bool submitNetwork(uint8_t command, const uint8_t* data, uint16_t length);
@@ -496,6 +502,8 @@ void Application::begin() {
 #endif
   // Сетевая консоль (порт 23) и причина прошлой паники — сразу после журнала.
   netConsoleBegin(ZIFI_BUILD_VERSION);
+  // Обновление прошивки Tang по сети (порт 8268, tools/tang_tool.py)
+  tangUpdateBegin();
   crashRecordReport();
 
   for (App* app : apps_) {
@@ -529,6 +537,8 @@ void Application::begin() {
 #if ZIFI_HAS_SPI_LINK
   // Сторож обмена: встала задача обмена — запись в журнал и перезапуск ESP.
   startLinkWatchdog(link_, vfsBridge_);
+  // LINK к Tang: ждёт питания Tang, выбирает частоту, следит за состоянием Tang
+  tang::start();
 #endif
 
   if (xTaskCreatePinnedToCore(networkTaskEntry, "zifi-net",
@@ -1551,7 +1561,7 @@ void Application::handleSysInfo() {
                        : (proxyStatus_ == 2 ? "UNREACHABLE" : "OFF");
   // Поля разделены пробелом, значение — до следующего пробела. FW: должно
   // оставаться последним: плагины берут версию от него до конца строки.
-  char extra[128] = {};
+  char extra[160] = {};
 #if ZIFI_HAS_SPI_LINK
   {
     const SpiLinkCore::Stats link = link_.stats();
@@ -1559,18 +1569,20 @@ void Application::handleSysInfo() {
 #if ZIFI_HAS_AUDIO
     audioApp_.describe(audio, sizeof(audio));
 #endif
+    char tangText[24] = {};
+    tang::describe(tangText, sizeof(tangText));
     // LINK: обменов / повторов запроса / испорченных запросов / блоков DMA к
     // Z80 / из них не прошедших сравнение / блоков DMA от Z80 / из них
     // отвергнутых.
     snprintf(extra, sizeof(extra),
-             "BOARD:%s IDF:%s LINK:%u/%u/%u/%u/%u/%u/%u AUDIO:%s ", board::kName,
+             "BOARD:%s IDF:%s LINK:%u/%u/%u/%u/%u/%u/%u AUDIO:%s TANG:%s ", board::kName,
              esp_get_idf_version(), static_cast<unsigned>(link.turns),
              static_cast<unsigned>(link.repeats),
              static_cast<unsigned>(link.badRequests),
              static_cast<unsigned>(link.bulkBlocks),
              static_cast<unsigned>(link.bulkBad),
              static_cast<unsigned>(link.putBlocks),
-             static_cast<unsigned>(link.putBad), audio);
+             static_cast<unsigned>(link.putBad), audio, tangText);
   }
 #endif
   const int length = snprintf(
@@ -1620,6 +1632,57 @@ void Application::applyTimezone() {
 // [год LE16][месяц][число][часы][минуты][секунды] — местное время → [1 / 0].
 // Часы Evo, которые сбились (батарейка, первое включение), показывают давнюю дату:
 // годным считается только время позже 1 октября 2026 года.
+#if ZIFI_HAS_SPI_LINK
+// Регистры Tang для Z80 (плагин настроек видео): [адрес LE16][число слов][слова LE32].
+void Application::handleTangRead(const PacketView& packet) {
+  uint8_t reply[1 + 16 * 4] = {};
+  size_t count = packet.length >= 3 ? packet.data[2] : 0;
+  const uint32_t address = packet.length >= 2 ? (packet.data[0] | (packet.data[1] << 8)) : 0;
+  uint32_t words[16] = {};
+  const bool ok = count >= 1 && count <= 16 && (address & 3) == 0 && address + count * 4 <= 0x100 &&
+                  tang::read(address, words, count);
+  if (!ok) {
+    count = 0;
+  }
+  reply[0] = ok ? 1 : 0;
+  for (size_t i = 0; i < count; ++i) {
+    for (int b = 0; b < 4; ++b) {
+      reply[1 + i * 4 + b] = static_cast<uint8_t>(words[i] >> (8 * b));
+    }
+  }
+  transport_.send(kRespTangRead, reply, static_cast<uint16_t>(1 + count * 4));
+}
+
+// Писать можно только регистры настроек: SCRATCH, CTRL, ADJUST и таблицу поправок по
+// растрам. Мост к flash Tang (FLASH_CMD 0x48, буфер 0x80…) Z80 не достаётся.
+static bool tangSettingRegister(uint32_t address) {
+  return address == tang::kRegScratch || address == tang::kRegCtrl ||
+         address == tang::kRegAdjust || address == tang::kRegUiKey ||
+         (address >= tang::kRegAdjTable && address < tang::kRegAdjTable + 32);
+}
+
+void Application::handleTangWrite(const PacketView& packet) {
+  const size_t count = packet.length >= 3 ? packet.data[2] : 0;
+  const uint32_t address = packet.length >= 2 ? (packet.data[0] | (packet.data[1] << 8)) : 0;
+  bool ok = count >= 1 && count <= 16 && (address & 3) == 0 && packet.length == 3 + count * 4;
+  uint32_t words[16] = {};
+  for (size_t i = 0; ok && i < count; ++i) {
+    ok = tangSettingRegister(address + i * 4);
+    const uint8_t* d = packet.data + 3 + i * 4;
+    words[i] = d[0] | (d[1] << 8) | (d[2] << 16) | (static_cast<uint32_t>(d[3]) << 24);
+  }
+  // Бит 9 CTRL — запуск калибровки SD READ: из плагина не запускается
+  for (size_t i = 0; ok && i < count; ++i) {
+    if (address + i * 4 == tang::kRegCtrl) {
+      words[i] &= ~(1U << 9);
+    }
+  }
+  ok = ok && tang::write(address, words, count);
+  const uint8_t reply = ok ? 1 : 0;
+  transport_.send(kRespTangWrite, &reply, 1);
+}
+#endif
+
 void Application::handleSysClock(const PacketView& packet) {
   uint8_t ok = 0;
   if (packet.length >= 7) {
@@ -1728,6 +1791,12 @@ void Application::handle(const PacketView& packet) {
       handleSysClock(packet);
       break;
 #if ZIFI_HAS_SPI_LINK
+    case kTangRead:
+      handleTangRead(packet);
+      break;
+    case kTangWrite:
+      handleTangWrite(packet);
+      break;
     case kLinkProbe: {
       // [действие][длина LE16][зерно узора] -> SpiLink::dmaProbe.
       SpiLink::DmaProbeResult probe = {SpiLink::kDmaProbeFailed, 0, 0, 0};

@@ -4,6 +4,7 @@
 
 #include <WiFi.h>
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -14,6 +15,8 @@
 #include <string.h>
 
 #include "zifi/diagnostic_log.hpp"
+#include "zifi/tang_flash.hpp"
+#include "zifi/tang_link.hpp"
 
 namespace zifi {
 namespace {
@@ -93,6 +96,89 @@ bool sendStoredLog(int client) {
   return ok;
 }
 
+// Регистры Tang по LINK (tang_link.hpp): сводка, чтение и запись одного слова.
+bool runTang(int client, const char* arguments) {
+  if (!tang::ready()) {
+    return sendText(client, "tang: LINK is not ready\n");
+  }
+  unsigned address = 0;
+  unsigned value = 0;
+  char verb[8] = {};
+  if (sscanf(arguments, " %7s", verb) == 1 && strcmp(verb, "flash") == 0) {
+    char text[120];
+    tang_flash::describe(text, sizeof(text));
+    return sendText(client, "tang %s\n", text);
+  }
+  unsigned rounds = 0;
+  if (sscanf(arguments, " test %u", &rounds) == 1) {
+    // Проверка канала: запись и чтение SCRATCH и чтение 16 слов со сверкой ID и SCRATCH
+    if (rounds == 0 || rounds > 1000000) {
+      rounds = 10000;
+    }
+    unsigned bad = 0;
+    const uint32_t started = millis();
+    for (unsigned round = 0; round < rounds; ++round) {
+      const uint32_t pattern = esp_random();
+      uint32_t back = 0;
+      uint32_t block[16] = {};
+      if (!tang::write(tang::kRegScratch, &pattern, 1) || !tang::read(tang::kRegScratch, &back, 1) ||
+          back != pattern || !tang::read(tang::kRegId, block, 16) ||
+          block[0] != tang::kIdValue || block[tang::kRegScratch / 4] != pattern) {
+        ++bad;
+      }
+      if ((round & 255) == 255) {
+        vTaskDelay(1);
+      }
+    }
+    return sendText(client, "tang test: %u of %u rounds bad, %u ms, %u kHz\n", bad, rounds,
+                    static_cast<unsigned>(millis() - started),
+                    static_cast<unsigned>(tang::clockHz() / 1000));
+  }
+  if (sscanf(arguments, " wr %x %x", &address, &value) == 2) {
+    const uint32_t word = value;
+    uint32_t back = 0;
+    if (!tang::write(address & ~3U, &word, 1) || !tang::read(address & ~3U, &back, 1)) {
+      return sendText(client, "tang: transfer failed\n");
+    }
+    return sendText(client, "tang %02X <- %08X, reads %08X\n", address & ~3U,
+                    static_cast<unsigned>(word), static_cast<unsigned>(back));
+  }
+  if (sscanf(arguments, " rd %x", &address) == 1) {
+    uint32_t word = 0;
+    if (!tang::read(address & ~3U, &word, 1)) {
+      return sendText(client, "tang: transfer failed\n");
+    }
+    return sendText(client, "tang %02X = %08X\n", address & ~3U, static_cast<unsigned>(word));
+  }
+  if (arguments[0] != 0) {
+    return sendText(client,
+                    "tang [rd ADDR | wr ADDR VALUE | flash], hex; no arguments: summary\n");
+  }
+  uint32_t r[8] = {};
+  uint32_t c[2] = {};
+  if (!tang::read(tang::kRegStatus, r, 8) || !tang::read(tang::kRegCtrl, c, 2)) {
+    return sendText(client, "tang: transfer failed\n");
+  }
+  static const char* const kSources[] = {"AUTO", "EVO", "TEST", "?"};
+  return sendText(client, "tang 08..24: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+                  static_cast<unsigned>(r[0]), static_cast<unsigned>(r[1]),
+                  static_cast<unsigned>(r[2]), static_cast<unsigned>(r[3]),
+                  static_cast<unsigned>(r[4]), static_cast<unsigned>(r[5]),
+                  static_cast<unsigned>(r[6]), static_cast<unsigned>(r[7])) &&
+         sendText(client,
+                  "tang CTRL %08X: source %s, MUX phase %u delay %u clock %X, align %u, "
+                  "SD read %u, OSD %u, aspect %s, size %s; ADJUST %08X: h %d v %d; %u kHz\n",
+                  static_cast<unsigned>(c[0]), kSources[c[0] & 3],
+                  static_cast<unsigned>((c[0] >> 2) & 1), static_cast<unsigned>(((c[0] >> 3) & 3) + 1),
+                  static_cast<unsigned>((c[0] >> 10) & 0xF), static_cast<unsigned>((c[0] >> 5) & 1),
+                  static_cast<unsigned>((c[0] >> 6) & 3), static_cast<unsigned>((c[0] >> 8) & 1),
+                  ((c[0] >> 14) & 1) ? "16:9" : "4:3",
+                  ((c[0] >> 15) & 3) == 1 ? "95%" : ((c[0] >> 15) & 3) == 2 ? "90%" : "100%",
+                  static_cast<unsigned>(c[1]), static_cast<int>(static_cast<int8_t>(c[1] & 0xFF)),
+                  static_cast<int>(static_cast<int8_t>((c[1] >> 8) & 0xFF)),
+                  static_cast<unsigned>(tang::clockHz() / 1000));
+}
+
 bool runCommand(int client, const char* command) {
   if (strcmp(command, "mem") == 0) {
     return sendText(client,
@@ -112,8 +198,13 @@ bool runCommand(int client, const char* command) {
   if (strcmp(command, "log") == 0) {
     return sendStoredLog(client);
   }
+  if (strncmp(command, "tang", 4) == 0 && (command[4] == 0 || command[4] == ' ')) {
+    return runTang(client, command + 4);
+  }
   if (command[0] != 0) {
-    return sendText(client, "commands: help, mem, ver, log (stored log from flash)\n");
+    return sendText(client,
+                    "commands: help, mem, ver, log (stored log from flash), "
+                    "tang [rd ADDR | wr ADDR VALUE] (Tang registers over LINK)\n");
   }
   return true;
 }
@@ -124,11 +215,12 @@ void serve(int client) {
   setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
   const int noDelay = 1;
   setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
-  if (!sendText(client, "VDAC4 console, %s. Commands: help, mem, ver, log\n", firmwareName)) {
+  if (!sendText(client, "VDAC4 console, %s. Commands: help, mem, ver, log, tang\n",
+                firmwareName)) {
     return;
   }
   uint32_t position = ringHead > kRingBytes ? ringHead - kRingBytes : 0;
-  char command[32];
+  char command[48];
   size_t commandLength = 0;
   uint8_t chunk[512];
   for (;;) {

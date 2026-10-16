@@ -33,6 +33,7 @@ idf_component_register(
         esp_wifi
         lwip
         mbedtls
+        nvs_flash
         # Флешка в разъёме USB модуля: USB-хост, драйвер USB MSC и FatFs с exFAT
         # (components/fatfs — копия компонента ESP-IDF с одной правкой).
         espressif__usb

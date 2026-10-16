@@ -7,7 +7,7 @@
 //   не задано — стенды ПК (tools/host_*, tests): исходники прошивки без канала SPI,
 //               звука и прочего оборудования платы. Сама прошивка так не собирается.
 //
-// Номера выводов VDAC4 взяты из docs/a3-interface-pinmap.md проекта платы.
+// Номера выводов VDAC4 взяты из Tang Nano 20k/Docs/a3-interface-pinmap.md.
 
 // Каталог публикации образа VDAC4 на raw.githubusercontent.com: репозиторий VDAC4,
 // ветка main, папка Firmware/firmware/vdac4 (firmware.sha256 и firmware.bin; пробелы

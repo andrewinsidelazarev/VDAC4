@@ -133,7 +133,11 @@ void ledTask(void* context) {
       if (check == kCheckBoard) {
         // Запись в журнале отличает запуски в плате от запусков на столе.
         board = probeBoardState();
-        bringupLog(kTag, "board: %s", boardStateName(board));
+        int downMv = -1;
+        int upMv = -1;
+        lastBoardProbeMillivolts(downMv, upMv);
+        bringupLog(kTag, "board: %s (LINK CS %d mV pulled down, %d mV pulled up)",
+                   boardStateName(board), downMv, upMv);
         check = kCheckPads;
       } else if (check == kCheckPads) {
         if (owner->audio == nullptr) {

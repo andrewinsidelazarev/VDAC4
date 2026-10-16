@@ -71,7 +71,7 @@ if (-not $SkipFirmware) {
 }
 
 if (-not $SkipZ80) {
-    foreach ($plugin in 'NTP Time Sync', 'FTP Server', 'SMB Server', 'WC Update', 'Online Update') {
+    foreach ($plugin in 'NTP Time Sync', 'FTP Server', 'SMB Server', 'WC Update', 'Online Update', 'Video Settings') {
         Invoke-Checked "plugin $plugin" { & (Join-Path $network "$plugin\build.bat") vdac4 }
     }
     Invoke-Checked 'plugin MP3 Player' { & (Join-Path $sound 'MP3 Player\build.bat') }
@@ -102,6 +102,7 @@ $outputs = @(
     'Network\SMB Server\build\vdac4\VDAC4SMB.WMF',
     'Network\WC Update\build\vdac4\VDAC4WCU.WMF',
     'Network\Online Update\build\vdac4\VDAC4UPD.WMF',
+    'Network\Video Settings\build\vdac4\VDAC4VID.WMF',
     'Sound\MP3 Player\build\VDAC4MP3.WMF',
     'Network\Weather screensaver\build\vdac4\VDAC4WTH.WMF',
     'Network\Weather screensaver VDAC2\build\vdac4\VDAC4WT2.WMF',
