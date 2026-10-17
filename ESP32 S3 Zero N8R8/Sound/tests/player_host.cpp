@@ -321,6 +321,7 @@ struct Sink {
   double played = 0;
   double discarded = 0;
   uint64_t writes = 0;
+  uint64_t firstWrite = 0;             // кадров в первой записи (PLAYER 1.20 копит начало)
   uint64_t timeouts = 0;               // записей, вернувших меньше, чем просили
   float peak = 0;
   int64_t firstToneFrame = -1;          // первая слышимая нота: проверка AUDIO_VIEW
@@ -369,7 +370,9 @@ int corePcmOpen(const zm_pcm_format_t* format) {
 int corePcmWrite(const float* frames, uint32_t count) {
   uint32_t done = 0;
   double waited = 0;                   // мс ожидания места, по часам: Sleep в Windows длиннее
-  ++sink.writes;
+  if (++sink.writes == 1) {
+    sink.firstWrite = count;
+  }
   while (done < count) {
     std::unique_lock<std::mutex> lock(sink.lock);
     if (sink.rate == 0) {
@@ -868,6 +871,7 @@ void printStatus(const char* prefix, const Status& s) {
 void printSink() {
   std::lock_guard<std::mutex> lock(sink.lock);
   print("pcm_frames", static_cast<long long>(sink.frames));
+  print("first_write", static_cast<long long>(sink.firstWrite));
   print("pcm_played", static_cast<long long>(sink.played + 0.5));
   print("pcm_discarded", static_cast<long long>(sink.discarded + 0.5));
   print("pcm_peak_permille", static_cast<long long>(sink.peak * 1000));

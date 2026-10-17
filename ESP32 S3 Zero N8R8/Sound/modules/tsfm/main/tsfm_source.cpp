@@ -176,6 +176,7 @@ struct Source {
     uint64_t tick,start,own,wait,mix,gain,total,frames;
     uint32_t calls;
   } prof;
+  unsigned slow_logged;     // записей о медленных кусках за песню (не больше SLOW_LOG_MAX)
 };
 
 const char* const AY_TYPES[]={"AS0","ASC","FTC","GTR","PSC","PSM","PT1","PT2","PT3","SQT","ST3","STC","STP"};
@@ -576,8 +577,24 @@ float estimate_loudness(Source* s,float& peak){
 
 // --- таблица декодера ---------------------------------------------------------
 
+// Клод: в начале некоторых песен (fm.tfc) кусок render стоил 205-240 % бюджета при
+// средней 33-39 %, и не при каждом запуске (1.14). Кусок дороже двух бюджетов —
+// запись в журнал с разбором по частям (тактов на отсчёт): что из своего кода
+// подорожало или ядро/помощника отняли другие задачи. Звук не меняется.
+constexpr unsigned SLOW_LOG_MAX=8;
+void report_slow(Source* s,const Source::Prof& before,uint32_t spent,uint32_t frames){
+  const auto& p=s->prof;const uint32_t f=frames?frames:1;
+  uint64_t side1=0;
+  for(unsigned i=0;i<s->chip_count;++i)if(s->side[i])side1+=p.chip[s->chip_id[i]]-before.chip[s->chip_id[i]];
+  host->log("tsfm slow call at %u ms: %u frames, per frame %u: tick %u start %u own %u wait %u mix %u gain %u; side1 %u, calls %u",
+            unsigned((s->frame-frames)*1000/s->rate),unsigned(frames),unsigned(spent/f),
+            unsigned((p.tick-before.tick)/f),unsigned((p.start-before.start)/f),unsigned((p.own-before.own)/f),
+            unsigned((p.wait-before.wait)/f),unsigned((p.mix-before.mix)/f),unsigned((p.gain-before.gain)/f),
+            unsigned(side1/f),unsigned(p.calls-before.calls));
+}
 int render(void* instance,float* out,uint32_t max,uint32_t* frames){
   auto* s=static_cast<Source*>(instance);*frames=0;if(max>ZM_RENDER_MAX_FRAMES)max=ZM_RENDER_MAX_FRAMES;
+  const Source::Prof before=s->prof;
   const uint32_t begin=cycles();
   while(*frames<max && s->frame<s->total){
     uint32_t t=cycles();
@@ -589,7 +606,11 @@ int render(void* instance,float* out,uint32_t max,uint32_t* frames){
   }
   if(*frames){
     uint32_t t=cycles();apply_gain(s,out,*frames);s->prof.gain+=uint32_t(cycles()-t);
-    s->prof.total+=uint32_t(cycles()-begin);s->prof.frames+=*frames;
+    const uint32_t spent=uint32_t(cycles()-begin);
+    s->prof.total+=spent;s->prof.frames+=*frames;
+    if(*frames>=64 && s->slow_logged<SLOW_LOG_MAX && spent/(*frames)>2u*(240000000u/s->rate)){
+      ++s->slow_logged;report_slow(s,before,spent,*frames);
+    }
     if(s->prof.frames>=uint64_t(s->rate)*10)report_prof(s);
     return ZM_RENDER_OK;
   }
@@ -715,7 +736,7 @@ extern "C" int main(int argc,char* argv[]){
   if(argc<3 || !argv[1] || !argv[2])return 0;host=reinterpret_cast<const zm_host_t*>(argv[1]);
   if(host->abi_major!=ZM_SOURCE_ABI_MAJOR || host->size<offsetof(zm_host_t,free)+sizeof(host->free) || !host->alloc || !host->free)return 0;
   memset(&table,0,sizeof(table));table.size=sizeof(table);table.abi_major=ZM_SOURCE_ABI_MAJOR;table.abi_minor=ZM_SOURCE_ABI_MINOR;
-  table.name="tsfm";table.version="1.13";table.extensions="AS0 ASC FTC GTR PSC PSM PT1 PT2 PT3 SQT ST3 STC STP TS TFC TFD MTC";
+  table.name="tsfm";table.version="1.14";table.extensions="AS0 ASC FTC GTR PSC PSM PT1 PT2 PT3 SQT ST3 STC STP TS TFC TFD MTC";
   table.input=ZM_INPUT_WHOLE;table.keeps_file=1;table.seek_unit=ZM_SEEK_MS;
   table.probe=probe;table.open=open_source;table.render=render;table.seek=seek;table.info=info;table.levels=levels;table.close=close_source;
   *reinterpret_cast<const zm_source_t**>(argv[2])=&table;return ZM_SOURCE_ABI_MAJOR;

@@ -71,6 +71,13 @@ enum { FMT_NONE = 0, FMT_MP3 = 1, FMT_MOD = 2, FMT_XM = 3, FMT_S3M = 4, FMT_IT =
 #define ROOM_PIECE (256u * 1024u)          /* make_room: PSRAM кусками (как берёт libxmp) */
 #define ROOM_PIECES 48
 #define RENDER_FRAMES ZM_RENDER_MAX_FRAMES
+/* Клод: начало файла — сначала START_MS звука, потом вывод (1.20). Пока вывод
+ * закрыт, прошивка сбрасывает журнал во flash (кэш выключен — оба ядра стоят),
+ * и первый render нового трека иногда стоил 2-2,4 бюджета: fm.tfc запинался в
+ * начале. С запасом в очереди такая остановка лишь чуть задерживает старт.
+ * Только у файлов, лежащих на ESP целиком (модули, TSFM, OPL, MIDI, SAA): поток
+ * приходит частями и сам набирает очередь. Буфер — PSRAM на время старта. */
+#define START_MS 200
 #define TASK_PRIORITY 5                    /* на ступень ниже задачи звука ядра */
 #define DECODE_STACK 12288                 /* задача декодера: stb_vorbis открывает поток на стеке */
 #define WORKER_PRIORITY 5                  /* помощник декодеров на ядре 1: ниже задачи обмена (20) */
@@ -162,6 +169,11 @@ typedef struct {
   uint64_t rendered;                      /* кадров дал декодер */
   uint32_t dropped;                       /* кадров не взял вывод (не пауза, не перемотка) */
   uint32_t open_rate;                     /* формат, с которым открыт вывод ядра (0 — закрыт) */
+  float* start_buf;                       /* начало файла до открытия вывода (START_MS) */
+  uint32_t start_cap;                     /* кадров вмещает start_buf */
+  uint32_t start_fill;                    /* кадров в start_buf */
+  uint32_t start_generation;              /* поток, чьё начало в start_buf */
+  uint32_t start_done;                    /* поток, у которого начало уже отдано (+1; 0 — нет) */
   uint8_t open_channels;
   uint32_t base_ms;                       /* время места, с которого шёл звук (перемотка) */
   uint32_t skip_at;                       /* модуль не загрузился: «конец» в эту миллисекунду (0 — нет) */
@@ -623,6 +635,33 @@ static void report(const char* what) {
   }
 }
 
+/* Буфер начала — прочь. */
+static void start_release(void) {
+  if (P->start_buf != NULL) {
+    core->free(P->start_buf);
+    P->start_buf = NULL;
+  }
+  P->start_cap = 0;
+  P->start_fill = 0;
+}
+
+/* Буфер начала потока generation: есть — 1; нет PSRAM — 0 (играть сразу). */
+static int start_take(uint32_t generation) {
+  if (P->start_buf != NULL && P->start_generation == generation) {
+    return 1;
+  }
+  start_release();
+  const uint32_t cap = P->info.rate * START_MS / 1000 + RENDER_FRAMES;
+  P->start_buf = (float*)core->alloc(cap * 2 * sizeof(float), ZM_MEM_PSRAM);
+  if (P->start_buf == NULL) {
+    P->start_done = generation + 1u;
+    return 0;
+  }
+  P->start_cap = cap;
+  P->start_generation = generation;
+  return 1;
+}
+
 /* Вывод ядра закрыть: в тишине ядро не должно считать, что звук идёт. Под P->lock. */
 static void close_output(void) {
   if (P->open_rate != 0) {
@@ -630,6 +669,58 @@ static void close_output(void) {
   }
   P->open_rate = 0;
   P->open_channels = 0;
+  start_release();
+}
+
+static int spectrum_view(void);
+
+/* Вывод — в формате декодера (открыть или переоткрыть, если сменился). */
+static void open_output(void) {
+  if (P->info.rate != P->open_rate || P->info.channels != P->open_channels) {
+    zm_pcm_format_t format = {P->info.rate, P->info.channels};
+    core->pcm_open(&format);
+    P->open_rate = P->info.rate;
+    P->open_channels = P->info.channels;
+  }
+}
+
+/* Кадры — в вывод. Пока стоит пауза, вывод не берёт кадров (pcm_write ждёт и
+ * отдаёт 0): дописать после неё, а не выбросить. Стоп и перемотка меняют
+ * поколение — тогда недописанное уже не нужно. */
+static void write_frames(const float* data, uint32_t frames, uint32_t generation) {
+  uint32_t done = 0;
+  while (done < frames && !P->stop && P->generation == generation) {
+    const int put = core->pcm_write(data + done * P->channels, frames - done);
+    if (put < 0 || (put == 0 && !P->paused)) {
+      break;
+    }
+    core->mutex_lock(P->lock);
+    if (P->generation == generation && put > 0) {
+      P->written += (uint32_t)put;
+      if (spectrum_view()) {
+        view_feed(data + done * P->channels, (uint32_t)put, P->channels, P->rate);
+      }
+    }
+    core->mutex_unlock(P->lock);
+    done += (uint32_t)put;
+  }
+  core->mutex_lock(P->lock);
+  if (P->generation == generation) {
+    P->dropped += frames - done;
+  }
+  core->mutex_unlock(P->lock);
+}
+
+/* Накопленное начало файла — в вывод (открыв его), буфер — прочь. */
+static void start_flush(uint32_t generation) {
+  const uint32_t fill = P->start_fill;
+  P->start_fill = 0;
+  P->start_done = generation + 1u;
+  if (fill != 0) {
+    open_output();
+    write_frames(P->start_buf, fill, generation);
+  }
+  start_release();
 }
 
 /* Спектр (MP3, MIDI) или уровни каналов (трекер). */
@@ -1445,12 +1536,6 @@ static void decode_task(void* arg) {
     if (result == ZM_RENDER_OK && frames != 0) {
       P->rendered += frames;
       update_levels();
-      if (P->info.rate != P->open_rate || P->info.channels != P->open_channels) {
-        zm_pcm_format_t format = {P->info.rate, P->info.channels};
-        core->pcm_open(&format);
-        P->open_rate = P->info.rate;
-        P->open_channels = P->info.channels;
-      }
       if (P->format == FMT_NONE) {
         P->format = decoder_format();
       }
@@ -1458,30 +1543,25 @@ static void decode_task(void* arg) {
       P->channels = P->info.channels;
       P->decoded = 1;
       P->starving = 0;
-      /* Пока стоит пауза, вывод не берёт кадров (pcm_write ждёт и отдаёт 0):
-       * дописать после неё, а не выбросить. Стоп и перемотка меняют
-       * поколение — тогда недописанное уже не нужно. */
-      uint32_t done = 0;
-      while (done < frames && !P->stop && P->generation == generation) {
-        const int put = core->pcm_write(P->frames + done * P->channels, frames - done);
-        if (put < 0 || (put == 0 && !P->paused)) {
-          break;
-        }
-        core->mutex_lock(P->lock);
-        if (P->generation == generation && put > 0) {
-          P->written += (uint32_t)put;
-          if (spectrum_view()) {
-            view_feed(P->frames + done * P->channels, (uint32_t)put, P->channels, P->rate);
+      if (P->open_rate == 0 && !P->radio && !P->stream_open && P->info.rate != 0 &&
+          P->start_done != generation + 1u && start_take(generation)) {
+        /* Вывод ещё закрыт — начало файла: копить до START_MS, потом разом. */
+        memcpy(P->start_buf + P->start_fill * P->channels, P->frames,
+               frames * P->channels * sizeof(float));
+        P->start_fill += frames;
+        if (P->start_fill + RENDER_FRAMES <= P->start_cap &&
+            P->start_fill < P->info.rate * START_MS / 1000) {
+          if (core->millis() - P->rest_ms >= REST_EVERY_MS) {
+            core->delay(1);
+            P->rest_ms = core->millis();
           }
+          continue;
         }
-        core->mutex_unlock(P->lock);
-        done += (uint32_t)put;
+        start_flush(generation);
+        continue;
       }
-      core->mutex_lock(P->lock);
-      if (P->generation == generation) {
-        P->dropped += frames - done;
-      }
-      core->mutex_unlock(P->lock);
+      open_output();
+      write_frames(P->frames, frames, generation);
       /* Сторож задач ESP: вывод ждёт только при полной очереди, и декодер, не
        * успевающий за звуком (тяжёлая песня OPL4, многоголосый MIDI), держал
        * бы ядро 0 без пауз — задача IDLE не кормит сторожа, и через 5 с ESP
@@ -1492,6 +1572,9 @@ static void decode_task(void* arg) {
         P->rest_ms = core->millis();
       }
     } else if (result == ZM_RENDER_NEED_INPUT) {
+      if (P->start_fill != 0 && P->start_generation == generation) {
+        start_flush(generation);                /* вход кончился раньше START_MS */
+      }
       /* Кольцо пусто. У радио и FLAC это ещё не опустошение, пока есть готовый PCM:
        * поток идёт вровень со звуком, и декодер, обогнав его, ждёт следующие байты.
        * Лишнее повторное накопление при достаточном PCM само создаёт паузы:
@@ -1513,6 +1596,10 @@ static void decode_task(void* arg) {
     } else if (P->radio) {
       core->delay(5);                           /* радио не кончается: ждать поток */
     } else if (result == ZM_RENDER_END || result == ZM_RENDER_ERROR) {
+      /* Файл короче START_MS: накопленное начало — в вывод. */
+      if (P->start_fill != 0 && P->start_generation == generation) {
+        start_flush(generation);
+      }
       /* Всё отдано: доиграть очередь ядра и встать. */
       if (core->pcm_queued_ms() == 0) {
         core->mutex_lock(P->lock);
@@ -2309,7 +2396,7 @@ int main(int argc, char* argv[]) {
   app.abi_major = ZM_APP_ABI_MAJOR;
   app.abi_minor = ZM_APP_ABI_MINOR;
   app.name = "player";
-  app.version = "1.19";
+  app.version = "1.20";
   app.command_first = AUDIO_VIEW;
   app.command_last = AUDIO_TAGS;
   app.start = start;

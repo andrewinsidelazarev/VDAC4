@@ -737,6 +737,9 @@ class PlayerHostTest(unittest.TestCase):
                          (str(FORMAT_XM), '2', '4'))
         self.assertEqual((r['state'], r['finished']), ('0', '1'))
         self.assertAlmostEqual(int(r['pcm_frames']), int(4 * 7.68 * RATE), delta=2048)
+        # PLAYER 1.20: вывод открывается, когда накоплено 200 мс начала — запись во
+        # flash в начале трека (оба ядра стоят) лишь задерживает старт.
+        self.assertGreaterEqual(int(r['first_write']), RATE // 5)
         # Файл модуля живёт с декодером (отсчёты XM распакованы в нём на месте):
         # на одну память больше, чем у MP3; её освобождает ядро при выгрузке.
         self.assertEqual(r['allocations_after_stop'], '7')
