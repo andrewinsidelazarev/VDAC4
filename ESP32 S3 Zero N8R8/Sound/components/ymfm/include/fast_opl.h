@@ -124,6 +124,27 @@ class pcm {
   void write(uint32_t index, uint8_t data);
   // count отсчётов в out[0..3] (выходы 0/1 — DO2, 2/3 — DO1), с нуля.
   void generate(int32_t* const* out, uint32_t count);
+
+  // Клод: то же на двух ядрах (OPL.ELF 1.7). generate = plan + run(0, 24) + commit.
+  // plan расписывает блоки (подготовка каналов, счётчик огибающих) и состояния не
+  // меняет; run считает каналы [first, end) в свои out[0..3] (с нуля) — два run с
+  // разными диапазонами можно вести одновременно на разных ядрах, сумма их выходов
+  // равна выходу generate бит в бит; commit — один раз после всех run.
+  struct plan_t {
+    uint32_t count;
+    uint32_t env_counter;      // счётчик огибающих в начале куска
+    uint32_t blocks;
+    uint8_t length[8];         // кадров в блоке
+    uint8_t prepare[8];        // перед блоком — подготовка каналов
+    uint32_t prepare_count;    // состояние после куска
+  };
+  void plan(plan_t& p, uint32_t count) const;
+  void run(const plan_t& p, int32_t* const* out, uint32_t first, uint32_t end);
+  void commit(const plan_t& p);
+  // Канал звучит (не молчит до следующей атаки) — для раздела работы между ядрами.
+  bool sounding(uint32_t channel) const {
+    return !(ch_[channel].state >= 4 && ch_[channel].env == 0x3ff);   // 4 — EG_RELEASE, как в channel_block
+  }
   uint32_t channel_attenuation(uint32_t channel) const;
   uint32_t mix_fm_l() const { return regs_[0xf8] & 7; }
   uint32_t mix_fm_r() const { return (regs_[0xf8] >> 3) & 7; }
@@ -157,9 +178,9 @@ class pcm {
 
   uint8_t read(uint32_t address) const;
   void cache_channel(uint32_t index);
-  void prepare();
+  void prepare_channel(uint32_t index);
   void load_wavetable(uint32_t index);
-  void channel_block(uint32_t index, int32_t* const* out, uint32_t count);
+  void channel_block(uint32_t index, int32_t* const* out, uint32_t count, uint32_t env_counter);
 
   const pcm_memory* memory_;
   uint8_t regs_[0x100];

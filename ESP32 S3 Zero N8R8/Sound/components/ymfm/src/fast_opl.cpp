@@ -1070,8 +1070,10 @@ void pcm::cache_channel(uint32_t c) {
   }
 }
 
-void pcm::prepare() {
-  for (uint32_t c = 0; c < 24; ++c) {
+// Подготовка канала перед блоком (pcm_engine::clock): каналы друг от друга не
+// зависят, поэтому каждое ядро готовит только свои.
+void pcm::prepare_channel(uint32_t c) {
+  {
     channel_t& ch = ch_[c];
     cache_channel(c);
     if ((ch.key_state & KEY_PENDING) != 0) {
@@ -1148,7 +1150,7 @@ void pcm::write(uint32_t index, uint8_t data) {
   }
 }
 
-void pcm::channel_block(uint32_t c, int32_t* const* out, uint32_t count) {
+void pcm::channel_block(uint32_t c, int32_t* const* out, uint32_t count, uint32_t env_counter) {
   channel_t& ch = ch_[c];
   if (ch.state >= EG_RELEASE && ch.env == 0x3ff) {
     // Молчит до следующей атаки (она сбросит позицию): идут только LFO и
@@ -1167,6 +1169,12 @@ void pcm::channel_block(uint32_t c, int32_t* const* out, uint32_t count) {
   const uint32_t outnum = bits(regs_[0x68 + c], 4) * 2;
   int32_t* out_left = out[outnum];
   int32_t* out_right = out[outnum + 1];
+  // Клод: волны OPL4 на плате не успевали (CHILDREN.MWM: 6101 такт на кадр при
+  // бюджете 5442). Всё, что от отсчёта к отсчёту почти не меняется, считается
+  // только при смене входа: громкость каналов — при смене суммы огибающей,
+  // тремоло и уровня; шаг с вибрато и значение тремоло — при смене битов 10+ LFO
+  // (раз в 24 и больше отсчётов). Поля канала — в локальных переменных, память
+  // волн — прямым указателем с одной проверкой границы. Звук бит в бит прежний.
   uint32_t lfo = ch.lfo_counter;
   uint32_t env = ch.env;
   uint32_t state = ch.state;
@@ -1174,19 +1182,74 @@ void pcm::channel_block(uint32_t c, int32_t* const* out, uint32_t count) {
   uint32_t curpos = ch.curpos;
   uint32_t nextpos = ch.nextpos;
   const uint32_t target = ch.target_level;
+  const uint32_t lfo_step = ch.lfo_step;
+  const uint32_t base_step = ch.step;
+  const uint32_t pm_depth = ch.pm_depth;
+  const uint32_t am_depth = ch.am_depth;
+  const uint32_t pan_left = ch.pan_left;
+  const uint32_t pan_right = ch.pan_right;
+  const uint32_t sustain = ch.eg_sustain;
+  const uint32_t endpos = ch.endpos;
+  const uint32_t loop_delta = ch.looppos - ch.endpos;
+  const uint32_t format = ch.format;
+  const uint32_t baseaddr = ch.baseaddr;
+  // Память волн от baseaddr: ПЗУ с 0, ОЗУ с 0x200000; avail — сколько байтов
+  // подряд можно читать напрямую. Дальше (конец ПЗУ, переход в ОЗУ) — read().
+  const uint8_t* wave = nullptr;
+  uint32_t avail = 0;
+  {
+    const uint32_t address = baseaddr & 0x3fffff;
+    if (address < 0x200000) {
+      if (address < memory_->rom_size) {
+        wave = memory_->rom + address;
+        avail = memory_->rom_size - address;
+      }
+    } else if (address - 0x200000 < memory_->ram_size) {
+      wave = memory_->ram + (address - 0x200000);
+      avail = memory_->ram_size - (address - 0x200000);
+    }
+  }
+  uint32_t lfo_key = ~0u;                 // биты 10+ LFO, для которых посчитаны step и am
+  uint32_t step = base_step;
+  uint32_t am_value = 0;
+  uint32_t last_envelope = ~0u;           // сумма, для которой посчитаны lvol и rvol
+  int32_t lvol = 0;
+  int32_t rvol = 0;
   for (uint32_t k = 0; k < count; ++k) {
-    lfo += ch.lfo_step;
+    lfo += lfo_step;
+    if ((lfo >> 10) != lfo_key) {
+      lfo_key = lfo >> 10;
+      step = base_step;
+      if (pm_depth != 0) {
+        const uint32_t shifted = lfo + (1 << 16);
+        int32_t value = (int32_t)bits(shifted, 10, 7);
+        if (bits(shifted, 17) != 0) {
+          value ^= 0x7f;
+        }
+        value -= 0x40;
+        step += (uint32_t)((value * (int32_t)pm_depth) >> 7);
+      }
+      if (am_depth != 0) {
+        uint32_t value = bits(lfo, 10, 7);
+        if (bits(lfo, 17) != 0) {
+          value ^= 0x7f;
+        }
+        am_value = (value * am_depth) >> 7;
+      }
+    }
     // Огибающая (pcm_channel::clock_envelope).
     if (state == EG_ATTACK && env == 0) {
       state = EG_DECAY;
     }
-    if (state == EG_DECAY && env >= ch.eg_sustain) {
+    if (state == EG_DECAY && env >= sustain) {
       state = EG_SUSTAIN;
     }
     const uint32_t rate = ch.eg_rate[state];
     const uint32_t rate_shift = rate >> 2;
-    const uint32_t counter = ((env_counter_ + k + 1) >> 1) << rate_shift;
-    if ((counter & 0x7ff) == 0) {
+    // ((x >> 1) << rate_shift) & 0x7ff == 0 — младшие 11 - rate_shift битов x >> 1 нулевые.
+    const uint32_t tick = (env_counter + k + 1) >> 1;
+    if (rate_shift >= 11 || (tick & (0x7ffu >> rate_shift)) == 0) {
+      const uint32_t counter = tick << rate_shift;
       const uint32_t relevant = bits(counter, rate_shift <= 11 ? 11 : (int)rate_shift, 3);
       const uint32_t increment = bits(increment_table[rate], 4 * (int)relevant, 4);
       if (state == EG_ATTACK) {
@@ -1201,21 +1264,11 @@ void pcm::channel_block(uint32_t c, int32_t* const* out, uint32_t count) {
         }
       }
     }
-    // Шаг с вибрато и позиция с петлёй.
-    uint32_t step = ch.step;
-    if (ch.pm_depth != 0) {
-      const uint32_t shifted = lfo + (1 << 16);
-      int32_t value = (int32_t)bits(shifted, 10, 7);
-      if (bits(shifted, 17) != 0) {
-        value ^= 0x7f;
-      }
-      value -= 0x40;
-      step += (uint32_t)((value * (int32_t)ch.pm_depth) >> 7);
-    }
+    // Позиция с петлёй.
     curpos = nextpos;
     nextpos = curpos + step;
-    if (nextpos >= ch.endpos) {
-      nextpos += ch.looppos - ch.endpos;
+    if (nextpos >= endpos) {
+      nextpos += loop_delta;
     }
     if (level != target) {
       if (level < target) {
@@ -1228,32 +1281,41 @@ void pcm::channel_block(uint32_t c, int32_t* const* out, uint32_t count) {
     if (env > PCM_EG_QUIET) {
       continue;
     }
-    uint32_t envelope = env;
-    if (ch.am_depth != 0) {
-      uint32_t value = bits(lfo, 10, 7);
-      if (bits(lfo, 17) != 0) {
-        value ^= 0x7f;
-      }
-      envelope += (value * ch.am_depth) >> 7;
+    const uint32_t envelope = env + am_value + (level >> 8);
+    if (envelope != last_envelope) {
+      last_envelope = envelope;
+      const uint32_t lenv = envelope + pan_left < 0x3ff ? envelope + pan_left : 0x3ff;
+      const uint32_t renv = envelope + pan_right < 0x3ff ? envelope + pan_right : 0x3ff;
+      lvol = (int32_t)pcm_volume(lenv << 2);
+      rvol = (int32_t)pcm_volume(renv << 2);
     }
-    envelope += level >> 8;
-    const uint32_t lenv = envelope + ch.pan_left < 0x3ff ? envelope + ch.pan_left : 0x3ff;
-    const uint32_t renv = envelope + ch.pan_right < 0x3ff ? envelope + ch.pan_right : 0x3ff;
-    const int32_t lvol = (int32_t)pcm_volume(lenv << 2);
-    const int32_t rvol = (int32_t)pcm_volume(renv << 2);
     const uint32_t pos = curpos >> 16;
     int16_t sample;
-    if (ch.format == 0) {
-      sample = (int16_t)(read(ch.baseaddr + pos) << 8);
-    } else if (ch.format == 2) {
-      const uint32_t address = ch.baseaddr + pos * 2;
-      sample = (int16_t)((read(address) << 8) | read(address + 1));
-    } else {
-      const uint32_t address = ch.baseaddr + (pos / 2) * 3;
-      if ((pos & 1) == 0) {
-        sample = (int16_t)((read(address) << 8) | ((read(address + 1) << 4) & 0xf0));
+    if (format == 0) {
+      sample = (int16_t)((pos < avail ? wave[pos] : read(baseaddr + pos)) << 8);
+    } else if (format == 2) {
+      const uint32_t offset = pos * 2;
+      if (offset + 1 < avail) {
+        sample = (int16_t)((wave[offset] << 8) | wave[offset + 1]);
       } else {
-        sample = (int16_t)((read(address + 2) << 8) | (read(address + 1) & 0xf0));
+        sample = (int16_t)((read(baseaddr + offset) << 8) | read(baseaddr + offset + 1));
+      }
+    } else {
+      const uint32_t offset = (pos / 2) * 3;
+      uint32_t b0, b1, b2;
+      if (offset + 2 < avail) {
+        b0 = wave[offset];
+        b1 = wave[offset + 1];
+        b2 = wave[offset + 2];
+      } else {
+        b0 = read(baseaddr + offset);
+        b1 = read(baseaddr + offset + 1);
+        b2 = read(baseaddr + offset + 2);
+      }
+      if ((pos & 1) == 0) {
+        sample = (int16_t)((b0 << 8) | ((b1 << 4) & 0xf0));
+      } else {
+        sample = (int16_t)((b2 << 8) | (b1 & 0xf0));
       }
     }
     out_left[k] += (lvol * sample) >> 15;
@@ -1268,37 +1330,77 @@ void pcm::channel_block(uint32_t c, int32_t* const* out, uint32_t count) {
 }
 
 void pcm::generate(int32_t* const* out, uint32_t count) {
-  for (int o = 0; o < 4; ++o) {
-    memset(out[o], 0, count * sizeof(int32_t));
-  }
+  plan_t p;
+  plan(p, count);
+  run(p, out, 0, 24);
+  commit(p);
+}
+
+// Расписание блоков куска — как прежний цикл generate (pcm_engine::clock):
+// подготовка перед первым тактом блока при изменённых регистрах или раз в 4097
+// тактов, блок — до 64 тактов и до следующей подготовки.
+void pcm::plan(plan_t& p, uint32_t count) const {
+  p.count = count;
+  p.env_counter = env_counter_;
+  p.blocks = 0;
+  bool modified = modified_;
+  uint32_t prepare_count = prepare_count_;
   uint32_t done = 0;
-  while (done < count) {
-    // Подготовка перед первым тактом блока (pcm_engine::clock).
-    if (modified_) {
-      prepare();
-      modified_ = false;
-      prepare_count_ = 0;
-    } else if (prepare_count_ >= 4096) {
-      prepare();
-      prepare_count_ = 0;
+  while (done < count && p.blocks < 8) {
+    uint8_t prepare = 0;
+    if (modified) {
+      prepare = 1;
+      modified = false;
+      prepare_count = 0;
+    } else if (prepare_count >= 4096) {
+      prepare = 1;
+      prepare_count = 0;
     } else {
-      prepare_count_++;
+      prepare_count++;
     }
-    uint32_t n = 4097 - prepare_count_;
+    uint32_t n = 4097 - prepare_count;
     if (n > count - done) {
       n = count - done;
     }
     if (n > 64) {
       n = 64;
     }
-    prepare_count_ += n - 1;
-    int32_t* block[4] = {out[0] + done, out[1] + done, out[2] + done, out[3] + done};
-    for (uint32_t c = 0; c < 24; ++c) {
-      channel_block(c, block, n);
-    }
-    env_counter_ += n;
+    prepare_count += n - 1;
+    p.length[p.blocks] = (uint8_t)n;
+    p.prepare[p.blocks] = prepare;
+    p.blocks++;
     done += n;
   }
+  p.count = done;                         // больше 8 блоков (> 512 кадров) — не бывает
+  p.prepare_count = prepare_count;
+}
+
+void pcm::run(const plan_t& p, int32_t* const* out, uint32_t first, uint32_t end) {
+  for (int o = 0; o < 4; ++o) {
+    memset(out[o], 0, p.count * sizeof(int32_t));
+  }
+  uint32_t done = 0;
+  uint32_t env_counter = p.env_counter;
+  for (uint32_t b = 0; b < p.blocks; ++b) {
+    if (p.prepare[b] != 0) {
+      for (uint32_t c = first; c < end; ++c) {
+        prepare_channel(c);
+      }
+    }
+    const uint32_t n = p.length[b];
+    int32_t* block[4] = {out[0] + done, out[1] + done, out[2] + done, out[3] + done};
+    for (uint32_t c = first; c < end; ++c) {
+      channel_block(c, block, n, env_counter);
+    }
+    env_counter += n;
+    done += n;
+  }
+}
+
+void pcm::commit(const plan_t& p) {
+  env_counter_ += p.count;
+  modified_ = false;
+  prepare_count_ = p.prepare_count;
 }
 
 uint32_t pcm::channel_attenuation(uint32_t channel) const {

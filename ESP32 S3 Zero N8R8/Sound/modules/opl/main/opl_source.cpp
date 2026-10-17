@@ -83,12 +83,18 @@ const zm_host_t* host;
 zm_source_t table;
 bool worker = false;                       /* помощник на ядре 1 есть (PLAYER 1.3) */
 uint64_t wave_cycles = 0;                  /* такты волн OPL4 на ядре 1 за песню */
+/* Клод: такты ядра 0 за песню (OPL.ELF 1.7) — FM, его доля волн, ожидание ядра 1;
+ * wave_channels — сумма «каналов волн на ядре 0 × кадров», для среднего раздела. */
+uint64_t fm_cycles = 0, own_wave_cycles = 0, wait_cycles = 0;
+uint64_t wave_channels = 0, wave_frames = 0;
+uint32_t last_job_cycles = 0;              /* такты последней работы ядра 1 */
 
-/* Работа помощника: волны OPL4 куска (fast_opl::pcm::generate) на ядре 1. */
+/* Работа помощника: каналы волн OPL4 [first, end) куска на ядре 1. */
 struct WaveJob {
   fast_opl::pcm* pcm;
+  const fast_opl::pcm::plan_t* plan;
   int32_t* out[4];
-  uint32_t count;
+  uint32_t first, end;
 };
 
 uint32_t cycle_count();
@@ -96,8 +102,9 @@ uint32_t cycle_count();
 void wave_job(void* arg) {
   WaveJob* job = static_cast<WaveJob*>(arg);
   const uint32_t start = cycle_count();
-  job->pcm->generate(job->out, job->count);
-  wave_cycles += cycle_count() - start;
+  job->pcm->run(*job->plan, job->out, job->first, job->end);
+  last_job_cycles = cycle_count() - start;
+  wave_cycles += last_job_cycles;
 }
 
 /* Такты процессора: сколько стоит синтез (в журнал при close). */
@@ -477,6 +484,13 @@ class Opl4Chip final : public Chip {
   fast_opl::pcm_memory memory_;
   fast_opl::pcm pcm_;
   uint32_t fm_pos_ = 0;
+  /* Клод: волны на двух ядрах (1.7). До 1.7 ядро 1 считало все 24 канала волн
+   * (CHILDREN.MWM: 3103 такта на кадр), а ядро 0 — FM и ждало. Теперь ядро 0
+   * берёт own_count_ звучащих каналов с начала (свои буферы own_), ядро 1 —
+   * остальные; own_count_ подстраивается по тактам обоих ядер (balance). Сумма
+   * целых от раздела не зависит — звук бит в бит. */
+  int32_t own_[4][BLOCK];
+  uint32_t own_count_ = 0;
 #if defined(OPL_COMPARE)
   Chip* reference_;
 #endif
@@ -565,17 +579,42 @@ class Opl4Chip final : public Chip {
     }
     int32_t* fm_out[4] = {a, b, c, d};
     int32_t* wave_out[4] = {w0, w1, w2, w3};
-    /* Помощник на ядре 1: волны куска — у него, FM — здесь, одновременно. Записи
-     * в регистры идут между кусками (помощник уже свободен), поэтому звук тот
-     * же отсчёт в отсчёт, что и на одном ядре. */
-    WaveJob job = {&pcm_, {w0, w1, w2, w3}, count};
+    /* Помощник на ядре 1: каналы волн с split по 23 — у него, FM и каналы до split —
+     * здесь, одновременно. Записи в регистры идут между кусками (помощник уже
+     * свободен), поэтому звук тот же отсчёт в отсчёт, что и на одном ядре. */
+    fast_opl::pcm::plan_t plan;
+    pcm_.plan(plan, count);
+    const uint32_t split = split_channel();
+    WaveJob job = {&pcm_, &plan, {w0, w1, w2, w3}, split, 24};
     const bool parallel = worker && count >= PARALLEL_MIN && host->worker_start(wave_job, &job) == ZM_OK;
+    const uint32_t t0 = cycle_count();
     fm_.generate(fm_out, count, extra);
+    const uint32_t t1 = cycle_count();
+    fm_cycles += t1 - t0;
     if (parallel) {
+      int32_t* own[4] = {own_[0], own_[1], own_[2], own_[3]};
+      if (split != 0) {
+        pcm_.run(plan, own, 0, split);
+      }
+      const uint32_t t2 = cycle_count();
       host->worker_wait();
+      const uint32_t t3 = cycle_count();
+      own_wave_cycles += t2 - t1;
+      wait_cycles += t3 - t2;
+      if (split != 0) {
+        for (uint32_t i = 0; i < count; ++i) {     /* в микс идёт только DO2 (выходы 0/1) */
+          w0[i] += own_[0][i];
+          w1[i] += own_[1][i];
+        }
+      }
+      wave_channels += (uint64_t)own_count_ * count;
+      wave_frames += count;
+      balance(t1 - t0 + (t2 - t1), last_job_cycles, split);
     } else {
-      pcm_.generate(wave_out, count);
+      pcm_.run(plan, wave_out, 0, 24);
+      own_wave_cycles += cycle_count() - t1;
     }
+    pcm_.commit(plan);
     const int32_t pcm_l = mix_scale[pcm_.mix_pcm_l()];
     const int32_t pcm_r = mix_scale[pcm_.mix_pcm_r()];
     const int32_t fm_l = mix_scale[pcm_.mix_fm_l()];
@@ -598,6 +637,41 @@ class Opl4Chip final : public Chip {
       return meter(pcm_.channel_attenuation(channel - 18));
     }
     return meter(fm_.channel_attenuation(channel));
+  }
+
+ private:
+  /* Граница раздела: ядру 0 — каналы до неё, в них own_count_ звучащих. */
+  uint32_t split_channel() const {
+    uint32_t taken = 0;
+    uint32_t c = 0;
+    while (c < 24 && taken < own_count_) {
+      taken += pcm_.sounding(c) ? 1 : 0;
+      ++c;
+    }
+    return c;
+  }
+
+  /* Подстройка раздела по тактам куска: ядро 0 (FM и свои каналы) свободнее ядра 1
+   * больше чем на канал — взять ещё канал, занятее — отдать. Без счётчика тактов
+   * (стенд ПК) раздел перебирается по кругу: проверка, что звук от него не зависит. */
+  void balance(uint32_t own_cycles, uint32_t job_cycles, uint32_t split) {
+#if defined(__XTENSA__)
+    uint32_t sounding = 0;
+    for (uint32_t c = split; c < 24; ++c) {
+      sounding += pcm_.sounding(c) ? 1 : 0;
+    }
+    const uint32_t channel = job_cycles / (sounding + 1);
+    if (own_cycles + channel < job_cycles && sounding != 0) {
+      ++own_count_;
+    } else if (own_cycles > job_cycles + channel && own_count_ != 0) {
+      --own_count_;
+    }
+#else
+    (void)own_cycles;
+    (void)job_cycles;
+    (void)split;
+    own_count_ = (own_count_ + 1) % 25;
+#endif
   }
 };
 
@@ -1777,6 +1851,8 @@ void* open_source(uint32_t file_size, const uint8_t* file) {
   worker = host->size >= offsetof(zm_host_t, worker_wait) + sizeof(host->worker_wait) &&
            host->worker_start != nullptr && host->worker_wait != nullptr;
   wave_cycles = 0;
+  fm_cycles = own_wave_cycles = wait_cycles = 0;
+  wave_channels = wave_frames = 0;
   if (o == nullptr) {
     return nullptr;
   }
@@ -1980,9 +2056,14 @@ void close_source(void* instance) {
     host->log("opl: %s, cycles per frame %u average, %u worst (real time: %u)", o->format_text,
               (unsigned)(o->cycles / o->cycled_frames), (unsigned)o->cycles_max,
               (unsigned)(240000000u / (o->rate ? o->rate : 1)));
-    if (wave_cycles != 0) {
-      host->log("opl: waves on core 1: %u cycles per frame average",
-                (unsigned)(wave_cycles / o->cycled_frames));
+    if (wave_cycles != 0 || own_wave_cycles != 0) {
+      /* Клод: раздельные такты на кадр (1.7) — что ограничивает OPL4. */
+      host->log("opl: per frame: core 0 FM %u, waves %u, waits %u; core 1 waves %u; "
+                "%u.%u wave channels on core 0",
+                (unsigned)(fm_cycles / o->cycled_frames), (unsigned)(own_wave_cycles / o->cycled_frames),
+                (unsigned)(wait_cycles / o->cycled_frames), (unsigned)(wave_cycles / o->cycled_frames),
+                (unsigned)(wave_frames ? wave_channels / wave_frames : 0),
+                (unsigned)(wave_frames ? wave_channels * 10 / wave_frames % 10 : 0));
     }
   }
   for (int i = 0; i < o->chip_count; ++i) {
@@ -2034,7 +2115,7 @@ extern "C" int main(int argc, char* argv[]) {
   table.abi_major = ZM_SOURCE_ABI_MAJOR;
   table.abi_minor = ZM_SOURCE_ABI_MINOR;
   table.name = "opl";
-  table.version = "1.5";
+  table.version = "1.7";
   table.extensions = "VGM VGZ DRO IMF WLF MWM MFM";
   table.input = ZM_INPUT_WHOLE;
   table.keeps_file = 1;
