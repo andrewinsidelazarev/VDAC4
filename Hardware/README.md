@@ -9,6 +9,7 @@ Tang Nano 20K (A1), Waveshare ESP32-S3-Zero-N8R8 (A2) и модуль ЦАП GY-
 
 | Папка | Что там |
 |---|---|
+| [`Docs`](Docs) | PDF: электрическая схема ([`VDAC4_A4_schematic.pdf`](Docs/VDAC4_A4_schematic.pdf), 4 листа), монтажная схема верха и низа ([`VDAC4_A4_assembly.pdf`](Docs/VDAC4_A4_assembly.pdf)), перечень элементов ([`VDAC4_A4_BOM.pdf`](Docs/VDAC4_A4_BOM.pdf)) |
 | [`KiCad`](KiCad) | проект KiCad 10: схема (4 листа), плата, библиотека проекта, правила DRC; журнал изменений [`CHANGES_A4.md`](KiCad/CHANGES_A4.md) |
 | [`Production`](Production) | комплект для JLCPCB: Gerber и сверловка (`TS_VDAC_A4-A4-gerber.zip`), `JLCPCB_BOM.csv`, `JLCPCB_CPL.csv`, отчёты DRC/ERC, `manifest.json` с SHA-256 файлов и параметрами выгрузки |
 
