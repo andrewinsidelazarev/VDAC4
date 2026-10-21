@@ -1,0 +1,6761 @@
+(kicad_sch
+	(version 20260306)
+	(generator "kicad-schematic-pcb-skill")
+	(generator_version "1.1")
+	(uuid "eb5f9d3c-4871-5d92-aeff-3cdd0ac944e1")
+	(paper "A3")
+	(title_block
+		(title "Common FDD power / module supplies / GY-PCM5102 audio")
+		(date "2026-10-03")
+		(rev "A4")
+		(comment 1 "Engineering schematic: connections checked; physical timing NOT signed off")
+		(comment 2 "Stock modules, no Tang rework / no LCD FPC")
+		(comment 3 "See docs/a3-design.md for validation scope")
+	)
+	(lib_symbols
+		(symbol "TSVDAC:TS_PORT40"
+			(pin_names (offset 0.762))
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "J"
+				(at -20.32 30.48 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Value" "TS-CONFIG PORT40"
+				(at 20.32 30.48 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Footprint" "Connector_PinSocket_2.54mm:PinSocket_2x20_P2.54mm_Vertical"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Description" "ZX Evolution TS-Config VDAC2+ESP shared 40-pin port"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(symbol "TS_PORT40_1_1"
+				(rectangle
+					(start -20.32 26.67)
+					(end 20.32 -26.67)
+					(stroke (width 0.254) (type default))
+					(fill (type background))
+				)
+				(text ""
+					(at 0 25.4 0)
+					(effects (font (size 0.8 0.8) (bold yes)))
+				)
+				(pin passive line
+					(at -22.86 24.13 0)
+					(length 2.54)
+					(name "ESP_CS_N" (effects (font (size 1 1))))
+					(number "1" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 21.59 0)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "2" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 19.05 0)
+					(length 2.54)
+					(name "D7_G1" (effects (font (size 1 1))))
+					(number "3" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 16.51 0)
+					(length 2.54)
+					(name "D8_G3" (effects (font (size 1 1))))
+					(number "4" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 13.97 0)
+					(length 2.54)
+					(name "D6_G0" (effects (font (size 1 1))))
+					(number "5" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 11.43 0)
+					(length 2.54)
+					(name "D9_G4" (effects (font (size 1 1))))
+					(number "6" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 8.89 0)
+					(length 2.54)
+					(name "D5_R4" (effects (font (size 1 1))))
+					(number "7" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 6.35 0)
+					(length 2.54)
+					(name "D10_B0" (effects (font (size 1 1))))
+					(number "8" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 3.81 0)
+					(length 2.54)
+					(name "D4_R3" (effects (font (size 1 1))))
+					(number "9" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 1.27 0)
+					(length 2.54)
+					(name "D11_B1" (effects (font (size 1 1))))
+					(number "10" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -1.27 0)
+					(length 2.54)
+					(name "D3_R2" (effects (font (size 1 1))))
+					(number "11" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -3.81 0)
+					(length 2.54)
+					(name "D12_B2" (effects (font (size 1 1))))
+					(number "12" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -6.35 0)
+					(length 2.54)
+					(name "D2_R1" (effects (font (size 1 1))))
+					(number "13" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -8.89 0)
+					(length 2.54)
+					(name "D13_B3" (effects (font (size 1 1))))
+					(number "14" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -11.43 0)
+					(length 2.54)
+					(name "D1_R0_FT_INT_N" (effects (font (size 1 1))))
+					(number "15" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -13.97 0)
+					(length 2.54)
+					(name "D14_B4" (effects (font (size 1 1))))
+					(number "16" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -16.51 0)
+					(length 2.54)
+					(name "D0_G2" (effects (font (size 1 1))))
+					(number "17" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -19.05 0)
+					(length 2.54)
+					(name "D15_PAL_SEL" (effects (font (size 1 1))))
+					(number "18" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -21.59 0)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "19" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -22.86 -24.13 0)
+					(length 2.54)
+					(name "KEY" (effects (font (size 1 1))))
+					(number "20" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 24.13 180)
+					(length 2.54)
+					(name "NC_DM ARQ" (effects (font (size 1 1))))
+					(number "21" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 21.59 180)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "22" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 19.05 180)
+					(length 2.54)
+					(name "M_SEL" (effects (font (size 1 1))))
+					(number "23" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 16.51 180)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "24" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 13.97 180)
+					(length 2.54)
+					(name "FT_CS_N" (effects (font (size 1 1))))
+					(number "25" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 11.43 180)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "26" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 8.89 180)
+					(length 2.54)
+					(name "SPI_MISO" (effects (font (size 1 1))))
+					(number "27" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 6.35 180)
+					(length 2.54)
+					(name "NC_CSEL" (effects (font (size 1 1))))
+					(number "28" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 3.81 180)
+					(length 2.54)
+					(name "NC_DMACK_N" (effects (font (size 1 1))))
+					(number "29" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 1.27 180)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "30" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -1.27 180)
+					(length 2.54)
+					(name "NC_INTRQ" (effects (font (size 1 1))))
+					(number "31" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -3.81 180)
+					(length 2.54)
+					(name "NC_IOCS16_N" (effects (font (size 1 1))))
+					(number "32" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -6.35 180)
+					(length 2.54)
+					(name "SPI_MOSI" (effects (font (size 1 1))))
+					(number "33" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -8.89 180)
+					(length 2.54)
+					(name "NC_PDIAG_N" (effects (font (size 1 1))))
+					(number "34" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -11.43 180)
+					(length 2.54)
+					(name "SPI_SCK" (effects (font (size 1 1))))
+					(number "35" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -13.97 180)
+					(length 2.54)
+					(name "PCLK" (effects (font (size 1 1))))
+					(number "36" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -16.51 180)
+					(length 2.54)
+					(name "HSYNC" (effects (font (size 1 1))))
+					(number "37" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -19.05 180)
+					(length 2.54)
+					(name "VSYNC" (effects (font (size 1 1))))
+					(number "38" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -21.59 180)
+					(length 2.54)
+					(name "NC_DASP_N" (effects (font (size 1 1))))
+					(number "39" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 22.86 -24.13 180)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "40" (effects (font (size 1 1))))
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "TSVDAC:ESP32_S3_ZERO_HEADERS"
+			(pin_names (offset 0.762))
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "A"
+				(at -19.05 16.51 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Value" "ESP32-S3-Zero-N8R8-M (headers)"
+				(at 19.05 16.51 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Footprint" "TSVDAC:ESP32-S3-Zero_2x1x09_P2.54mm"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Description" "Waveshare module; factory P15 header pins only, underside pads absent"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(symbol "ESP32_S3_ZERO_HEADERS_1_1"
+				(rectangle
+					(start -19.05 12.7)
+					(end 19.05 -12.7)
+					(stroke (width 0.254) (type default))
+					(fill (type background))
+				)
+				(text ""
+					(at 0 11.43 0)
+					(effects (font (size 0.8 0.8) (bold yes)))
+				)
+				(pin passive line
+					(at -21.59 10.16 0)
+					(length 2.54)
+					(name "GPIO1" (effects (font (size 1 1))))
+					(number "1" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -21.59 7.62 0)
+					(length 2.54)
+					(name "GPIO2" (effects (font (size 1 1))))
+					(number "2" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -21.59 5.08 0)
+					(length 2.54)
+					(name "GPIO3" (effects (font (size 1 1))))
+					(number "3" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -21.59 2.54 0)
+					(length 2.54)
+					(name "GPIO4" (effects (font (size 1 1))))
+					(number "4" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -21.59 0 0)
+					(length 2.54)
+					(name "GPIO5" (effects (font (size 1 1))))
+					(number "5" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -21.59 -2.54 0)
+					(length 2.54)
+					(name "GPIO6" (effects (font (size 1 1))))
+					(number "6" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -21.59 -5.08 0)
+					(length 2.54)
+					(name "GPIO7" (effects (font (size 1 1))))
+					(number "7" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -21.59 -7.62 0)
+					(length 2.54)
+					(name "GPIO8" (effects (font (size 1 1))))
+					(number "8" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -21.59 -10.16 0)
+					(length 2.54)
+					(name "GPIO9" (effects (font (size 1 1))))
+					(number "9" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 21.59 10.16 180)
+					(length 2.54)
+					(name "GPIO10" (effects (font (size 1 1))))
+					(number "10" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 21.59 7.62 180)
+					(length 2.54)
+					(name "GPIO11" (effects (font (size 1 1))))
+					(number "11" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 21.59 5.08 180)
+					(length 2.54)
+					(name "GPIO12" (effects (font (size 1 1))))
+					(number "12" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 21.59 2.54 180)
+					(length 2.54)
+					(name "GPIO13" (effects (font (size 1 1))))
+					(number "13" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 21.59 0 180)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "14" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 21.59 -2.54 180)
+					(length 2.54)
+					(name "VBUS" (effects (font (size 1 1))))
+					(number "15" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 21.59 -5.08 180)
+					(length 2.54)
+					(name "3V3_OUT_NC" (effects (font (size 1 1))))
+					(number "16" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 21.59 -7.62 180)
+					(length 2.54)
+					(name "GPIO43/TX" (effects (font (size 1 1))))
+					(number "17" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 21.59 -10.16 180)
+					(length 2.54)
+					(name "GPIO44/RX" (effects (font (size 1 1))))
+					(number "18" (effects (font (size 1 1))))
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "TSVDAC:TANG_NANO_20K_HEADERS"
+			(pin_names (offset 0.762))
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "A"
+				(at -22.86 30.48 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Value" "Tang Nano 20K"
+				(at 22.86 30.48 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Footprint" "TSVDAC:Tang_Nano_20K_2x1x20_P2.54mm"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Description" "Sipeed Tang Nano 20K module on its two factory 1x20 headers"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(symbol "TANG_NANO_20K_HEADERS_1_1"
+				(rectangle
+					(start -22.86 26.67)
+					(end 22.86 -26.67)
+					(stroke (width 0.254) (type default))
+					(fill (type background))
+				)
+				(text ""
+					(at 0 25.4 0)
+					(effects (font (size 0.8 0.8) (bold yes)))
+				)
+				(pin passive line
+					(at -25.4 24.13 0)
+					(length 2.54)
+					(name "J6.1/FPGA73" (effects (font (size 1 1))))
+					(number "J6.1" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 21.59 0)
+					(length 2.54)
+					(name "J6.2/FPGA74" (effects (font (size 1 1))))
+					(number "J6.2" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 19.05 0)
+					(length 2.54)
+					(name "J6.3/FPGA75" (effects (font (size 1 1))))
+					(number "J6.3" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 16.51 0)
+					(length 2.54)
+					(name "J6.4/FPGA85" (effects (font (size 1 1))))
+					(number "J6.4" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 13.97 0)
+					(length 2.54)
+					(name "J6.5/FPGA77" (effects (font (size 1 1))))
+					(number "J6.5" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 11.43 0)
+					(length 2.54)
+					(name "J6.6/FPGA15_LED0" (effects (font (size 1 1))))
+					(number "J6.6" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 8.89 0)
+					(length 2.54)
+					(name "J6.7/FPGA16_LED1" (effects (font (size 1 1))))
+					(number "J6.7" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 6.35 0)
+					(length 2.54)
+					(name "J6.8/FPGA27" (effects (font (size 1 1))))
+					(number "J6.8" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 3.81 0)
+					(length 2.54)
+					(name "J6.9/FPGA28" (effects (font (size 1 1))))
+					(number "J6.9" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 1.27 0)
+					(length 2.54)
+					(name "J6.10/FPGA25" (effects (font (size 1 1))))
+					(number "J6.10" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -1.27 0)
+					(length 2.54)
+					(name "J6.11/FPGA26" (effects (font (size 1 1))))
+					(number "J6.11" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -3.81 0)
+					(length 2.54)
+					(name "J6.12/FPGA29" (effects (font (size 1 1))))
+					(number "J6.12" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -6.35 0)
+					(length 2.54)
+					(name "J6.13/FPGA30" (effects (font (size 1 1))))
+					(number "J6.13" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -8.89 0)
+					(length 2.54)
+					(name "J6.14/FPGA31" (effects (font (size 1 1))))
+					(number "J6.14" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -11.43 0)
+					(length 2.54)
+					(name "J6.15/FPGA17_LED2" (effects (font (size 1 1))))
+					(number "J6.15" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -13.97 0)
+					(length 2.54)
+					(name "J6.16/FPGA20_LED5" (effects (font (size 1 1))))
+					(number "J6.16" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -16.51 0)
+					(length 2.54)
+					(name "J6.17/FPGA19_LED4" (effects (font (size 1 1))))
+					(number "J6.17" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -19.05 0)
+					(length 2.54)
+					(name "J6.18/FPGA18_LED3" (effects (font (size 1 1))))
+					(number "J6.18" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -21.59 0)
+					(length 2.54)
+					(name "J6.19/3V3_OUT_NC" (effects (font (size 1 1))))
+					(number "J6.19" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -25.4 -24.13 0)
+					(length 2.54)
+					(name "J6.20/GND" (effects (font (size 1 1))))
+					(number "J6.20" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 24.13 180)
+					(length 2.54)
+					(name "J5.1/5V" (effects (font (size 1 1))))
+					(number "J5.1" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 21.59 180)
+					(length 2.54)
+					(name "J5.2/GND" (effects (font (size 1 1))))
+					(number "J5.2" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 19.05 180)
+					(length 2.54)
+					(name "J5.3/FPGA76_GCLK" (effects (font (size 1 1))))
+					(number "J5.3" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 16.51 180)
+					(length 2.54)
+					(name "J5.4/FPGA80" (effects (font (size 1 1))))
+					(number "J5.4" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 13.97 180)
+					(length 2.54)
+					(name "J5.5/FPGA42" (effects (font (size 1 1))))
+					(number "J5.5" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 11.43 180)
+					(length 2.54)
+					(name "J5.6/FPGA41" (effects (font (size 1 1))))
+					(number "J5.6" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 8.89 180)
+					(length 2.54)
+					(name "J5.7/FPGA56" (effects (font (size 1 1))))
+					(number "J5.7" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 6.35 180)
+					(length 2.54)
+					(name "J5.8/FPGA54" (effects (font (size 1 1))))
+					(number "J5.8" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 3.81 180)
+					(length 2.54)
+					(name "J5.9/FPGA51_PA_EN" (effects (font (size 1 1))))
+					(number "J5.9" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 1.27 180)
+					(length 2.54)
+					(name "J5.10/FPGA48" (effects (font (size 1 1))))
+					(number "J5.10" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -1.27 180)
+					(length 2.54)
+					(name "J5.11/FPGA55" (effects (font (size 1 1))))
+					(number "J5.11" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -3.81 180)
+					(length 2.54)
+					(name "J5.12/FPGA49" (effects (font (size 1 1))))
+					(number "J5.12" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -6.35 180)
+					(length 2.54)
+					(name "J5.13/FPGA86" (effects (font (size 1 1))))
+					(number "J5.13" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -8.89 180)
+					(length 2.54)
+					(name "J5.14/FPGA79_WS2812" (effects (font (size 1 1))))
+					(number "J5.14" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -11.43 180)
+					(length 2.54)
+					(name "J5.15/GND" (effects (font (size 1 1))))
+					(number "J5.15" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -13.97 180)
+					(length 2.54)
+					(name "J5.16/3V3_OUT_NC" (effects (font (size 1 1))))
+					(number "J5.16" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -16.51 180)
+					(length 2.54)
+					(name "J5.17/FPGA72" (effects (font (size 1 1))))
+					(number "J5.17" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -19.05 180)
+					(length 2.54)
+					(name "J5.18/FPGA71" (effects (font (size 1 1))))
+					(number "J5.18" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -21.59 180)
+					(length 2.54)
+					(name "J5.19/FPGA53_EDID_CLK" (effects (font (size 1 1))))
+					(number "J5.19" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 25.4 -24.13 180)
+					(length 2.54)
+					(name "J5.20/FPGA52_EDID_DAT" (effects (font (size 1 1))))
+					(number "J5.20" (effects (font (size 1 1))))
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "TSVDAC:AUDIO_1X4"
+			(pin_names (offset 0.762))
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "J"
+				(at -10.16 10.16 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Value" "AUDIO OUT L-AGND-AGND-R"
+				(at 10.16 10.16 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Description" "Stereo line output; both centre pins are analog ground"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(symbol "AUDIO_1X4_1_1"
+				(rectangle
+					(start -10.16 5.08)
+					(end 10.16 -5.08)
+					(stroke (width 0.254) (type default))
+					(fill (type background))
+				)
+				(text ""
+					(at 0 3.81 0)
+					(effects (font (size 0.8 0.8) (bold yes)))
+				)
+				(pin passive line
+					(at -12.7 1.27 0)
+					(length 2.54)
+					(name "LOUT" (effects (font (size 1 1))))
+					(number "1" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -12.7 -1.27 0)
+					(length 2.54)
+					(name "AGND" (effects (font (size 1 1))))
+					(number "2" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 12.7 1.27 180)
+					(length 2.54)
+					(name "AGND" (effects (font (size 1 1))))
+					(number "3" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 12.7 -1.27 180)
+					(length 2.54)
+					(name "ROUT" (effects (font (size 1 1))))
+					(number "4" (effects (font (size 1 1))))
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "TSVDAC:FDD_POWER_1X4"
+			(pin_names (offset 0.762))
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "J"
+				(at -12.7 10.16 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Value" "TE 171826-4 FLOPPY POWER"
+				(at 12.7 10.16 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Footprint" "TSVDAC:TE_171826-4_Horizontal_1x04_P2.50mm"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Description" "Keyed 4-pin miniature peripheral power header; +12 V unused"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(symbol "FDD_POWER_1X4_1_1"
+				(rectangle
+					(start -12.7 5.08)
+					(end 12.7 -5.08)
+					(stroke (width 0.254) (type default))
+					(fill (type background))
+				)
+				(text ""
+					(at 0 3.81 0)
+					(effects (font (size 0.8 0.8) (bold yes)))
+				)
+				(pin passive line
+					(at -15.24 1.27 0)
+					(length 2.54)
+					(name "+5V" (effects (font (size 1 1))))
+					(number "4" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -15.24 -1.27 0)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "2" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 15.24 1.27 180)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "3" (effects (font (size 1 1))))
+				)
+				(pin no_connect line
+					(at 15.24 -1.27 180)
+					(length 2.54)
+					(name "+12V_NC" (effects (font (size 1 1))))
+					(number "1" (effects (font (size 1 1))))
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "TSVDAC:GY_PCM5102"
+			(pin_names (offset 0.762))
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "A"
+				(at -17.78 14.605 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Value" "TZT GY-PCM5102"
+				(at 17.78 14.605 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Footprint" "TSVDAC:GY_PCM5102_32x17_Provisional"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Description" "Complete TZT module with onboard regulators, DAC, filters and jack"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(symbol "GY_PCM5102_1_1"
+				(rectangle
+					(start -17.78 11.43)
+					(end 17.78 -11.43)
+					(stroke (width 0.254) (type default))
+					(fill (type background))
+				)
+				(text ""
+					(at 0 10.16 0)
+					(effects (font (size 0.8 0.8) (bold yes)))
+				)
+				(pin input line
+					(at -20.32 8.89 0)
+					(length 2.54)
+					(name "SCK" (effects (font (size 1 1))))
+					(number "1" (effects (font (size 1 1))))
+				)
+				(pin input line
+					(at -20.32 6.35 0)
+					(length 2.54)
+					(name "BCK" (effects (font (size 1 1))))
+					(number "2" (effects (font (size 1 1))))
+				)
+				(pin input line
+					(at -20.32 3.81 0)
+					(length 2.54)
+					(name "DIN" (effects (font (size 1 1))))
+					(number "3" (effects (font (size 1 1))))
+				)
+				(pin input line
+					(at -20.32 1.27 0)
+					(length 2.54)
+					(name "LCK" (effects (font (size 1 1))))
+					(number "4" (effects (font (size 1 1))))
+				)
+				(pin power_in line
+					(at -20.32 -1.27 0)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "5" (effects (font (size 1 1))))
+				)
+				(pin power_in line
+					(at -20.32 -3.81 0)
+					(length 2.54)
+					(name "VIN_5V" (effects (font (size 1 1))))
+					(number "6" (effects (font (size 1 1))))
+				)
+				(pin output line
+					(at -20.32 -6.35 0)
+					(length 2.54)
+					(name "LOUT" (effects (font (size 1 1))))
+					(number "7" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at -20.32 -8.89 0)
+					(length 2.54)
+					(name "AGND" (effects (font (size 1 1))))
+					(number "8" (effects (font (size 1 1))))
+				)
+				(pin output line
+					(at 20.32 7.62 180)
+					(length 2.54)
+					(name "ROUT" (effects (font (size 1 1))))
+					(number "9" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 20.32 5.08 180)
+					(length 2.54)
+					(name "AGND" (effects (font (size 1 1))))
+					(number "10" (effects (font (size 1 1))))
+				)
+				(pin power_out line
+					(at 20.32 2.54 180)
+					(length 2.54)
+					(name "A3V3_OUT" (effects (font (size 1 1))))
+					(number "11" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 20.32 0 180)
+					(length 2.54)
+					(name "FMT_STRAP" (effects (font (size 1 1))))
+					(number "12" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 20.32 -2.54 180)
+					(length 2.54)
+					(name "XSMT_STRAP" (effects (font (size 1 1))))
+					(number "13" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 20.32 -5.08 180)
+					(length 2.54)
+					(name "DEMP_STRAP" (effects (font (size 1 1))))
+					(number "14" (effects (font (size 1 1))))
+				)
+				(pin passive line
+					(at 20.32 -7.62 180)
+					(length 2.54)
+					(name "FLT_STRAP" (effects (font (size 1 1))))
+					(number "15" (effects (font (size 1 1))))
+				)
+			)
+			(embedded_fonts no)
+		)
+		(symbol "TSVDAC:TXU0101"
+			(pin_names (offset 0.762))
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "U"
+				(at -15.24 10.16 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Value" "TXU0101DBVR"
+				(at 15.24 10.16 0)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Footprint" "Package_TO_SOT_SMD:SOT-23-6"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(property "Description" "TI TXU0101 DBV; fixed A-to-B translation, active-high OE, either-rail isolation"
+				(at 0 0 0)
+				(hide yes)
+				(effects
+					(font (size 1.27 1.27))
+				)
+			)
+			(symbol "TXU0101_1_1"
+				(rectangle
+					(start -15.24 5.08)
+					(end 15.24 -5.08)
+					(stroke (width 0.254) (type default))
+					(fill (type background))
+				)
+				(text ""
+					(at 0 3.81 0)
+					(effects (font (size 0.8 0.8) (bold yes)))
+				)
+				(pin power_in line
+					(at -17.78 2.54 0)
+					(length 2.54)
+					(name "VCCA" (effects (font (size 1 1))))
+					(number "1" (effects (font (size 1 1))))
+				)
+				(pin power_in line
+					(at -17.78 0 0)
+					(length 2.54)
+					(name "GND" (effects (font (size 1 1))))
+					(number "2" (effects (font (size 1 1))))
+				)
+				(pin input line
+					(at -17.78 -2.54 0)
+					(length 2.54)
+					(name "A" (effects (font (size 1 1))))
+					(number "3" (effects (font (size 1 1))))
+				)
+				(pin tri_state line
+					(at 17.78 2.54 180)
+					(length 2.54)
+					(name "BY" (effects (font (size 1 1))))
+					(number "4" (effects (font (size 1 1))))
+				)
+				(pin input line
+					(at 17.78 0 180)
+					(length 2.54)
+					(name "OE" (effects (font (size 1 1))))
+					(number "5" (effects (font (size 1 1))))
+				)
+				(pin power_in line
+					(at 17.78 -2.54 180)
+					(length 2.54)
+					(name "VCCB" (effects (font (size 1 1))))
+					(number "6" (effects (font (size 1 1))))
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "Device:R"
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 0)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "R"
+				(at 2.032 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "R"
+				(at 0 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at -1.778 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Resistor"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "R res resistor"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "R_*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "R_0_1"
+				(rectangle
+					(start -1.016 -2.54)
+					(end 1.016 2.54)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "R_1_1"
+				(pin passive line
+					(at 0 3.81 270)
+					(length 1.27)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -3.81 90)
+					(length 1.27)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "Device:C"
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 0.254)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "C"
+				(at 0.635 2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Value" "C"
+				(at 0.635 -2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" ""
+				(at 0.9652 -3.81 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Unpolarized capacitor"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "cap capacitor"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "C_*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "C_0_1"
+				(polyline
+					(pts
+						(xy -2.032 0.762) (xy 2.032 0.762)
+					)
+					(stroke
+						(width 0.508)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -2.032 -0.762) (xy 2.032 -0.762)
+					)
+					(stroke
+						(width 0.508)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "C_1_1"
+				(pin passive line
+					(at 0 3.81 270)
+					(length 2.794)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -3.81 90)
+					(length 2.794)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "Device:D_Schottky"
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 1.016)
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "D"
+				(at 0 2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "D_Schottky"
+				(at 0 -2.54 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Schottky diode"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "diode Schottky"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "TO-???* *_Diode_* *SingleDiode* D_*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "D_Schottky_0_1"
+				(polyline
+					(pts
+						(xy -1.905 0.635) (xy -1.905 1.27) (xy -1.27 1.27) (xy -1.27 -1.27) (xy -0.635 -1.27) (xy -0.635 -0.635)
+					)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 1.27 1.27) (xy 1.27 -1.27) (xy -1.27 0) (xy 1.27 1.27)
+					)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 1.27 0) (xy -1.27 0)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "D_Schottky_1_1"
+				(pin passive line
+					(at -3.81 0 0)
+					(length 2.54)
+					(name "K"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 3.81 0 180)
+					(length 2.54)
+					(name "A"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "Device:Polyfuse"
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 0)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "F"
+				(at -2.54 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "Polyfuse"
+				(at 2.54 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 1.27 -5.08 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Resettable fuse, polymeric positive temperature coefficient"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "resettable fuse PTC PPTC polyfuse polyswitch"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "*polyfuse* *PTC*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "Polyfuse_0_1"
+				(polyline
+					(pts
+						(xy -1.524 2.54) (xy -1.524 1.524) (xy 1.524 -1.524) (xy 1.524 -2.54)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(rectangle
+					(start -0.762 2.54)
+					(end 0.762 -2.54)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 0 2.54) (xy 0 -2.54)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "Polyfuse_1_1"
+				(pin passive line
+					(at 0 3.81 270)
+					(length 1.27)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -3.81 90)
+					(length 1.27)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "TSVDAC:SN74LVC245A_AtoB"
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "U"
+				(at -10.16 17.78 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "SN74LVC245APW"
+				(at 10.16 17.78 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm"
+				(at 22.86 -16.51 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" "https://www.ti.com/lit/ds/scas218x/scas218x.pdf"
+				(at -1.27 -6.35 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "8-Bit Single-Supply Bus Transceiver With 5V tolerant input voltage and 3-State Outputs 24mA, TSSOP-20"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "Noninverting Bidirectional"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "TSSOP*4.4x6.5mm*P0.65mm*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "SN74LVC245A_AtoB_0_1"
+				(rectangle
+					(start -10.16 15.24)
+					(end 10.16 -15.24)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+			)
+			(symbol "SN74LVC245A_AtoB_1_1"
+				(pin input line
+					(at -12.7 10.16 0)
+					(length 2.54)
+					(name "DIR"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 5.08 0)
+					(length 2.54)
+					(name "A1"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 2.54 0)
+					(length 2.54)
+					(name "A2"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 0 0)
+					(length 2.54)
+					(name "A3"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 -2.54 0)
+					(length 2.54)
+					(name "A4"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "5"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 -5.08 0)
+					(length 2.54)
+					(name "A5"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "6"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 -7.62 0)
+					(length 2.54)
+					(name "A6"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "7"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 -10.16 0)
+					(length 2.54)
+					(name "A7"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "8"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 -12.7 0)
+					(length 2.54)
+					(name "A8"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "9"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 0 -17.78 90)
+					(length 2.54)
+					(name "GND"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "10"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 -12.7 180)
+					(length 2.54)
+					(name "B8"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "11"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 -10.16 180)
+					(length 2.54)
+					(name "B7"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "12"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 -7.62 180)
+					(length 2.54)
+					(name "B6"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "13"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 -5.08 180)
+					(length 2.54)
+					(name "B5"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "14"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 -2.54 180)
+					(length 2.54)
+					(name "B4"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "15"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 0 180)
+					(length 2.54)
+					(name "B3"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "16"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 2.54 180)
+					(length 2.54)
+					(name "B2"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "17"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 5.08 180)
+					(length 2.54)
+					(name "B1"
+						(effects
+							(font
+								(size 1.27 1.27)
+				)
+						)
+					)
+					(number "18"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at 12.7 10.16 180)
+					(length 2.54)
+					(name "~{OE}"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "19"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 0 17.78 270)
+					(length 2.54)
+					(name "VCC"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "20"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "TSVDAC:TLV75533PDBV"
+			(pin_names
+				(offset 0.254)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "U"
+				(at -3.81 5.715 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "TLV70012_SOT23-5"
+				(at 0 5.715 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Footprint" "Package_TO_SOT_SMD:SOT-23-5"
+				(at 0 8.255 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+						(italic yes)
+					)
+				)
+			)
+			(property "Datasheet" "http://www.ti.com/lit/ds/symlink/tlv700.pdf"
+				(at 0 1.27 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "200mA Low Dropout Voltage Regulator, Fixed Output 1.2V, SOT-23-5"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "200mA LDO Regulator Fixed Positive"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "SOT?23*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "TLV75533PDBV_0_1"
+				(rectangle
+					(start -5.08 4.445)
+					(end 5.08 -5.08)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+			)
+			(symbol "TLV75533PDBV_1_1"
+				(pin power_in line
+					(at -7.62 2.54 0)
+					(length 2.54)
+					(name "IN"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 0 -7.62 90)
+					(length 2.54)
+					(name "GND"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -7.62 0 0)
+					(length 2.54)
+					(name "EN"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin no_connect line
+					(at 5.08 0 180)
+					(length 2.54)
+					(hide yes)
+					(name "NC"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_out line
+					(at 7.62 2.54 180)
+					(length 2.54)
+					(name "OUT"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "5"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "power:PWR_FLAG"
+			(power global)
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 0)
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "#FLG"
+				(at 0 1.905 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "PWR_FLAG"
+				(at 0 3.81 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Special symbol for telling ERC where power comes from"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "flag power"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "PWR_FLAG_0_0"
+				(pin power_out line
+					(at 0 0 90)
+					(length 0)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(symbol "PWR_FLAG_0_1"
+				(polyline
+					(pts
+						(xy 0 0) (xy 0 1.27) (xy -1.016 1.905) (xy 0 2.54) (xy 1.016 1.905) (xy 0 1.27)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "TSVDAC:SN74LVC1G97"
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "U"
+				(at -5.08 10.16 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "74LVC1G57"
+				(at 7.62 -10.16 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" "http://www.ti.com/lit/sg/scyt129e/scyt129e.pdf"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Configurable Multi-Function Single Gate, Low-Voltage CMOS"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "Configurable Single Gate LVC CMOS"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "SOT* SC*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "SN74LVC1G97_0_1"
+				(rectangle
+					(start -7.62 7.62)
+					(end 7.62 -7.62)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+			)
+			(symbol "SN74LVC1G97_1_1"
+				(pin input line
+					(at -12.7 0 0)
+					(length 5.08)
+					(name "IN1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 0 -12.7 90)
+					(length 5.08)
+					(name "GND"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 5.08 0)
+					(length 5.08)
+					(name "IN0"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin output line
+					(at 12.7 0 180)
+					(length 5.08)
+					(name "Y"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 0 12.7 270)
+					(length 5.08)
+					(name "VCC"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "5"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 -5.08 0)
+					(length 5.08)
+					(name "IN2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "6"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "TSVDAC:SN74LVC257A"
+			(pin_names
+				(offset 1.016)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "U"
+				(at -7.62 19.05 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "74LS257"
+				(at -7.62 -21.59 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" "http://www.ti.com/lit/gpn/sn74LS257"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Quad 2 to 1 Multiplexer"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_locked" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "TTL MUX MUX2"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "DIP?16*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "SN74LVC257A_1_0"
+				(pin input line
+					(at -12.7 -15.24 0)
+					(length 5.08)
+					(name "S"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 15.24 0)
+					(length 5.08)
+					(name "I0a"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 12.7 0)
+					(length 5.08)
+					(name "I1a"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 15.24 180)
+					(length 5.08)
+					(name "Za"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 7.62 0)
+					(length 5.08)
+					(name "I0b"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "5"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 5.08 0)
+					(length 5.08)
+					(name "I1b"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "6"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 7.62 180)
+					(length 5.08)
+					(name "Zb"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "7"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 0 -25.4 90)
+					(length 5.08)
+					(name "GND"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "8"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 -7.62 180)
+					(length 5.08)
+					(name "Zd"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "9"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 -10.16 0)
+					(length 5.08)
+					(name "I1d"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "10"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 -7.62 0)
+					(length 5.08)
+					(name "I0d"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "11"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin tri_state line
+					(at 12.7 0 180)
+					(length 5.08)
+					(name "Zc"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "12"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 -2.54 0)
+					(length 5.08)
+					(name "I1c"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "13"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -12.7 0 0)
+					(length 5.08)
+					(name "I0c"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "14"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input inverted
+					(at -12.7 -17.78 0)
+					(length 5.08)
+					(name "OE"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "15"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 0 22.86 270)
+					(length 5.08)
+					(name "VCC"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "16"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(symbol "SN74LVC257A_1_1"
+				(rectangle
+					(start -7.62 17.78)
+					(end 7.62 -20.32)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "Device:R_Pack04"
+			(pin_names
+				(offset 0)
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "RN"
+				(at -7.62 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "R_Pack04"
+				(at 5.08 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 6.985 0 90)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "4 resistor network, parallel topology"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "R network parallel topology isolated"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "DIP* SOIC* R*Array*Concave* R*Array*Convex* MSOP*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "R_Pack04_0_1"
+				(rectangle
+					(start -6.35 -2.413)
+					(end 3.81 2.413)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+				(rectangle
+					(start -5.715 1.905)
+					(end -4.445 -1.905)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -5.08 1.905) (xy -5.08 2.54)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -5.08 -2.54) (xy -5.08 -1.905)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(rectangle
+					(start -3.175 1.905)
+					(end -1.905 -1.905)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -2.54 1.905) (xy -2.54 2.54)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy -2.54 -2.54) (xy -2.54 -1.905)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(rectangle
+					(start -0.635 1.905)
+					(end 0.635 -1.905)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 0 1.905) (xy 0 2.54)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 0 -2.54) (xy 0 -1.905)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(rectangle
+					(start 1.905 1.905)
+					(end 3.175 -1.905)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 2.54 1.905) (xy 2.54 2.54)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+				(polyline
+					(pts
+						(xy 2.54 -2.54) (xy 2.54 -1.905)
+					)
+					(stroke
+						(width 0)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "R_Pack04_1_1"
+				(pin passive line
+					(at -5.08 -5.08 90)
+					(length 2.54)
+					(name "R1.1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at -2.54 -5.08 90)
+					(length 2.54)
+					(name "R2.1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -5.08 90)
+					(length 2.54)
+					(name "R3.1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 2.54 -5.08 90)
+					(length 2.54)
+					(name "R4.1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 2.54 5.08 270)
+					(length 2.54)
+					(name "R4.2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "5"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 5.08 270)
+					(length 2.54)
+					(name "R3.2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "6"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at -2.54 5.08 270)
+					(length 2.54)
+					(name "R2.2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "7"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at -5.08 5.08 270)
+					(length 2.54)
+					(name "R1.2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "8"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "Device:NetTie_2"
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 0)
+				(hide yes)
+			)
+			(exclude_from_sim no)
+			(in_bom no)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "NT"
+				(at 0 1.27 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "NetTie_2"
+				(at 0 -1.27 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Net tie, 2 pins"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "net tie short"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "Net*Tie*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "NetTie_2_0_1"
+				(polyline
+					(pts
+						(xy -1.27 0) (xy 1.27 0)
+					)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "NetTie_2_1_1"
+				(pin passive line
+					(at -2.54 0 0)
+					(length 2.54)
+					(name "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 2.54 0 180)
+					(length 2.54)
+					(name "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "74xGxx:74LVC1G00"
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "U"
+				(at -5.08 7.62 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "74LVC1G00"
+				(at 7.62 -7.62 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Datasheet" "https://www.ti.com/lit/ds/symlink/sn74lvc1g00.pdf"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Description" "Single NAND Gate, Low-Voltage CMOS"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "Single Gate NAND LVC CMOS"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "SOT?23* Texas?R-PDSO-G5?DCK* Texas?R-PDSO-N5?DRL* Texas?X2SON*0.8x0.8mm*P0.48mm*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "74LVC1G00_0_1"
+				(arc
+					(start 0 5.08)
+					(mid 5.0579 0)
+					(end 0 -5.08)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+				(polyline
+					(pts
+						(xy 0 -5.08) (xy -7.62 -5.08) (xy -7.62 5.08) (xy 0 5.08)
+					)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+			)
+			(symbol "74LVC1G00_1_1"
+				(pin input line
+					(at -15.24 2.54 0)
+					(length 7.62)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -15.24 -2.54 0)
+					(length 7.62)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 0 -10.16 90)
+					(length 5.08)
+					(name "GND"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin output inverted
+					(at 12.7 0 180)
+					(length 7.62)
+					(name ""
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 0 10.16 270)
+					(length 5.08)
+					(name "VCC"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "5"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	(symbol "Jumper:SolderJumper_2_Open"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(in_pos_files yes)
+		(duplicate_pin_numbers_are_jumpers no)
+		(property "Reference" "JP"
+			(at 0 2.032 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "SolderJumper_2_Open"
+			(at 0 -2.54 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 -7.62 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Solder Jumper, 2-pole, open"
+			(at 0 -5.08 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_keywords" "solder jumper SPST"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_fp_filters" "SolderJumper*Open*"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(symbol "SolderJumper_2_Open_0_1"
+			(polyline
+				(pts
+					(xy -0.254 1.016) (xy -0.254 -1.016)
+				)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(arc
+				(start -0.254 -1.016)
+				(mid -1.2656 0)
+				(end -0.254 1.016)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type outline)
+				)
+			)
+			(arc
+				(start 0.254 1.016)
+				(mid 1.2656 0)
+				(end 0.254 -1.016)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type outline)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0.254 1.016) (xy 0.254 -1.016)
+				)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "SolderJumper_2_Open_1_1"
+			(pin passive line
+				(at -5.08 0 0)
+				(length 3.81)
+				(name "A"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 5.08 0 180)
+				(length 3.81)
+				(name "B"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	(symbol "Jumper:SolderJumper_3_Open"
+		(pin_names
+			(offset 0)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(in_pos_files yes)
+		(duplicate_pin_numbers_are_jumpers no)
+		(property "Reference" "JP"
+			(at -2.54 -2.54 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "SolderJumper_3_Open"
+			(at 0 2.794 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 -15.24 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Solder Jumper, 3-pole, open"
+			(at 0 -12.7 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property private "KLC_S5.1" "This is a generic symbol, it has fp-filter, but no default footprint"
+			(at 0 -17.78 0)
+			(show_name yes)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property private "KLC_S3.3" "Graphical-Symbol: thickness is 6mm, fill is background"
+			(at 0 -20.32 0)
+			(show_name yes)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_keywords" "Solder Jumper SPDT"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_fp_filters" "SolderJumper*Open*"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(symbol "SolderJumper_3_Open_0_1"
+			(polyline
+				(pts
+					(xy -2.54 0) (xy -2.032 0)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy -1.016 1.016) (xy -1.016 -1.016)
+				)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(arc
+				(start -1.016 -1.016)
+				(mid -2.0276 0)
+				(end -1.016 1.016)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type outline)
+				)
+			)
+			(rectangle
+				(start -0.508 1.016)
+				(end 0.508 -1.016)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type outline)
+				)
+			)
+			(polyline
+				(pts
+					(xy 0 -1.27) (xy 0 -1.016)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(arc
+				(start 1.016 1.016)
+				(mid 2.0276 0)
+				(end 1.016 -1.016)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type outline)
+				)
+			)
+			(polyline
+				(pts
+					(xy 1.016 1.016) (xy 1.016 -1.016)
+				)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(polyline
+				(pts
+					(xy 2.54 0) (xy 2.032 0)
+				)
+				(stroke
+					(width 0)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "SolderJumper_3_Open_1_1"
+			(pin passive line
+				(at -5.08 0 0)
+				(length 2.54)
+				(name "A"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 2.54)
+				(name "C"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 5.08 0 180)
+				(length 2.54)
+				(name "B"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+	)
+	(symbol
+		(lib_id "TSVDAC:GY_PCM5102")
+		(at 90.17 208.28 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "773247c2-e62c-526a-b125-9d8feb95e1a3")
+		(property "Reference" "A3"
+			(at 90.17 189.23 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "TZT GY-PCM5102 I2S"
+			(at 90.17 193.04 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "TSVDAC:GY_PCM5102_32x17_Provisional"
+			(at 90.17 208.28 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "TZT"
+			(at 90.17 208.28 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "GY-PCM5102"
+			(at 90.17 208.28 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.tztstore.com/goods/show-5605.html"
+			(at 90.17 208.28 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Complete module; FLT/DEMP/FMT=L XSMT=H; verify provisional footprint 1:1"
+			(at 90.17 208.28 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "USER"
+			(at 90.17 208.28 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Socket MPN" "PM2.54-1*9 + PM2.54-1*6"
+			(at 90.17 208.28 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Socket LCSC" "C5224028 + C5224026"
+			(at 90.17 208.28 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "Insert ready GY-PCM5102 (with its male headers soldered) into J10/J11 after carrier inspection; top-side female 1x9 + 1x6 sockets, ZHOURI PM2.54, body height 8.5mm"
+			(at 90.17 208.28 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "e3931124-c90f-507a-9d5e-1d145cc35402"))
+		(pin "2" (uuid "1a59fd14-4004-54aa-b414-083423303201"))
+		(pin "3" (uuid "65862931-ac5e-5382-8997-b4da8328465f"))
+		(pin "4" (uuid "f3539930-e58d-5005-b125-102a63070bb5"))
+		(pin "5" (uuid "8e5d4d10-33bb-55a6-b554-4ab6115e684c"))
+		(pin "6" (uuid "4eb02c68-ebab-523d-bbdd-3fba8719668b"))
+		(pin "7" (uuid "81462e41-5ad5-50e9-8a5e-9a7bf704418b"))
+		(pin "8" (uuid "8c9a1220-3714-58ea-a43e-eefe9934fd99"))
+		(pin "9" (uuid "67ba0349-e3f5-5369-882c-c76d8c743232"))
+		(pin "10" (uuid "2e179c29-fed7-5afe-a752-94eeb61bf1d3"))
+		(pin "11" (uuid "e894f85b-c692-5cb5-bb29-7eec875d590e"))
+		(pin "12" (uuid "6feee7ef-7ba5-539d-803d-e76460e751ec"))
+		(pin "13" (uuid "8ab4527d-6496-549a-98da-e8c5412cc135"))
+		(pin "14" (uuid "94de705d-8e1e-53f6-8a94-bf45e055d4d4"))
+		(pin "15" (uuid "6906cf50-0307-5310-b50f-ee82d7230aae"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "A3") (unit 1))))
+	)
+	(wire (pts (xy 69.85 199.39) (xy 62.23 199.39))
+		(stroke (width 0) (type default))
+		(uuid "3cb312be-a6a0-5bcb-a13d-da2def1d4e06")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 62.23 199.39 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "4cbf1439-66a6-53e9-95f5-271de8815102")
+	)
+	(wire (pts (xy 69.85 201.93) (xy 62.23 201.93))
+		(stroke (width 0) (type default))
+		(uuid "ffc7781c-1836-5bd8-aacf-3df64a5dcac8")
+	)
+	(global_label "I2S_BCK"
+		(shape passive)
+		(at 62.23 201.93 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "e7ca87fe-bccf-56ca-88f8-f654490054b5")
+	)
+	(wire (pts (xy 69.85 204.47) (xy 62.23 204.47))
+		(stroke (width 0) (type default))
+		(uuid "a954d9c0-f04b-5f3a-8ea6-ae9ea131c438")
+	)
+	(global_label "I2S_DIN"
+		(shape passive)
+		(at 62.23 204.47 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "3ab6e1f9-7ba8-5d8f-bf2c-f88b8a734a49")
+	)
+	(wire (pts (xy 69.85 207.01) (xy 62.23 207.01))
+		(stroke (width 0) (type default))
+		(uuid "18588801-d7f2-5708-a2cf-22552a7a9f47")
+	)
+	(global_label "I2S_LRCK"
+		(shape passive)
+		(at 62.23 207.01 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "0eff18bb-d2c2-5a00-82a1-46a290baedb0")
+	)
+	(wire (pts (xy 69.85 209.55) (xy 62.23 209.55))
+		(stroke (width 0) (type default))
+		(uuid "c67aee18-3d28-5633-9b27-e7ff807cc387")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 62.23 209.55 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "f34a3bf3-94c1-5676-aea2-7ae461a92132")
+	)
+	(wire (pts (xy 69.85 212.09) (xy 62.23 212.09))
+		(stroke (width 0) (type default))
+		(uuid "a67eaf47-2d87-5476-828a-36cf89c8da35")
+	)
+	(global_label "+5V_FUSED"
+		(shape passive)
+		(at 62.23 212.09 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "514a298f-287d-5a30-b6fb-7d10e78fe3e7")
+	)
+	(wire (pts (xy 69.85 214.63) (xy 62.23 214.63))
+		(stroke (width 0) (type default))
+		(uuid "4df5ddb3-8236-562b-9f76-e599397d7762")
+	)
+	(global_label "DAC_LOUT_RAW"
+		(shape passive)
+		(at 62.23 214.63 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "0101ca8a-393e-58fc-9f7a-85e0cef740db")
+	)
+	(wire (pts (xy 69.85 217.17) (xy 62.23 217.17))
+		(stroke (width 0) (type default))
+		(uuid "dddaf0fc-f04b-5a40-9698-0168bd314e3b")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 62.23 217.17 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "cb8051cf-d509-5af2-96ea-07b5afc0406c")
+	)
+	(wire (pts (xy 110.49 200.66) (xy 118.11 200.66))
+		(stroke (width 0) (type default))
+		(uuid "ee248f47-6f02-5f77-8bf6-575339bae99d")
+	)
+	(global_label "DAC_ROUT_RAW"
+		(shape passive)
+		(at 118.11 200.66 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "32f78bdb-ba73-5dbb-9670-854fea5335db")
+	)
+	(wire (pts (xy 110.49 203.2) (xy 118.11 203.2))
+		(stroke (width 0) (type default))
+		(uuid "8348ced5-fca7-53d4-8845-82bd6c19c6c1")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 118.11 203.2 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "9727e0fa-25f0-50b7-9b02-cee1e73cfa10")
+	)
+	(wire (pts (xy 110.49 205.74) (xy 118.11 205.74))
+		(stroke (width 0) (type default))
+		(uuid "8f99b493-3d53-5762-88a0-0705658f1643")
+	)
+	(global_label "DAC_A3V3"
+		(shape passive)
+		(at 118.11 205.74 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "79dfb8a6-0227-5e2b-9fc4-2f76363ffd9b")
+	)
+	(wire (pts (xy 110.49 208.28) (xy 118.11 208.28))
+		(stroke (width 0) (type default))
+		(uuid "1b8588be-2b0f-5846-ba73-7d1b9f6b789a")
+	)
+	(global_label "DAC_FMT"
+		(shape passive)
+		(at 118.11 208.28 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "7c3e8658-5368-5585-a8dd-3226c191a8b2")
+	)
+	(wire (pts (xy 110.49 210.82) (xy 118.11 210.82))
+		(stroke (width 0) (type default))
+		(uuid "152eaaaa-a0d0-5513-b094-a9a2f3393e28")
+	)
+	(global_label "DAC_XSMT"
+		(shape passive)
+		(at 118.11 210.82 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "db614d66-e08d-5292-94c2-275be5ea1532")
+	)
+	(wire (pts (xy 110.49 213.36) (xy 118.11 213.36))
+		(stroke (width 0) (type default))
+		(uuid "d73418fb-a714-59a0-a65d-0f4e80970c75")
+	)
+	(global_label "DAC_DEMP"
+		(shape passive)
+		(at 118.11 213.36 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "f0f11fa3-7ae9-5fd1-b607-54b2fbcbaaca")
+	)
+	(wire (pts (xy 110.49 215.9) (xy 118.11 215.9))
+		(stroke (width 0) (type default))
+		(uuid "ec5d492a-7fe2-530d-a39b-8fdb4d01f71a")
+	)
+	(global_label "DAC_FLT"
+		(shape passive)
+		(at 118.11 215.9 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "848bff45-bfee-583b-9211-dc9c3a610a1f")
+	)
+	(symbol
+		(lib_id "Jumper:SolderJumper_2_Open")
+		(at 58.42 231.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "dce03173-f13c-5714-8876-235af7ff0609")
+		(property "Reference" "JP1"
+			(at 58.42 227.33 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "FMT=L"
+			(at 58.42 234.95 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Jumper:SolderJumper-2_P1.3mm_Open_RoundedPad1.0x1.5mm"
+			(at 58.42 231.14 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Open solder jumper for GY-PCM5102 strap; bridge with solder by hand; no purchased component"
+			(at 58.42 231.14 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "PCB"
+			(at 58.42 231.14 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "PCB copper feature; excluded from assembly BOM and placement files"
+			(at 58.42 231.14 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "f6090a0f-ee0a-59c3-9c31-c976fdd9b56a"))
+		(pin "2" (uuid "06a777d2-0490-5c1a-88e4-9e2225256e42"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "JP1") (unit 1))))
+	)
+	(wire (pts (xy 53.34 231.14) (xy 45.72 231.14))
+		(stroke (width 0) (type default))
+		(uuid "b71e45cf-6cd7-593f-a0ab-88ba17b8bf2b")
+	)
+	(global_label "DAC_FMT"
+		(shape passive)
+		(at 45.72 231.14 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "e6c93126-2035-5183-a1c7-4c41bc9f2485")
+	)
+	(wire (pts (xy 63.5 231.14) (xy 71.12 231.14))
+		(stroke (width 0) (type default))
+		(uuid "7e80845e-ba45-5fb0-bb3f-64eac0478446")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 71.12 231.14 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "d1a072c0-1482-5832-b301-708d5fbc89da")
+	)
+	(symbol
+		(lib_id "Jumper:SolderJumper_2_Open")
+		(at 116.84 231.14 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "df80bec3-400e-5ee9-8b88-23173ffda2c5")
+		(property "Reference" "JP2"
+			(at 116.84 227.33 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "XSMT=H"
+			(at 116.84 234.95 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Jumper:SolderJumper-2_P1.3mm_Open_RoundedPad1.0x1.5mm"
+			(at 116.84 231.14 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Open solder jumper for GY-PCM5102 strap; bridge with solder by hand; no purchased component"
+			(at 116.84 231.14 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "PCB"
+			(at 116.84 231.14 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "PCB copper feature; excluded from assembly BOM and placement files"
+			(at 116.84 231.14 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "1313496d-81e2-5c68-8344-106556300022"))
+		(pin "2" (uuid "e77eac82-2357-5855-ad49-43ae5045c0c1"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "JP2") (unit 1))))
+	)
+	(wire (pts (xy 111.76 231.14) (xy 104.14 231.14))
+		(stroke (width 0) (type default))
+		(uuid "694e5a30-e2e0-5e39-b3f1-ae11ae9ede2c")
+	)
+	(global_label "DAC_XSMT"
+		(shape passive)
+		(at 104.14 231.14 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "43e3b879-5f98-58d6-bb72-82daa0e915a9")
+	)
+	(wire (pts (xy 121.92 231.14) (xy 129.54 231.14))
+		(stroke (width 0) (type default))
+		(uuid "ab6c10e5-5f82-58fa-87f0-a9696395c734")
+	)
+	(global_label "DAC_A3V3"
+		(shape passive)
+		(at 129.54 231.14 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "573220f2-8f99-53b8-a151-0b0620bf9aa8")
+	)
+	(symbol
+		(lib_id "Jumper:SolderJumper_2_Open")
+		(at 58.42 243.84 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "e04b61d6-d557-5cbd-9559-aa02de7d420c")
+		(property "Reference" "JP3"
+			(at 58.42 240.03 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "DEMP=L"
+			(at 58.42 247.65 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Jumper:SolderJumper-2_P1.3mm_Open_RoundedPad1.0x1.5mm"
+			(at 58.42 243.84 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Open solder jumper for GY-PCM5102 strap; bridge with solder by hand; no purchased component"
+			(at 58.42 243.84 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "PCB"
+			(at 58.42 243.84 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "PCB copper feature; excluded from assembly BOM and placement files"
+			(at 58.42 243.84 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "46024b97-d18a-5ad9-8cf9-3dbe8b2bc87f"))
+		(pin "2" (uuid "feda7fb1-4247-5e52-a77f-bd06146925b7"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "JP3") (unit 1))))
+	)
+	(wire (pts (xy 53.34 243.84) (xy 45.72 243.84))
+		(stroke (width 0) (type default))
+		(uuid "f2aa8ff6-0a2d-5c4f-a603-5f25cd5a0b65")
+	)
+	(global_label "DAC_DEMP"
+		(shape passive)
+		(at 45.72 243.84 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "10bb9c97-5ae3-58da-97c1-65999881238b")
+	)
+	(wire (pts (xy 63.5 243.84) (xy 71.12 243.84))
+		(stroke (width 0) (type default))
+		(uuid "8aaabad3-54c2-5670-8b7f-3f6175f1cb70")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 71.12 243.84 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "f0aaa47e-d07d-5487-ae4a-3d30c85e64bb")
+	)
+	(symbol
+		(lib_id "Jumper:SolderJumper_2_Open")
+		(at 116.84 243.84 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "cd23d4a1-60da-5646-bf7e-42063c56fe78")
+		(property "Reference" "JP4"
+			(at 116.84 240.03 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "FLT=L"
+			(at 116.84 247.65 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Jumper:SolderJumper-2_P1.3mm_Open_RoundedPad1.0x1.5mm"
+			(at 116.84 243.84 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Open solder jumper for GY-PCM5102 strap; bridge with solder by hand; no purchased component"
+			(at 116.84 243.84 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "PCB"
+			(at 116.84 243.84 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "PCB copper feature; excluded from assembly BOM and placement files"
+			(at 116.84 243.84 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "368c99c8-fb44-56e3-be1d-279e93048ee6"))
+		(pin "2" (uuid "fc8db256-93ae-5d76-b2f0-89113201fdaa"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "JP4") (unit 1))))
+	)
+	(wire (pts (xy 111.76 243.84) (xy 104.14 243.84))
+		(stroke (width 0) (type default))
+		(uuid "3e4ddf34-b210-5342-8643-b33746fac850")
+	)
+	(global_label "DAC_FLT"
+		(shape passive)
+		(at 104.14 243.84 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "c33dc8c2-b045-50ba-b64a-dc3ebf09d78c")
+	)
+	(wire (pts (xy 121.92 243.84) (xy 129.54 243.84))
+		(stroke (width 0) (type default))
+		(uuid "e7698fe2-624c-5935-8696-8ab8155e3f50")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 129.54 243.84 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "c8b1f3b9-b1e8-5a69-95ff-b185f6252dba")
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 160.02 118.11 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "57698f0f-df2a-5eec-a1c9-2d5bfefb76c6")
+		(property "Reference" "C4"
+			(at 166.37 116.84 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "1u"
+			(at 166.37 119.38 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
+			(at 160.02 118.11 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "Samsung Electro-Mechanics"
+			(at 160.02 118.11 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "CL21B105KBFNNNE"
+			(at 160.02 118.11 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.lcsc.com/datasheet/lcsc_datasheet_2304140030_Samsung-Electro-Mechanics-CL21B105KBFNNNE_C28323.pdf"
+			(at 160.02 118.11 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C28323"
+			(at 160.02 118.11 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "U10 local input capacitor; JLC SMT"
+			(at 160.02 118.11 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 160.02 118.11 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "30880613-a01a-5c22-a964-a52eb667151c"))
+		(pin "2" (uuid "ea390868-76fe-5ded-b83e-b502a363303b"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "C4") (unit 1))))
+	)
+	(wire (pts (xy 160.02 114.3) (xy 160.02 106.68))
+		(stroke (width 0) (type default))
+		(uuid "136dc21c-4cf2-5bc9-b2c8-e1fff1044b7b")
+	)
+	(wire (pts (xy 160.02 106.68) (xy 154.94 106.68))
+		(stroke (width 0) (type default))
+		(uuid "41725ad6-51ec-5066-80db-6c5728af7c06")
+	)
+	(global_label "+5V_FUSED"
+		(shape passive)
+		(at 154.94 106.68 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "4993afb9-ee18-50d0-9af9-ce0fc6934a21")
+	)
+	(wire (pts (xy 160.02 121.92) (xy 160.02 129.54))
+		(stroke (width 0) (type default))
+		(uuid "db29b1f1-d587-56c4-a4c3-31c780462fb2")
+	)
+	(wire (pts (xy 160.02 129.54) (xy 154.94 129.54))
+		(stroke (width 0) (type default))
+		(uuid "666ef4bc-8336-5e7d-801e-cc2031a79823")
+	)
+	(global_label "GND"
+		(shape passive)
+		(at 154.94 129.54 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "3d1b6e36-2e11-5742-8312-88fb50039cd0")
+	)
+	(symbol
+		(lib_id "Device:C")
+		(at 345.44 124.46 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "ebb0d896-2a18-5f2d-bd38-43a380e77d7b")
+		(property "Reference" "C5"
+			(at 351.79 123.19 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "4.7u"
+			(at 351.79 125.73 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Capacitor_SMD:C_0805_2012Metric"
+			(at 345.44 124.46 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "Samsung Electro-Mechanics"
+			(at 345.44 124.46 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "CL21A475KAQNNNE"
+			(at 345.44 124.46 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.lcsc.com/datasheet/lcsc_datasheet_2304140030_Samsung-Electro-Mechanics-CL21A475KAQNNNE_C1779.pdf"
+			(at 345.44 124.46 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C1779"
+			(at 345.44 124.46 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "U10 output capacitor; meet effective capacitance after DC bias; JLC SMT"
+			(at 345.44 124.46 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 345.44 124.46 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "d11afd2e-3279-50fb-b593-d1f6c7160e08"))
+		(pin "2" (uuid "3ffb162a-06ff-54df-bf43-b3be5f447d23"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "C5") (unit 1))))
+	)
+	(wire (pts (xy 345.44 120.65) (xy 345.44 113.03))
+		(stroke (width 0) (type default))
+		(uuid "391a0cf2-2aca-5867-b3f9-d2821caf8746")
+	)
+	(wire (pts (xy 345.44 113.03) (xy 340.36 113.03))
+		(stroke (width 0) (type default))
+		(uuid "b805807f-2c55-5c94-aee8-dfedf693e856")
+	)
+	(global_label "+3V3_LOGIC"
+		(shape passive)
+		(at 340.36 113.03 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "c20442cb-a0de-5d3a-990f-00134f64c2f2")
+	)
+	(wire (pts (xy 345.44 128.27) (xy 345.44 135.89))
+		(stroke (width 0) (type default))
+		(uuid "501ec79a-5eee-5bef-ae50-e01d4eddce02")
+	)
+	(wire (pts (xy 345.44 135.89) (xy 340.36 135.89))
+		(stroke (width 0) (type default))
+		(uuid "11103630-6928-5d34-a04a-8dca1ec219f2")
+	)
+	(global_label "GND"
+		(shape passive)
+		(at 340.36 135.89 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "1b3cf22a-db31-5d29-8841-58e9c193c1bf")
+	)
+	(symbol
+		(lib_id "Device:D_Schottky")
+		(at 234.95 54.61 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "574483d3-2d20-5530-8ef7-e2b1fd303cab")
+		(property "Reference" "D1"
+			(at 234.95 44.45 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "PMEG3050EP"
+			(at 234.95 48.26 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Diode_SMD:D_SOD-128"
+			(at 234.95 54.61 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "Nexperia"
+			(at 234.95 54.61 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "PMEG3050EP,115"
+			(at 234.95 54.61 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://assets.nexperia.com/documents/data-sheet/PMEG3050EP.pdf"
+			(at 234.95 54.61 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C50603"
+			(at 234.95 54.61 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Blocks reverse current from module USB into carrier rail; JLC SMT"
+			(at 234.95 54.61 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 234.95 54.61 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "45004c8b-e3dc-59ea-9d61-6dd288824f12"))
+		(pin "2" (uuid "d5e52ca2-2828-5268-be6b-8d930d18d74f"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "D1") (unit 1))))
+	)
+	(wire (pts (xy 231.14 54.61) (xy 223.52 54.61))
+		(stroke (width 0) (type default))
+		(uuid "313d21d3-4d56-56e0-9ab0-457883fcd89d")
+	)
+	(global_label "ESP_5V"
+		(shape passive)
+		(at 223.52 54.61 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "641d613c-27c3-5ce6-8fd5-44b0f63d2179")
+	)
+	(wire (pts (xy 238.76 54.61) (xy 246.38 54.61))
+		(stroke (width 0) (type default))
+		(uuid "4d6cd33f-7eed-5a50-b301-a375f248e403")
+	)
+	(global_label "+5V_FUSED"
+		(shape passive)
+		(at 246.38 54.61 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "c510f0e6-4dc6-5ad7-8afe-6bf5ec2f2819")
+	)
+	(symbol
+		(lib_id "Device:D_Schottky")
+		(at 234.95 106.68 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "b5b7d8ac-9823-596d-98cd-c336dd11f251")
+		(property "Reference" "D2"
+			(at 234.95 96.52 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "PMEG3050EP"
+			(at 234.95 100.33 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Diode_SMD:D_SOD-128"
+			(at 234.95 106.68 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "Nexperia"
+			(at 234.95 106.68 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "PMEG3050EP,115"
+			(at 234.95 106.68 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://assets.nexperia.com/documents/data-sheet/PMEG3050EP.pdf"
+			(at 234.95 106.68 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C50603"
+			(at 234.95 106.68 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Blocks reverse current from module USB into carrier rail; JLC SMT"
+			(at 234.95 106.68 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 234.95 106.68 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "b2880ed4-7c07-50ec-95d5-b3cf3e0678a6"))
+		(pin "2" (uuid "1ee17a36-5acf-5297-ab8b-76b2934bb2cb"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "D2") (unit 1))))
+	)
+	(wire (pts (xy 231.14 106.68) (xy 223.52 106.68))
+		(stroke (width 0) (type default))
+		(uuid "0ccc8ecb-f849-5ef7-a2f9-e8713881d838")
+	)
+	(global_label "TANG_5V"
+		(shape passive)
+		(at 223.52 106.68 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "27c50fac-97b6-5aae-9398-372bd2237211")
+	)
+	(wire (pts (xy 238.76 106.68) (xy 246.38 106.68))
+		(stroke (width 0) (type default))
+		(uuid "a470aa0b-e379-560b-972d-5861375d9514")
+	)
+	(global_label "+5V_FUSED"
+		(shape passive)
+		(at 246.38 106.68 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "88efa447-0ade-5083-bd69-90a7141c19b4")
+	)
+	(symbol
+		(lib_id "Device:Polyfuse")
+		(at 154.94 64.77 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "e6fd43a6-8cee-5c89-93e7-01b6f0231e39")
+		(property "Reference" "F1"
+			(at 161.29 63.5 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "2A hold"
+			(at 161.29 66.04 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Fuse:Fuse_1812_4532Metric"
+			(at 154.94 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "RUILON(Shenzhen Ruilongyuan Elec)"
+			(at 154.94 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "SMD1812P200TF16"
+			(at 154.94 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.lcsc.com/datasheet/lcsc_datasheet_2304140030_RUILON-Shenzhen-Ruilongyuan-Elec-SMD1812P200TF16_C20812.pdf"
+			(at 154.94 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C20812"
+			(at 154.94 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Input fuse; verify PSU and conductor current rating; JLC SMT"
+			(at 154.94 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 154.94 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "a700d0bf-c043-556b-a803-247be5552d4a"))
+		(pin "2" (uuid "5c22f7bf-858c-58e2-8720-d14b631ca643"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "F1") (unit 1))))
+	)
+	(wire (pts (xy 154.94 60.96) (xy 154.94 53.34))
+		(stroke (width 0) (type default))
+		(uuid "3d3d4b78-d5fc-582f-8af6-89edd93be781")
+	)
+	(wire (pts (xy 154.94 53.34) (xy 149.86 53.34))
+		(stroke (width 0) (type default))
+		(uuid "f812f199-58e9-5584-b675-671848efc7d1")
+	)
+	(global_label "+5V_IN"
+		(shape passive)
+		(at 149.86 53.34 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "430a98de-c113-5b12-8a90-4fe08eccc142")
+	)
+	(wire (pts (xy 154.94 68.58) (xy 154.94 76.2))
+		(stroke (width 0) (type default))
+		(uuid "ac2dbbb2-a432-5a78-a63e-c7b52701dce5")
+	)
+	(wire (pts (xy 154.94 76.2) (xy 149.86 76.2))
+		(stroke (width 0) (type default))
+		(uuid "5b85d11a-e1b1-5f6e-8c01-a958bf546a95")
+	)
+	(global_label "+5V_FUSED"
+		(shape passive)
+		(at 149.86 76.2 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "a50f292c-7a19-5117-83a5-42eb4e3436a8")
+	)
+	(symbol
+		(lib_id "TSVDAC:AUDIO_1X4")
+		(at 250.19 199.39 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "2a957096-0ba6-5e31-bc2e-376eb513b0e7")
+		(property "Reference" "J2"
+			(at 250.19 187.96 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "J_AUDIO L G G R"
+			(at 250.19 191.77 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical"
+			(at 250.19 199.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "XFCN"
+			(at 250.19 199.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "PZ254V-11-04P"
+			(at 250.19 199.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.lcsc.com/datasheet/lcsc_datasheet_2409302232_XFCN-PZ254V-11-04P_C2691448.pdf"
+			(at 250.19 199.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C2691448"
+			(at 250.19 199.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "LOUT-A_GND-A_GND-ROUT to stock Evo AUDIO IN; local analog shield and return; level matched by R17/R18"
+			(at 250.19 199.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 250.19 199.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "Factory installs carrier connector on TOP"
+			(at 250.19 199.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "e270a1a9-e711-5a2b-955c-d42519454a06"))
+		(pin "2" (uuid "fc1d2f4e-27a6-5472-a2ef-aa05b1606212"))
+		(pin "3" (uuid "438917f6-84d7-5bef-b885-8c7e2026a7f4"))
+		(pin "4" (uuid "dea0cb82-da6b-5e27-ac18-e5453fad8806"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "J2") (unit 1))))
+	)
+	(wire (pts (xy 237.49 198.12) (xy 229.87 198.12))
+		(stroke (width 0) (type default))
+		(uuid "c614e021-9f84-58b0-8096-a6ce45b75731")
+	)
+	(global_label "AUDIO_LOUT"
+		(shape passive)
+		(at 229.87 198.12 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "e2174925-fe06-501a-8992-492ac66db06b")
+	)
+	(wire (pts (xy 237.49 200.66) (xy 229.87 200.66))
+		(stroke (width 0) (type default))
+		(uuid "970a2e54-1e79-54b9-8790-19127243fb3c")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 229.87 200.66 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "1a42bda5-100f-518a-a912-b23475278fab")
+	)
+	(wire (pts (xy 262.89 198.12) (xy 270.51 198.12))
+		(stroke (width 0) (type default))
+		(uuid "7183eeb6-e8d6-54bd-a342-0df0c8ef0fa1")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 270.51 198.12 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "352a6695-fea8-5838-b1e5-8fc97b8cc5bd")
+	)
+	(wire (pts (xy 262.89 200.66) (xy 270.51 200.66))
+		(stroke (width 0) (type default))
+		(uuid "db5ef8eb-b404-5b3b-b273-538fc4d29692")
+	)
+	(global_label "AUDIO_ROUT"
+		(shape passive)
+		(at 270.51 200.66 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "6e75e8fc-6a76-58d5-b546-bece2922c26c")
+	)
+	(symbol
+		(lib_id "TSVDAC:FDD_POWER_1X4")
+		(at 64.77 64.77 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "bcf2fc9d-a966-5f0a-bc93-b0d91a568edd")
+		(property "Reference" "J5"
+			(at 64.77 53.34 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "FDD NC G G +5"
+			(at 64.77 57.15 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "TSVDAC:TE_171826-4_Horizontal_1x04_P2.50mm"
+			(at 64.77 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "TE Connectivity"
+			(at 64.77 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "171826-4"
+			(at 64.77 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.lcsc.com/datasheet/lcsc_datasheet_2411280051_TE-Connectivity-171826-4_C590635.pdf"
+			(at 64.77 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C590635"
+			(at 64.77 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Polarized ZX PSU power; +12V pin is NC; verify mating orientation; THT/manual or JLC Standard"
+			(at 64.77 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 64.77 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "Factory installs carrier connector on TOP; cable +Y/down; nominal front overhang 0.3mm; finished holes 0.95 +/-0.05mm"
+			(at 64.77 64.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "a5866578-2dc6-5631-af39-63b966918af2"))
+		(pin "2" (uuid "9fce2344-6a2a-5beb-9c9a-db027089a244"))
+		(pin "3" (uuid "f8d130c8-0819-5d81-8412-7f58fabc4dee"))
+		(pin "4" (uuid "9f0f758f-68c9-5793-8a02-191d33290749"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "J5") (unit 1))))
+	)
+	(wire (pts (xy 49.53 63.5) (xy 41.91 63.5))
+		(stroke (width 0) (type default))
+		(uuid "49391a2d-0311-56c0-8052-5f6f06f7c9d2")
+	)
+	(global_label "+5V_IN"
+		(shape passive)
+		(at 41.91 63.5 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "10349820-0c17-51c5-bfc5-c60045d872bc")
+	)
+	(wire (pts (xy 49.53 66.04) (xy 41.91 66.04))
+		(stroke (width 0) (type default))
+		(uuid "0e75486e-6e1d-521c-b8e0-845afc360940")
+	)
+	(global_label "GND"
+		(shape passive)
+		(at 41.91 66.04 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "96918449-cdc0-5c5f-84a6-7b1fc78072cf")
+	)
+	(wire (pts (xy 80.01 63.5) (xy 87.63 63.5))
+		(stroke (width 0) (type default))
+		(uuid "5a33e27f-22aa-5a10-9d23-75f0d6a23e3f")
+	)
+	(global_label "GND"
+		(shape passive)
+		(at 87.63 63.5 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "1bc97d15-8faf-5529-9dcf-c6153620fd9d")
+	)
+	(no_connect
+		(at 80.01 66.04)
+		(uuid "5df062d1-77bf-5c2a-9f06-465d4d00fc86")
+	)
+	(symbol
+		(lib_id "Device:NetTie_2")
+		(at 330.2 237.49 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "8b5fc9df-0593-5ada-8a0d-39bcae483ec0")
+		(property "Reference" "NT1"
+			(at 330.2 227.33 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "A_GND-GND"
+			(at 330.2 231.14 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "TSVDAC:NetTie-2_THT_Pad2.0mm_Drill1.0mm"
+			(at 330.2 237.49 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Single carrier copper bond at audio power/I2S entry; no purchased component"
+			(at 330.2 237.49 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "PCB"
+			(at 330.2 237.49 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "PCB copper feature; excluded from assembly BOM and placement files"
+			(at 330.2 237.49 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "9ca58a06-2f46-5f5f-945c-2a72e7337205"))
+		(pin "2" (uuid "768932a1-4397-5fd5-95b4-cae9f5028c46"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "NT1") (unit 1))))
+	)
+	(wire (pts (xy 327.66 237.49) (xy 320.04 237.49))
+		(stroke (width 0) (type default))
+		(uuid "00a2b6b6-a9c9-5282-be0e-a78e63489fb7")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 320.04 237.49 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "7cb95a6a-7510-53ee-95f7-93e9838fdb5e")
+	)
+	(wire (pts (xy 332.74 237.49) (xy 340.36 237.49))
+		(stroke (width 0) (type default))
+		(uuid "8db8be80-8b59-5f1c-bd13-d29ddad66042")
+	)
+	(global_label "GND"
+		(shape passive)
+		(at 340.36 237.49 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "5d3a18e1-3406-5c7e-89ee-9e9f59b4bed8")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 172.72 190.5 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "50f5bc8b-c332-54d6-80b6-820b95980012")
+		(property "Reference" "R17"
+			(at 179.07 189.23 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "27k"
+			(at 179.07 191.77 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
+			(at 172.72 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "UNI-ROYAL(Uniroyal Elec)"
+			(at 172.72 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "0805W8F2702T5E"
+			(at 172.72 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C17593"
+			(at 172.72 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C17593"
+			(at 172.72 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Required audio level matching to stock Evo mixer: 27k series with 10k input / 47k bias; about 1.4Vpp at DAC full scale"
+			(at 172.72 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 172.72 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "259083e3-61df-52de-96c4-56ff5576aeb2"))
+		(pin "2" (uuid "1ab83b19-b4f8-5e6a-9741-13c8cbc66d29"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "R17") (unit 1))))
+	)
+	(wire (pts (xy 172.72 186.69) (xy 172.72 179.07))
+		(stroke (width 0) (type default))
+		(uuid "37f83e18-88d9-56e9-af90-025ddb3f21d2")
+	)
+	(wire (pts (xy 172.72 179.07) (xy 167.64 179.07))
+		(stroke (width 0) (type default))
+		(uuid "c21e0f43-e918-5b69-a22d-d8c94f25a5e6")
+	)
+	(global_label "DAC_LOUT_RAW"
+		(shape passive)
+		(at 167.64 179.07 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "bf06bac0-0774-5a89-b2c6-5fa0461ff61d")
+	)
+	(wire (pts (xy 172.72 194.31) (xy 172.72 201.93))
+		(stroke (width 0) (type default))
+		(uuid "2fd25862-648d-52e5-b7b1-f6cd410b066c")
+	)
+	(wire (pts (xy 172.72 201.93) (xy 167.64 201.93))
+		(stroke (width 0) (type default))
+		(uuid "cd9f6a80-f54d-5ecb-b9ff-d17f92492ee0")
+	)
+	(global_label "AUDIO_LOUT"
+		(shape passive)
+		(at 167.64 201.93 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "30b6a795-40ea-5ab7-805a-2d537d61699c")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 172.72 223.52 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "79eb7190-738a-5cba-a368-6d8113a22842")
+		(property "Reference" "R18"
+			(at 179.07 222.25 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "27k"
+			(at 179.07 224.79 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
+			(at 172.72 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "UNI-ROYAL(Uniroyal Elec)"
+			(at 172.72 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "0805W8F2702T5E"
+			(at 172.72 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://datasheet.lcsc.com/datasheet/pdf/0a975aaa49b7c97f38a963127be4a823.pdf?productCode=C17593"
+			(at 172.72 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C17593"
+			(at 172.72 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Required audio level matching to stock Evo mixer: 27k series with 10k input / 47k bias; about 1.4Vpp at DAC full scale"
+			(at 172.72 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 172.72 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "8febdedc-6872-5fb5-b974-484aa875d69f"))
+		(pin "2" (uuid "71652dac-59b4-534a-9c38-a6748ca19461"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "R18") (unit 1))))
+	)
+	(wire (pts (xy 172.72 219.71) (xy 172.72 212.09))
+		(stroke (width 0) (type default))
+		(uuid "63830e17-e190-5829-9085-42553d921f2a")
+	)
+	(wire (pts (xy 172.72 212.09) (xy 167.64 212.09))
+		(stroke (width 0) (type default))
+		(uuid "df19cedf-02a2-55f6-aaee-80340cf80c5e")
+	)
+	(global_label "DAC_ROUT_RAW"
+		(shape passive)
+		(at 167.64 212.09 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "e29f6624-2c64-5080-8f5e-6eb1bbdabde1")
+	)
+	(wire (pts (xy 172.72 227.33) (xy 172.72 234.95))
+		(stroke (width 0) (type default))
+		(uuid "9948aefa-a341-5db8-b541-4d7741c82b2b")
+	)
+	(wire (pts (xy 172.72 234.95) (xy 167.64 234.95))
+		(stroke (width 0) (type default))
+		(uuid "e3645710-863b-5f44-a254-dc5f88671029")
+	)
+	(global_label "AUDIO_ROUT"
+		(shape passive)
+		(at 167.64 234.95 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "3772d379-6adb-586b-aef4-a9f3c734902b")
+	)
+	(symbol
+		(lib_id "TSVDAC:TLV75533PDBV")
+		(at 345.44 72.39 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "33bf2dd2-ab0a-585b-ba14-94be055b31f1")
+		(property "Reference" "U10"
+			(at 345.44 44.45 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "TLV75533PDBVR"
+			(at 345.44 48.26 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-23-5"
+			(at 345.44 72.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "Texas Instruments"
+			(at 345.44 72.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "TLV75533PDBVR"
+			(at 345.44 72.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/tlv755p.pdf"
+			(at 345.44 72.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C404027"
+			(at 345.44 72.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Independent 3V3 logic supply; never parallel module LDOs; JLC SMT"
+			(at 345.44 72.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 345.44 72.39 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "5c7b2cc5-bd21-59b3-a628-2383fd75fc1c"))
+		(pin "2" (uuid "7c684e80-1a03-5524-b54a-1331105557d9"))
+		(pin "3" (uuid "9bdf3645-7add-50e3-9d80-3f1b1d4c05d7"))
+		(pin "4" (uuid "f7babe00-c05c-50be-9394-e84fe30eef94"))
+		(pin "5" (uuid "d5e220cb-b8b2-5681-9ddd-f767c32d5168"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "U10") (unit 1))))
+	)
+	(wire (pts (xy 337.82 69.85) (xy 330.2 69.85))
+		(stroke (width 0) (type default))
+		(uuid "ef851042-54fe-5645-9f89-404e10505926")
+	)
+	(global_label "+5V_FUSED"
+		(shape passive)
+		(at 330.2 69.85 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "005ac178-f208-575e-9d85-26e90e208922")
+	)
+	(wire (pts (xy 345.44 80.01) (xy 345.44 87.63))
+		(stroke (width 0) (type default))
+		(uuid "3d0e0bd7-6a29-5537-a2d8-15cd27dadb6b")
+	)
+	(wire (pts (xy 345.44 87.63) (xy 340.36 87.63))
+		(stroke (width 0) (type default))
+		(uuid "cc2f182a-6b2b-564b-976c-08414eb37931")
+	)
+	(global_label "GND"
+		(shape passive)
+		(at 340.36 87.63 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "935fdea7-c260-5656-ae5b-9b77998204f0")
+	)
+	(wire (pts (xy 337.82 72.39) (xy 330.2 72.39))
+		(stroke (width 0) (type default))
+		(uuid "c2d07ad0-b5fe-59fe-afd0-7a885e39f076")
+	)
+	(global_label "+5V_FUSED"
+		(shape passive)
+		(at 330.2 72.39 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "b112e39d-7520-5673-ab59-5cdf1c8d1ae3")
+	)
+	(no_connect
+		(at 350.52 72.39)
+		(uuid "37109342-6a58-54a2-8fc5-29f4bd032b32")
+	)
+	(wire (pts (xy 353.06 69.85) (xy 360.68 69.85))
+		(stroke (width 0) (type default))
+		(uuid "c161e78d-8325-5776-b6ec-1fdaca955fc7")
+	)
+	(global_label "+3V3_LOGIC"
+		(shape passive)
+		(at 360.68 69.85 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "4952f177-a561-55bf-b664-777c55f569c9")
+	)
+	(text "COMMON EVO/CARRIER FDD SUPPLY ONLY. No independent USB VBUS. No IDE hot-plug." (at 18 18 0)
+		(effects (font (size 1.5 1.5)) (justify left top))
+		(uuid "d36bbae4-1925-5dda-9a94-81fd35454413"))
+	(text "A3 is a complete GY-PCM5102 module. SCK=A_GND selects the internal PLL path." (at 18 149 0)
+		(effects (font (size 1.5 1.5)) (justify left top))
+		(uuid "5bf73e0f-869b-5a46-8d72-60ba8e8ebbfb"))
+	(text "Straps FMT/DEMP/FLT = LOW, XSMT = HIGH: bridge carrier solder jumpers JP1-JP4 (bottom side under A3, open as fabricated)\nor the module's own H/L pads. Never set opposite levels on the carrier and on the module." (at 18 158 0)
+		(effects (font (size 1.5 1.5)) (justify left top))
+		(uuid "e79e7bd4-0dc9-537d-a2d1-1dce415e72ca"))
+	(text "A3: factory installs top-side female sockets J10 (1x9) and J11 (1x6) in the module holes; user plugs in the module with its male headers." (at 18 166 0)
+		(effects (font (size 1.5 1.5)) (justify left top))
+		(uuid "83fa44e5-7289-5b5d-a4e0-1e88deafcaed"))
+	(text "JP1 FMT=L: I2S format.   JP2 XSMT=H: un-mute.   JP3 DEMP=L: de-emphasis off.   JP4 FLT=L: normal-latency filter." (at 18 222.5 0)
+		(effects (font (size 1.5 1.5)) (justify left top))
+		(uuid "99ff0aa1-3404-5e7b-b6ac-033e8ddf348c"))
+	(symbol
+		(lib_id "Jumper:SolderJumper_3_Open")
+		(at 199.39 182.88 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "bc0ac1f5-c896-58de-92a0-7c2161993694")
+		(property "Reference" "JP5"
+			(at 190.5 177.8 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "15k 9k1"
+			(at 190.5 180.34 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Jumper:SolderJumper-3_P1.3mm_Open_RoundedPad1.0x1.5mm"
+			(at 199.39 182.88 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Audio level select: bridge centre pad to 15k side (34k in parallel with 27k) or to 9k1 side (13.7k in parallel); open = 27k; no purchased component"
+			(at 199.39 182.88 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "PCB"
+			(at 199.39 182.88 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "PCB copper feature; excluded from assembly BOM and placement files"
+			(at 199.39 182.88 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "b8b73f91-9299-5b89-8054-5ccaeaee856b"))
+		(pin "2" (uuid "60dfa2df-858c-50b3-8c0e-f1298a73d7cf"))
+		(pin "3" (uuid "93b1cff6-5c12-5732-9c0a-a9868c279c08"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "JP5") (unit 1))))
+	)
+	(global_label "AUDIO_L_9K1"
+		(shape passive)
+		(at 204.47 185.42 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "dd0ed5ea-c4b3-5cb3-b479-ca37270d2637")
+	)
+	(global_label "AUDIO_L_15K"
+		(shape passive)
+		(at 194.31 185.42 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "3be58536-a2a6-5c75-ac68-6e4e2b3d8452")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 204.47 190.5 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "7b3ffd79-1184-590a-bbad-4c0fc1686b40")
+		(property "Reference" "R20"
+			(at 210.82 189.23 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "13.7k"
+			(at 210.82 191.77 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
+			(at 204.47 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "UNI-ROYAL(Uniroyal Elec)"
+			(at 204.47 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "0805W8F1372T5E"
+			(at 204.47 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.lcsc.com/product-detail/C17448.html"
+			(at 204.47 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C17448"
+			(at 204.47 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Optional audio level, L channel: 13.7k in parallel with R17 27k when JP5 is bridged to the 9k1 side -> 9.09k"
+			(at 204.47 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 204.47 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "e3f06deb-33b2-51d9-8180-ad8d3b438797"))
+		(pin "2" (uuid "94678c61-3e30-5061-9630-a4e55336f061"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "R20") (unit 1))))
+	)
+	(wire (pts (xy 204.47 186.69) (xy 204.47 182.88))
+		(stroke (width 0) (type default))
+		(uuid "30984532-21a9-526f-a857-e7a2283a2c94")
+	)
+	(wire (pts (xy 204.47 194.31) (xy 204.47 196.85))
+		(stroke (width 0) (type default))
+		(uuid "eb11778e-4046-5283-8cb7-b8cdef4cb3b5")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 194.31 190.5 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "67463427-9c72-59ad-a767-6139c984ed68")
+		(property "Reference" "R21"
+			(at 187.96 189.23 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "34k"
+			(at 187.96 191.77 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
+			(at 194.31 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "UNI-ROYAL(Uniroyal Elec)"
+			(at 194.31 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "0805W8F3402T5E"
+			(at 194.31 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.lcsc.com/product-detail/C17640.html"
+			(at 194.31 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C17640"
+			(at 194.31 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Optional audio level, L channel: 34k in parallel with R17 27k when JP5 is bridged to the 15k side -> 15.05k"
+			(at 194.31 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 194.31 190.5 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "70551ac3-bf51-56e9-a4c1-3c7d7702951e"))
+		(pin "2" (uuid "debc1bf7-607f-506c-9e44-830e24ea12db"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "R21") (unit 1))))
+	)
+	(wire (pts (xy 194.31 186.69) (xy 194.31 182.88))
+		(stroke (width 0) (type default))
+		(uuid "dbf412ab-808a-5449-8f4c-384ded2f903f")
+	)
+	(wire (pts (xy 194.31 194.31) (xy 194.31 196.85))
+		(stroke (width 0) (type default))
+		(uuid "2cf6aa2c-e0cb-5223-b335-d28dd19040aa")
+	)
+	(wire (pts (xy 194.31 196.85) (xy 204.47 196.85))
+		(stroke (width 0) (type default))
+		(uuid "5ac7dd2c-ce7c-53d1-8754-a1cd95f502c2")
+	)
+	(wire (pts (xy 194.31 196.85) (xy 189.23 196.85))
+		(stroke (width 0) (type default))
+		(uuid "aea3fbee-199f-5c1f-a34d-2ecc8aa85f81")
+	)
+	(junction
+		(at 194.31 196.85)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "204be5c7-2cd5-5fbe-ac45-deb92a7d6f10")
+	)
+	(global_label "AUDIO_LOUT"
+		(shape passive)
+		(at 189.23 196.85 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "7b7e0ba4-7b4c-5ff9-b348-d70becd38fa6")
+	)
+	(wire (pts (xy 199.39 179.07) (xy 199.39 176.53))
+		(stroke (width 0) (type default))
+		(uuid "69f4c1f0-ed1e-59ff-af5c-bcb77f7fdecc")
+	)
+	(wire (pts (xy 199.39 176.53) (xy 207.01 176.53))
+		(stroke (width 0) (type default))
+		(uuid "b55d258e-8419-5deb-956c-00ea47d7e1aa")
+	)
+	(global_label "DAC_LOUT_RAW"
+		(shape passive)
+		(at 207.01 176.53 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "a7937967-cb63-5da5-ba1a-767306b353be")
+	)
+	(symbol
+		(lib_id "Jumper:SolderJumper_3_Open")
+		(at 199.39 215.9 180)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom no)
+		(on_board yes)
+		(dnp no)
+		(uuid "4b2cd20d-2ac5-51dc-beb9-2d229ac1d300")
+		(property "Reference" "JP6"
+			(at 190.5 210.82 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "15k 9k1"
+			(at 190.5 213.36 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Jumper:SolderJumper-3_P1.3mm_Open_RoundedPad1.0x1.5mm"
+			(at 199.39 215.9 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Audio level select: bridge centre pad to 15k side (34k in parallel with 27k) or to 9k1 side (13.7k in parallel); open = 27k; no purchased component"
+			(at 199.39 215.9 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "PCB"
+			(at 199.39 215.9 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Mounting" "PCB copper feature; excluded from assembly BOM and placement files"
+			(at 199.39 215.9 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "851f18ed-feb2-5348-8f1b-f59bd9d252a5"))
+		(pin "2" (uuid "a0e2542b-f764-5fe5-a5db-effb80fa9e0f"))
+		(pin "3" (uuid "ebbf7603-c86f-588a-bf7d-46cdced4c4cd"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "JP6") (unit 1))))
+	)
+	(global_label "AUDIO_R_9K1"
+		(shape passive)
+		(at 204.47 218.44 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "c3ebf4b1-18a7-5e4a-bddb-4f1f3a0a7a34")
+	)
+	(global_label "AUDIO_R_15K"
+		(shape passive)
+		(at 194.31 218.44 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "786e3d0d-10ba-5096-91fa-5086615253f1")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 204.47 223.52 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "a09bede9-9449-5dc3-a697-95fb5c24dca6")
+		(property "Reference" "R22"
+			(at 210.82 222.25 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "13.7k"
+			(at 210.82 224.79 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
+			(at 204.47 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "UNI-ROYAL(Uniroyal Elec)"
+			(at 204.47 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "0805W8F1372T5E"
+			(at 204.47 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.lcsc.com/product-detail/C17448.html"
+			(at 204.47 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C17448"
+			(at 204.47 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Optional audio level, R channel: 13.7k in parallel with R18 27k when JP6 is bridged to the 9k1 side -> 9.09k"
+			(at 204.47 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 204.47 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "84fb64f3-630d-5556-87d5-3fdc850785c5"))
+		(pin "2" (uuid "f723ebf5-6097-52de-8ed7-2a88c6ca6c57"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "R22") (unit 1))))
+	)
+	(wire (pts (xy 204.47 219.71) (xy 204.47 215.9))
+		(stroke (width 0) (type default))
+		(uuid "73b29813-f57d-5161-b6bd-27dbe9780dd1")
+	)
+	(wire (pts (xy 204.47 227.33) (xy 204.47 229.87))
+		(stroke (width 0) (type default))
+		(uuid "142be5e8-c646-510a-9fb6-5aaf36836498")
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 194.31 223.52 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "c5d2faab-9fdd-5d35-a438-9fdb9ed9ee88")
+		(property "Reference" "R23"
+			(at 187.96 222.25 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "34k"
+			(at 187.96 224.79 0)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Footprint" "Resistor_SMD:R_0805_2012Metric"
+			(at 194.31 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Manufacturer" "UNI-ROYAL(Uniroyal Elec)"
+			(at 194.31 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "MPN" "0805W8F3402T5E"
+			(at 194.31 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Datasheet" "https://www.lcsc.com/product-detail/C17640.html"
+			(at 194.31 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "LCSC" "C17640"
+			(at 194.31 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "BOM Comments" "Optional audio level, R channel: 34k in parallel with R18 27k when JP6 is bridged to the 15k side -> 15.05k"
+			(at 194.31 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Assembly Owner" "JLCPCB"
+			(at 194.31 223.52 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "35af4788-b146-544e-aada-7f01e9d4643c"))
+		(pin "2" (uuid "9dea3094-e43e-5334-acbc-8043ee2da767"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "R23") (unit 1))))
+	)
+	(wire (pts (xy 194.31 219.71) (xy 194.31 215.9))
+		(stroke (width 0) (type default))
+		(uuid "edce320d-2fa8-541e-9f20-0d4ee5d3860c")
+	)
+	(wire (pts (xy 194.31 227.33) (xy 194.31 229.87))
+		(stroke (width 0) (type default))
+		(uuid "b50f91c2-0adb-5aad-ad1c-d0e78b5d6fbf")
+	)
+	(wire (pts (xy 194.31 229.87) (xy 204.47 229.87))
+		(stroke (width 0) (type default))
+		(uuid "bda8a14d-605e-5b17-b89b-5159ab9c59c5")
+	)
+	(wire (pts (xy 194.31 229.87) (xy 189.23 229.87))
+		(stroke (width 0) (type default))
+		(uuid "8e68f669-89fd-5dd9-88e1-9ca5f6ef7b54")
+	)
+	(junction
+		(at 194.31 229.87)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "d4183a3c-cbde-51c4-91a6-9f44b188036c")
+	)
+	(global_label "AUDIO_ROUT"
+		(shape passive)
+		(at 189.23 229.87 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "fa583dc0-73d4-50c3-937b-1ed8cb76cd77")
+	)
+	(wire (pts (xy 199.39 212.09) (xy 199.39 209.55))
+		(stroke (width 0) (type default))
+		(uuid "aa498f1a-5844-5237-a678-9f0d9d68ffb5")
+	)
+	(wire (pts (xy 199.39 209.55) (xy 207.01 209.55))
+		(stroke (width 0) (type default))
+		(uuid "51dba0c6-4100-5785-b9ba-add587848714")
+	)
+	(global_label "DAC_ROUT_RAW"
+		(shape passive)
+		(at 207.01 209.55 180)
+		(effects (font (size 1 1)) (justify left bottom))
+		(uuid "29cbc126-4da7-54af-9017-6aee67c71dc5")
+	)
+	(text "R17/R18: 27k always in, into stock Evo AUDIO IN (10k || 47k): 1.37 Vpp at DAC full scale (2.1 Vrms).\nLouder: bridge JP5/JP6 (bottom) centre pad to 15k (+R21/R23 34k: 15.05k, 2.06 Vpp, +3.5 dB)\nor to 9k1 (+R20/R22 13.7k: 9.09k, 2.75 Vpp, +6.0 dB). Same on both channels; never all three pads." (at 18 254 0)
+		(effects (font (size 1.5 1.5)) (justify left top))
+		(uuid "669036cb-d70d-5b29-8677-4e4ad1574b53"))
+	(text "Use J2 for level-matched Evo audio; the module jack bypasses R17/R18. Confirm actual level on Rev 0." (at 18 263 0)
+		(effects (font (size 1.5 1.5)) (justify left top))
+		(uuid "be45c76f-8732-5f60-bc8d-761524a8b74e"))
+	(text "A_GND: local audio shield/return. NT1: one carrier copper bond to GND at the audio entry." (at 18 278 0)
+		(effects (font (size 1.5 1.5)) (justify left top))
+		(uuid "b10da49c-2739-5dad-8db4-c20a6ebea2c2"))
+	(symbol
+		(lib_id "power:PWR_FLAG")
+		(at 309.88 208.28 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "5d62262d-8ee5-5550-a7d3-a8f3626d3770")
+		(property "Reference" "#FLG01"
+			(at 309.88 187.96 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "PWR_FLAG"
+			(at 309.88 191.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "ca199be9-deee-5b79-9bd7-b08233e225bc"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "#FLG01") (unit 1))))
+	)
+	(wire (pts (xy 309.88 208.28) (xy 309.88 215.9))
+		(stroke (width 0) (type default))
+		(uuid "3548888e-28e3-5929-bc86-184824b3fbff")
+	)
+	(wire (pts (xy 309.88 215.9) (xy 304.8 215.9))
+		(stroke (width 0) (type default))
+		(uuid "9d880ba8-5ace-5c20-a8ae-d48159515a3c")
+	)
+	(global_label "+5V_IN"
+		(shape passive)
+		(at 304.8 215.9 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "a313d6e2-cbc8-575d-b9fd-fb16a2fba86f")
+	)
+	(symbol
+		(lib_id "power:PWR_FLAG")
+		(at 327.66 208.28 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "e1d47289-61de-5036-ab97-03b32509028a")
+		(property "Reference" "#FLG02"
+			(at 327.66 187.96 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "PWR_FLAG"
+			(at 327.66 191.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "912ac440-1a81-5940-9731-357e385a2f6a"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "#FLG02") (unit 1))))
+	)
+	(wire (pts (xy 327.66 208.28) (xy 327.66 215.9))
+		(stroke (width 0) (type default))
+		(uuid "2b06695d-f2a5-5d17-844e-02b97b761e08")
+	)
+	(wire (pts (xy 327.66 215.9) (xy 322.58 215.9))
+		(stroke (width 0) (type default))
+		(uuid "b37db2d2-86f0-561e-94a0-5c3305da60b8")
+	)
+	(global_label "+5V_FUSED"
+		(shape passive)
+		(at 322.58 215.9 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "4f698f72-01cd-5353-88c1-ff985d321890")
+	)
+	(symbol
+		(lib_id "power:PWR_FLAG")
+		(at 345.44 208.28 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "ebd2b573-5109-5381-8a1b-9eacbcc40e71")
+		(property "Reference" "#FLG03"
+			(at 345.44 187.96 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "PWR_FLAG"
+			(at 345.44 191.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "953fa85e-fe6b-55e6-94e7-222dcba80076"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "#FLG03") (unit 1))))
+	)
+	(wire (pts (xy 345.44 208.28) (xy 345.44 215.9))
+		(stroke (width 0) (type default))
+		(uuid "7301019a-6f40-52cf-b308-5c5a3d8bf612")
+	)
+	(wire (pts (xy 345.44 215.9) (xy 340.36 215.9))
+		(stroke (width 0) (type default))
+		(uuid "df61ddbb-8563-5145-8d00-d171de0d940f")
+	)
+	(global_label "ESP_5V"
+		(shape passive)
+		(at 340.36 215.9 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "796e1c64-9c0e-5223-bdf9-c644d9302b81")
+	)
+	(symbol
+		(lib_id "power:PWR_FLAG")
+		(at 364.49 208.28 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "eef9f4f0-2e4f-528a-bcf4-0a5aff937351")
+		(property "Reference" "#FLG04"
+			(at 364.49 187.96 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "PWR_FLAG"
+			(at 364.49 191.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "42942cc8-8451-5716-a3d0-20ba663d553c"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "#FLG04") (unit 1))))
+	)
+	(wire (pts (xy 364.49 208.28) (xy 364.49 215.9))
+		(stroke (width 0) (type default))
+		(uuid "ea3aa11f-9c10-5a26-9065-bab8f99b211d")
+	)
+	(wire (pts (xy 364.49 215.9) (xy 359.41 215.9))
+		(stroke (width 0) (type default))
+		(uuid "31ff68e8-4a47-5ffb-b7e4-fdd76f48ed26")
+	)
+	(global_label "TANG_5V"
+		(shape passive)
+		(at 359.41 215.9 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "8541b541-7d19-5cea-94ed-ff228ebb77ea")
+	)
+	(symbol
+		(lib_id "power:PWR_FLAG")
+		(at 382.27 208.28 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "b72154b0-2c40-52df-9120-e6c1c215cba1")
+		(property "Reference" "#FLG05"
+			(at 382.27 187.96 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "PWR_FLAG"
+			(at 382.27 191.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "5aacc62d-dd07-570b-9617-86d7fb1d06bd"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "#FLG05") (unit 1))))
+	)
+	(wire (pts (xy 382.27 208.28) (xy 382.27 215.9))
+		(stroke (width 0) (type default))
+		(uuid "fed9c7d0-bef2-5b91-8420-402d84f91f4c")
+	)
+	(wire (pts (xy 382.27 215.9) (xy 377.19 215.9))
+		(stroke (width 0) (type default))
+		(uuid "5bb42cc4-1dd9-5996-9eab-b1e6017e4551")
+	)
+	(global_label "GND"
+		(shape passive)
+		(at 377.19 215.9 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "59ebf729-e916-5c10-9e8d-017ef9a8aa70")
+	)
+	(symbol
+		(lib_id "power:PWR_FLAG")
+		(at 400.05 208.28 0)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(uuid "448463af-c6a0-5fb9-aaab-1ea57b22e56a")
+		(property "Reference" "#FLG06"
+			(at 400.05 187.96 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(property "Value" "PWR_FLAG"
+			(at 400.05 191.77 0)
+			(hide yes)
+			(effects
+				(font (size 1.27 1.27))
+			)
+		)
+		(pin "1" (uuid "e8866789-7202-56ce-8c54-6f84800d8d22"))
+		(instances (project "TS_VDAC_A4" (path "/3f34952a-6eef-5e9d-a04a-078869a19f36/998e27e5-3621-55bb-b697-de758eb0746b"
+			(reference "#FLG06") (unit 1))))
+	)
+	(wire (pts (xy 400.05 208.28) (xy 400.05 215.9))
+		(stroke (width 0) (type default))
+		(uuid "6a84acb1-ccc3-5ed1-a1cb-ea9c0f8d2653")
+	)
+	(wire (pts (xy 400.05 215.9) (xy 394.97 215.9))
+		(stroke (width 0) (type default))
+		(uuid "05e4c150-d084-535c-a23c-bd5ad1491261")
+	)
+	(global_label "A_GND"
+		(shape passive)
+		(at 394.97 215.9 0)
+		(effects (font (size 1 1)) (justify right bottom))
+		(uuid "6e1ad3df-f47c-5875-b96a-193f3d801674")
+	)
+	(embedded_fonts no)
+)

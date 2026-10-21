@@ -1,0 +1,4 @@
+# Файлы проекта и производства хранятся байт в байт: SHA-256 в Production/manifest.json
+# считаны с этих файлов, перевод строк при checkout/commit их бы изменил.
+KiCad/** -text
+Production/** -text

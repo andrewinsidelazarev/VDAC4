@@ -1,0 +1,2 @@
+(fp_lib_table (version 7)
+ (lib (name "TSVDAC") (type "KiCad") (uri "${KIPRJMOD}/Libraries/Footprints/TSVDAC.pretty") (options "") (descr "A3 local library")))
