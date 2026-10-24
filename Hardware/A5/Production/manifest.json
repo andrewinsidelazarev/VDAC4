@@ -1,0 +1,95 @@
+{
+ "revision": "A5",
+ "generated_utc": "2026-10-24T20:52:08+00:00",
+ "kicad": "10.0.3",
+ "base": {
+  "revision": "A4 (2026-10-20)",
+  "gerber_zip_sha256": "aa85b452032d640ab4eac58ecb53aa9147191393e791fad68b19b342da82a6dc",
+  "pcb_sha256": "2044455156a2dcd3e874c57f6811b9ef14f9e76f9e5dd2185beaec7b50ffedc2",
+  "manifest": "docs/production/A4/manifest.json"
+ },
+ "change": [
+  "2026-10-24: детали Texas Instruments, которые беспокоили пользователя, заменены на не-TI. U8, U11: TXU0101DBVR (TI, SOT-23-6) → 74AHCT1G126GV (MDD, SOT-23-5L, LCSC C52140416): буфер с третьим состоянием, входы TTL (VIH 2,0 В при VCC 4,5–5,5 В), питание +5V_FUSED, OE активен единицей, как у TXU0101. Вариант AHC (не T) отвергнут: от 3,3 В его выход в Z через защитный диод тянул бы шину 3,3 В вверх от 5-вольтовых линий IDE27 (1 кОм к +5 В на Evo) и IDE15 (D1), а от 5 В вход не видит 3,3 В",
+  "U8, U11 на плате: посадка SOT-23-5 на месте SOT-23-6, тот же поворот; справа Y — на месте B, VCC — на месте VCCB (дорожки к IDE27 и к R19 не тронуты). Слева порядок 1 OE / 2 A / 3 GND: переходные (156.2, 86.35)/(156.2, 87.3) у U8 и (155.2, 100.05)/(155.2, 101.0) у U11 поменялись ролями A ↔ GND, отрезки к GND — 0,25 мм; подвод A: U8 — In1 (155.5,85.7)→(155.5,86.6)→(156.2,87.3), U11 — F.Cu (155.2,101.0)→(155.9,101.7)→ прежняя вертикаль; OE: U8 — MISO_EN (158.4,86.6)→(158.4,87.75)→(157.95,88.2), U11 — M_SEL (157.5,102.4)→(157.05,101.95)→(156.9,101.95); отрезки 3V3 к бывшему VCCA сняты, у U11 подвод 3V3 к переходному (155.2,101.95) переложен (155.6,103.8)→(155.2,103.4)→(155.2,101.95), 0,5 мм. Перезалиты GND In1/In2 — изменения только у U8/U11",
+  "U10: TLV75533PDBVR (TI) → ME6211C33M5G-N (Microne, LCSC C82942): тот же SOT-23-5 и те же выводы (1 VIN, 2 VSS, 3 CE, 4 NC, 5 VOUT), медь не менялась",
+  "схема: символы TSVDAC:74AHCT1G126GV (выводы в тех же точках, что у TXU0101; провод и метка +3V3_LOGIC у бывшего VCCA удалены) и TSVDAC:ME6211C33M5G (как TLV75533PDBV, имена выводов VIN/VSS/CE/NC/VOUT); поля Value/MPN/LCSC/Manufacturer/Datasheet/BOM Comments",
+  "BOM: строки U8,U11 и U10 заменены; CPL: Val/Package у U8, U11, U10; координаты и углы прежние (90°, низ). У U8/U11 посадка JLCPCB та же, что у U7 и прежнего U10 (SOT-23-5_L3.0-W1.7-P0.95-LS2.8-BR, угол 90° подтверждён инженером на A3.1); у ME6211 посадка JLCPCB «…-BL» — угол U10 90° оставлен, проверить в просмотрщике при заказе",
+  "даташиты: docs/datasheets/74AHCT1G126GV_MDD.pdf, ME6211C33M5G-N_Microne.pdf (manifest.json там же)",
+  "VDAC4_A5_BOM.pdf — перечень элементов A5 в PDF (из JLCPCB_BOM.csv + модули пользователя + элементы меди платы)",
+  "VDAC4_A5_schematic.pdf — электрическая схема (kicad-cli, 4 листа A3); VDAC4_A5_assembly.pdf — монтажная схема верха и низа, 2:1 (Fab + шелкография, площадки по маске; служебные надписи Fab и дубли обозначений сняты только в копии для PDF)"
+ ],
+ "sources": {
+  "pcb": {
+   "file": "hardware/kicad/a5/TS_VDAC_A5.kicad_pcb",
+   "sha256": "0e35477ac5b230d76687b3664d480b80cd8fb2a3a186462a2bcf5fad5cc63b0e"
+  },
+  "project": {
+   "file": "hardware/kicad/a5/TS_VDAC_A5.kicad_pro",
+   "sha256": "3e9bef8e3b4097d352afa7a2fa5cb47615537c08134570afb34f34f8dd069754"
+  },
+  "schematic": {
+   "file": "hardware/kicad/a5/TS_VDAC_A5.kicad_sch",
+   "sha256": "8ad39e8cc9438fec1a510ad44b69dc2b27262f7ea2395da586f020aef205d37a"
+  },
+  "schematic_sheets": {
+   "controls.kicad_sch": "4a4cfdbd8094f0fd8b957d19eaf5a6a45279956ce47e0b5b4ab8618e66ad3b91",
+   "modules.kicad_sch": "15a493141f87cbc508c37e07f62d1c48b26be5bd39ebf4eb7bb7fd9282be7d31",
+   "power_audio.kicad_sch": "246715b6bee2d9fa540e4fa75c9b11769dcfb2bbda67bd8753f91f2fbf34b22f"
+  },
+  "symbol_library": {
+   "file": "hardware/kicad/a5/Libraries/Symbols/TSVDAC.kicad_sym",
+   "sha256": "6506d2939e9d95b3d6fb9d10e28b863ce6b4043f83489650d7c2e9fa0c609941"
+  }
+ },
+ "checks": {
+  "drc": {
+   "violations": 2,
+   "violations_note": "2 × pth_inside_courtyard: NT1 под модулем ЦАП — в исключениях проекта (как в A4); kicad-cli 10.0.3 выводит их всё равно",
+   "unconnected": 0,
+   "schematic_parity": 0
+  },
+  "erc_violations": 0,
+  "gerber_diff_vs_A4_2026-10-20": "изменены F.Cu (дорожка FT_INT у U11), In1.Cu, In2.Cu (заливки GND и переходные у U8/U11), B.Cu, B.Mask, B.Paste, B.Silkscreen (SOT-23-5 вместо SOT-23-6); F.Mask, F.Paste, F.Silkscreen, контур, сверловка и job идентичны",
+  "zone_fill_diff_vs_A4": "GND In1 3,83 мм², GND In2 3,11 мм² — в окнах у U8 (153,5…161,5 × 84…91) и U11 (152,5…160,5 × 98…105); за ними менее 0,0005 мм² (шум перезаливки); A_GND без изменений"
+ },
+ "export": {
+  "gerber": "kicad-cli pcb export gerbers -l F.Cu,In1.Cu,In2.Cu,B.Cu,F.Paste,B.Paste,F.Silkscreen,B.Silkscreen,F.Mask,B.Mask,Edge.Cuts --subtract-soldermask (без --board-plot-params: без рамки листа; абсолютные координаты; X2; расширения Protel)",
+  "drill": "kicad-cli pcb export drill --format excellon --drill-origin absolute --excellon-units mm --excellon-zeros-format decimal (PTH и NPTH одним файлом; NPTH на плате нет)",
+  "cpl": "docs/production/A5/JLCPCB_CPL.csv — как у A4; у U8/U11/U10 изменены Val/Package"
+ },
+ "order_notes": [
+  "4 слоя, 1,6 мм, стандартный стек JLCPCB (JLC04161H-7628), внешняя медь 1 oz, внутренняя 0,5 oz",
+  "контроль импеданса не нужен; via закрыть маской (tented)",
+  "сборка: Standard, двусторонняя; плата 58x75 мм меньше минимума 70x70 — технологические поля или панель",
+  "JP1–JP4 снизу под модулем ЦАП — открытые паяльные перемычки: в BOM/CPL их нет, фабрика их не запаивает",
+  "JP5/JP6 снизу у J2 — открытые 3-контактные перемычки выбора уровня аудио: в BOM/CPL их нет, фабрика их не запаивает; R20–R23 ставит фабрика",
+  "J10 (1x9) и J11 (1x6) — заводские female-гнёзда сверху под модуль ЦАП, как J6–J9; модуль GY-PCM5102 пользователь вставляет сам",
+  "NT1 под модулем ЦАП, правее перемычек JP1–JP4 — площадки 2 мм под перемычку проводом A_GND–GND; провод ставит пользователь, фабрика оставляет отверстия пустыми",
+  "U10 (ME6211, посадка JLCPCB «BL») — в просмотрщике JLCPCB проверить, что метка вывода 1 легла на ключ шелкографии; при расхождении угол U10 в CPL 0° или 180° вместо 90°"
+ ],
+ "files": {
+  "JLCPCB_BOM.csv": "0fff7900c9253226b0b11221ba5db8a1235cb203e8982561a7778b29f0f5b08d",
+  "JLCPCB_CPL.csv": "4e5483ff921150fa781244d331dcb12f44d1e53bbe47d3bf910088d80cfd439e",
+  "TS_VDAC_A5-A5-gerber.zip": "7a6b16dbbe1578589800d1da7ed34c131a745598690ee6ffc719791d12bd308b",
+  "drc.json": "2d40bd5e514443c8b29d3416df3f89ab2ee29e57a2bf9817936f6bab74749319",
+  "erc.json": "b29e334827d38173396932112ee659e9418afff73edb4e8b79be6aeb42e55d31",
+  "VDAC4_A5_BOM.pdf": "3117e2c01acbd1953cf61d4ce6bd4bb8c267a179788b28f5b60eeff1aed7b929",
+  "VDAC4_A5_schematic.pdf": "10109665a88a851c12ee589d5fefb1eb9cdc81fe547674b445792060f7d34e50",
+  "VDAC4_A5_assembly.pdf": "a0fa3e0543eec4bf2b8d0f718c2e590b979261508ee90bc6626b290f119781d3"
+ },
+ "zip_contents": {
+  "TS_VDAC_A5-B_Cu.gbl": "0903fc166703ae9fb378f006b9f10dfcc139945f93321d3a66f27e5347116a82",
+  "TS_VDAC_A5-B_Mask.gbs": "be5bfd7848a5ff8f091ea4aabeb726bdc47ac59dc77a78a6e555af5cf48e11c4",
+  "TS_VDAC_A5-B_Paste.gbp": "3d1604c29161a129966017d6874ecf53da442d03fa9aaee80657f52202331cee",
+  "TS_VDAC_A5-B_Silkscreen.gbo": "3699b6b719c4494a44f563e772aac76662e94c411a468097ea4c4fbf1bd177f7",
+  "TS_VDAC_A5-Edge_Cuts.gm1": "f4508a9d93913fdb29a97fced6c11aebc39f9bd5a8940446a763929ccce0a405",
+  "TS_VDAC_A5-F_Cu.gtl": "0db69b829d64e62c6d1254ee9662efa61f7a89943aeff804e9aa5e35f256d91d",
+  "TS_VDAC_A5-F_Mask.gts": "7326386862b1904c4a7c9e170690b59238f71091bf833405fb153828d058fec4",
+  "TS_VDAC_A5-F_Paste.gtp": "45a814d10bd227d64e1e2d37cca2710f69f971b14950f9c5910ee140e934ebcc",
+  "TS_VDAC_A5-F_Silkscreen.gto": "a2d4535afd3a971c9e9887da1e4c368d57d41cfdcda4032f680b47ba9bfcf2bb",
+  "TS_VDAC_A5-In1_Cu.g1": "ad132fff40afd8368847070cb5b2f8249b5c2e8250865616d071eb01a0e11d74",
+  "TS_VDAC_A5-In2_Cu.g2": "29fbf676b40d10bf2759f4c0aaed7e12798e512467468ead3c6f02a59fd077ba",
+  "TS_VDAC_A5-job.gbrjob": "4b20b7a8fc15f2ab7f1446fd837f81c773e563a78473e955f7b6b3bb5931ec0a",
+  "TS_VDAC_A5.drl": "de8ddc3d4aed54d83bc8720e444f6aaa15bd05370cd49758bce1d107ee2effb9"
+ }
+}

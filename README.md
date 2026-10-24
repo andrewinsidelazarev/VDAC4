@@ -10,7 +10,7 @@ ESP32-S3-Zero-N8R8 и ЦАП PCM5102. ESP32-S3 подключена к Evo по 
 | Папка | Что там |
 |---|---|
 | [`Docs`](Docs) | блок-схема платы VDAC4 A4 ([PNG](Docs/TS_VDAC_A4-block-diagram.png), [SVG](Docs/TS_VDAC_A4-block-diagram.svg), [PDF](Docs/TS_VDAC_A4-block-diagram.pdf)) |
-| [`Hardware`](Hardware) | плата VDAC4 A4: проект KiCad и комплект для заказа на JLCPCB; перемычки ЦАП и меры предосторожности — в [`Hardware/README.md`](Hardware/README.md) |
+| [`Hardware`](Hardware) | плата VDAC4, ревизии A5 (текущая) и A4: проекты KiCad, комплекты для заказа на JLCPCB, PDF схем и BOM; перемычки ЦАП и меры предосторожности — в [`Hardware/README.md`](Hardware/README.md) |
 | [`ESP32 S3 Zero N8R8/Docs`](ESP32%20S3%20Zero%20N8R8/Docs) | ESP32-S3: схемы подключения (SPI к IDE-40, звук GY-PCM5102, распиновка), описание прошивки, канала SPI, команд и наладки ([`VDAC4.md`](ESP32%20S3%20Zero%20N8R8/Docs/VDAC4.md)), протокол кадров ([`PROTOCOL.md`](ESP32%20S3%20Zero%20N8R8/Docs/PROTOCOL.md)) |
 | [`ESP32 S3 Zero N8R8/Firmware`](ESP32%20S3%20Zero%20N8R8/Firmware) | прошивка ESP32-S3: канал SPI, Wi-Fi, серверы, вывод звука, загрузчик модулей |
 | [`ESP32 S3 Zero N8R8/Network`](ESP32%20S3%20Zero%20N8R8/Network) | сетевые программы Z80: `zifi.spg`, плагины FTP, SMB, NTP, WC Update, заставки погоды, утилиты |

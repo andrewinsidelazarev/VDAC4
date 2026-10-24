@@ -1,0 +1,25 @@
+﻿Comment,Designator,Footprint,LCSC Part #,MPN,Manufacturer,Quantity,Side,Mount,Notes
+1u,C4,C_0805_2012Metric,C28323,CL21B105KBFNNNE,Samsung Electro-Mechanics,1,Bottom,SMT,Carrier SMD on BOTTOM
+4.7u,C5,C_0805_2012Metric,C1779,CL21A475KAQNNNE,Samsung Electro-Mechanics,1,Bottom,SMT,Carrier SMD on BOTTOM
+100n,"C6,C7,C8,C11,C12,C13,C15,C17,C18",C_0805_2012Metric,C49678,CC0805KRX7R9BB104,YAGEO,9,Bottom,SMT,Carrier SMD on BOTTOM
+PMEG3050EP,"D1,D2",D_SOD-128,C50603,"PMEG3050EP,115",Nexperia,2,Bottom,SMT,Carrier SMD on BOTTOM
+2A hold,F1,Fuse_1812_4532Metric,C20812,SMD1812P200TF16,RUILON(Shenzhen Ruilongyuan Elec),1,Bottom,SMT,Carrier SMD on BOTTOM
+TS-PORT40,J1,PinSocket_2x20_P2.54mm_Vertical,C2977589,2.54-2*20,ZHOURI,1,Bottom,THT,"Female IDE socket body BELOW carrier, solder from ABOVE; direct mating to Evo X2"
+J_AUDIO L G G R,J2,PinHeader_1x04_P2.54mm_Vertical,C2691448,PZ254V-11-04P,XFCN,1,Top,THT,Factory installs carrier connector on TOP
+FDD NC G G +5,J5,TE_171826-4_Horizontal_1x04_P2.50mm,C590635,171826-4,TE Connectivity,1,Top,THT,Factory installs carrier connector on TOP; cable +Y/down; nominal front overhang 0.3mm; finished holes 0.95 +/-0.05mm
+Female socket 1x20 P2.54mm,"J6,J7",PinSocket_1x20_P2.54mm_Vertical,C5224030,PM2.54-1*20,ZHOURI,2,Top,THT,"TOP, mates with Tang J5; shares parent footprint pads; ZHOURI, body height 8.5mm | TOP, mates with Tang J6; shares parent footprint pads; ZHOURI, body height 8.5mm"
+Female socket 1x9 P2.54mm,"J8,J9,J10",PinSocket_1x09_P2.54mm_Vertical,C5224028,PM2.54-1*9,ZHOURI,3,Top,THT,"TOP, mates with ESP 5V/GPIO1-6 row; shares parent footprint pads; ZHOURI, body height 8.5mm | TOP, mates with ESP GPIO43/44/GPIO13-7 row; shares parent footprint pads; ZHOURI, body height 8.5mm | TOP, mates with GY-PCM5102 LOUT..FLT row (A3.7-A3.15); shares parent footprint pads; ZHOURI, body height 8.5mm"
+Female socket 1x6 P2.54mm,J11,PinSocket_1x06_P2.54mm_Vertical,C5224026,PM2.54-1*6,ZHOURI,1,Top,THT,"TOP, mates with GY-PCM5102 SCK..VIN row (A3.1-A3.6); shares parent footprint pads; ZHOURI, body height 8.5mm"
+47k,"R1,R7,R9,R12,R13,R14,R15,R16",R_0805_2012Metric,C17713,0805W8F4702T5E,UNI-ROYAL(Uniroyal Elec),8,Bottom,SMT,Carrier SMD on BOTTOM
+10k,"R2,R3,R10",R_0805_2012Metric,C17414,0805W8F1002T5E,UNI-ROYAL(Uniroyal Elec),3,Bottom,SMT,Carrier SMD on BOTTOM
+1k,"R4,R19",R_0805_2012Metric,C17513,0805W8F1001T5E,UNI-ROYAL(Uniroyal Elec),2,Bottom,SMT,Carrier SMD on BOTTOM
+27k,"R17,R18",R_0805_2012Metric,C17593,0805W8F2702T5E,UNI-ROYAL(Uniroyal Elec),2,Bottom,SMT,Carrier SMD on BOTTOM
+13.7k,"R20,R22",R_0805_2012Metric,C17448,0805W8F1372T5E,UNI-ROYAL(Uniroyal Elec),2,Bottom,SMT,Carrier SMD on BOTTOM
+34k,"R21,R23",R_0805_2012Metric,C17640,0805W8F3402T5E,UNI-ROYAL(Uniroyal Elec),2,Bottom,SMT,Carrier SMD on BOTTOM
+4x47k,"RN1,RN2,RN3,RN4",R_Array_Convex_4x0603,C779384,YC164-JR-0747KL,YAGEO,4,Bottom,SMT,Carrier SMD on BOTTOM
+SN74LVC257APWR,"U1,U2",TSSOP-16_4.4x5mm_P0.65mm,C205921,SN74LVC257APWR,Texas Instruments,2,Bottom,SMT,Carrier SMD on BOTTOM
+SN74LVC245APW,U3,TSSOP-20_4.4x6.5mm_P0.65mm,C7848,SN74LVC245APWR,Texas Instruments,1,Bottom,SMT,Carrier SMD on BOTTOM
+SN74LVC1G97,U6,SOT-23-6,C128411,SN74LVC1G97DBVR,Texas Instruments,1,Bottom,SMT,Carrier SMD on BOTTOM
+SN74LVC1G00DBVR,U7,SOT-23-5,C7826,SN74LVC1G00DBVR,Texas Instruments,1,Bottom,SMT,Carrier SMD on BOTTOM
+74AHCT1G126GV,"U8,U11",SOT-23-5,C52140416,74AHCT1G126GV,MDD(Microdiode Semiconductor),2,Bottom,SMT,Carrier SMD on BOTTOM
+ME6211C33M5G-N,U10,SOT-23-5,C82942,ME6211C33M5G-N,MICRONE(Nanjing Micro One Elec),1,Bottom,SMT,Carrier SMD on BOTTOM
