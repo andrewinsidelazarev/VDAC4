@@ -1,0 +1,2 @@
+CONFIG_VSNPRINTF_NANO       =y
+CONFIG_BFLB_LOG             =n
