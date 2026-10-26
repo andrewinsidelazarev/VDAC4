@@ -121,3 +121,5 @@ report_timing -hold -from [get_pins {u_sdram/RAM_B_DO*/Q}] -to [get_pins {zxnext
 # портов; у 0.17 запас был 0,031 нс (cpu_speed_r -> dma_d_n_s_2), у 0.16 — 0,305 нс, и сборка 0.17
 # на плате сбоила (зависание после TBBlue, ошибки чтения файлов). Заменяет предел 17,3 нс от BusAck (0.10).
 set_max_delay 16.5 -to [get_pins {zxnext_top/zxnext/cpu_mod/DI_Reg_*/D zxnext_top/zxnext/dma_mod/dma_d_n_s_*/D}]
+set_max_delay 16.5 -from [get_pins {zxnext_top/zxnext/cpu_mod/DI_Reg_*/Q zxnext_top/zxnext/dma_mod/dma_d_n_s_*/Q}]
+set_max_delay 16.5 -to [get_pins {zxnext_top/zxnext/dma_mod/dma_wr_s_s*/D zxnext_top/zxnext/dma_mod/dma_rd_s_s*/D zxnext_top/zxnext/dma_mod/wait_n_s_s*/D}]

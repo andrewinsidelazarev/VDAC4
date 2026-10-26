@@ -267,21 +267,24 @@ begin
 end process; 
 
 
+-- VDAC4: островов данных нет (I_AUDIO_ENABLE = 0), приёмник принимает DVI и защитную полосу видео
+-- показывал точками (AB,55,AB) — сиреневая полоса слева. Вместо неё — управляющий символ CTL=00
+-- (1101010100), схема мультиплексора прежняя.
 blueout: blue <= 
    "1010001110" when (state = dataIslandPreGuard or state = dataIslandPostGuard) and vhSyncOut = "00" else
    "1001110001" when (state = dataIslandPreGuard or state = dataIslandPostGuard) and vhSyncOut = "01" else
    "0101100011" when (state = dataIslandPreGuard or state = dataIslandPostGuard) and vhSyncOut = "10" else
    "1011000011" when (state = dataIslandPreGuard or state = dataIslandPostGuard) and vhSyncOut = "11" else
-   "1011001100" when state = videoDataGuardBand else
+   "1101010100" when state = videoDataGuardBand else
    enc0out;
 
 greenout: green <= 
-   "0100110011" when state = videoDataGuardBand else
+   "1101010100" when state = videoDataGuardBand else
    "0100110011" when state = dataIslandPreGuard or state = dataIslandPostGuard else
    enc1out;
 
 redout: red <= 
-   "1011001100" when state = videoDataGuardBand else
+   "1101010100" when state = videoDataGuardBand else
    "0100110011" when state = dataIslandPreGuard or state = dataIslandPostGuard else
    enc2out;
 

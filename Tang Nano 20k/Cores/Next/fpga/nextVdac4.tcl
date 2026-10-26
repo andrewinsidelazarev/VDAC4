@@ -96,7 +96,7 @@ set_option -print_all_synthesis_warning 0
 set_option -rw_check_on_ram 1
 
 set_option -correct_hold_violation 0
-set_option -place_option 2
+set_option -place_option 0
 set_option -route_option 1
 set_option -ioreg_in_iob 1
 

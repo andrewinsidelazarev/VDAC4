@@ -574,7 +574,7 @@ wire [3:0] link_io_out;
 wire       link_io_oe;
 wire       boot_req;
 
-next_link #(.VERSION(16'h0012)) next_link_inst (
+next_link #(.VERSION(16'h0025)) next_link_inst (
     .sck          (link_sck),
     .cs_n         (link_cs_n),
     .io_in        (link_io),

@@ -1395,6 +1395,10 @@ attribute syn_maxfan of z80_busak_n : signal is 16;  -- limit fanout
    signal lores_vram_req         : std_logic;
    signal lores_vram_ack_dly     : std_logic;
    signal vram_bank5_a0          : std_logic_vector(13 downto 0);
+   -- VDAC4: запись в bank5_ram из регистров на такт позже (b5w_*)
+   signal b5w_pend               : std_logic := '0';
+   signal b5w_addr               : std_logic_vector(13 downto 0) := (others => '0');
+   signal b5w_data               : std_logic_vector(7 downto 0) := (others => '0');
    signal vram_bank_a1          : std_logic_vector(13 downto 0);
    signal lores_vram_ack         : std_logic;
    
@@ -7003,9 +7007,9 @@ pi_i2s_audio_R <= (others => '0');
    port map (
       -- CPU port
       clk_a_i  => i_CLK_28,
-      we_i     => cpu_bank5_sched and cpu_bank5_we,
+      we_i     => b5w_pend,                -- VDAC4: запись из регистров (b5w_*), на такт позже
       addr_a_i => vram_bank5_a0,
-      data_a_i => cpu_do,
+      data_a_i => b5w_data,
       data_a_o => vram_bank5_do0,
       -- ULA port
       clk_b_i  => '0',--i_CLK_28_n,
@@ -7063,8 +7067,27 @@ pi_i2s_audio_R <= (others => '0');
       end if;
    end process;
    
-   lores_vram_ack <= '1' when cpu_bank5_sched = '0' and lores_vram_req = '1' else '0'; 
-   vram_bank5_a0 <= (sram_A20_A13(0) & cpu_a(12 downto 0)) when cpu_bank5_sched = '1' else lores_addr;
+   -- VDAC4 (2026-10-26): запись в bank5_ram — из регистров, на такт позже. Раньше WE (cpu_bank5_sched and
+   -- cpu_bank5_we), адрес (мультиплексор CPU/lores по cpu_bank5_sched) и данные (cpu_do) шли в BRAM
+   -- комбинационно, из регистров по спаду (полтакта), и переключались сразу после фронта записи; на плате
+   -- отдельные блоки BSRAM (16K x 1, бит на блок) записывали неверно (на плате — биты 3 и 6; NextNano
+   -- issue #14). Теперь на
+   -- фронте записи запоминаются WE, адрес и байт, на следующем фронте BRAM пишет их из регистров; адрес
+   -- порта A в этот такт отдан записи, lores ждёт такт. Чтение процессором — как было.
+   process (i_CLK_28)
+   begin
+      if rising_edge(i_CLK_28) then
+         b5w_pend <= cpu_bank5_sched and cpu_bank5_we;
+         if cpu_bank5_sched = '1' then
+            b5w_addr <= sram_A20_A13(0) & cpu_a(12 downto 0);
+            b5w_data <= cpu_do;
+         end if;
+      end if;
+   end process;
+
+   lores_vram_ack <= '1' when cpu_bank5_sched = '0' and b5w_pend = '0' and lores_vram_req = '1' else '0';
+   vram_bank5_a0 <= b5w_addr when b5w_pend = '1' else
+                    (sram_A20_A13(0) & cpu_a(12 downto 0)) when cpu_bank5_sched = '1' else lores_addr;
    
    -- Arbitrate ula,tilemap on second port in both banks 5 and 7
    

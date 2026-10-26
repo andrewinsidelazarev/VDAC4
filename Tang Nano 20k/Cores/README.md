@@ -7,7 +7,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 |---|---|---|---|
 | **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.32 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
 | **FT812** — видеоускоритель для программ Evo | flash Tang, слот 1 | 1.29 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
-| **ZX Spectrum Next** (на основе NextNano) | карта Tang, `CORES` | 0.18, слой ESP 0.7 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
+| **ZX Spectrum Next** (на основе NextNano) | карта Tang, `CORES` | 0.37, слой ESP 0.7 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.8, слой ESP 0.6 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
 
 `.BIN` — само ядро. `.ELF` — его слой на ESP: клавиатура и мышь Evo, звук на ЦАП ESP, сохранения на
@@ -73,6 +73,11 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 Джойстик Kempston работает в обоих ядрах. Мышь Kempston работает в Next.
 
 ## Проверено на плате
+
+2026-10-27, ESP 0.1.100, TS-Config 1.32:
+- **Next 0.37** — без сиреневой полосы. NextZXOS, браузер SD, запуск `.nex`, загрузка программ — без
+  глюков. Та же правка записи в банк 5 со счётчиками на плате: 3,4 млн проверенных чтений процессора и
+  174 млн чтений ULA, ошибок 0.
 
 2026-10-26, ESP 0.1.100, TS-Config 1.32:
 - **Next 0.18** грузится с первого раза, файлы читаются. Частота меняется F8 и стрелками меню и
