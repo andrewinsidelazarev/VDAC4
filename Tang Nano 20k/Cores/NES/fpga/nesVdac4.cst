@@ -1,0 +1,109 @@
+// ZX Next на VDAC4 (Tang Nano 20K на плате VDAC4): выводы — только то, что ядру нужно, с
+// атрибутами ядер VDAC4 (fpga/vdac2/constraints/ts_fb_hdmi_top.cst). Остальные выводы Tang
+// (шина Evo mux_d, HS/VS/PCLK Evo, m_sel, линии FT от Evo, flash, RECONFIG_N) — не заняты:
+// входы по умолчанию. Встроенная SDRAM GW2AR — своими выводами корпуса, без IO_LOC.
+
+// 27 МГц
+IO_LOC  "clk_27m" 4;
+IO_PORT "clk_27m" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+
+// кнопки Tang
+IO_LOC  "btn[0]" 88;
+IO_PORT "btn[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "btn[1]" 87;
+IO_PORT "btn[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+
+// microSD самой Tang (SPI): NextZXOS. DAT1/DAT2 слота (85, 80) на VDAC4 — LINK IRQ и PCLK Evo,
+// ядро их не трогает.
+IO_LOC  "SD_SCK" 83;
+IO_PORT "SD_SCK" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "SD_MOSI" 82;
+IO_PORT "SD_MOSI" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "SD_CS" 81;
+IO_PORT "SD_CS" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "SD_MISO" 84;
+IO_PORT "SD_MISO" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+
+// HDMI
+IO_LOC  "O_tmds_clk_p" 33,34;
+IO_PORT "O_tmds_clk_p" PULL_MODE=NONE DRIVE=8;
+IO_LOC  "O_tmds_data_p[0]" 35,36;
+IO_PORT "O_tmds_data_p[0]" PULL_MODE=NONE DRIVE=8;
+IO_LOC  "O_tmds_data_p[1]" 37,38;
+IO_PORT "O_tmds_data_p[1]" PULL_MODE=NONE DRIVE=8;
+IO_LOC  "O_tmds_data_p[2]" 39,40;
+IO_PORT "O_tmds_data_p[2]" PULL_MODE=NONE DRIVE=8;
+
+// LINK — ESP32-S3 (QSPI)
+IO_LOC  "link_sck" 77;
+IO_PORT "link_sck" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+IO_LOC  "link_cs_n" 18;
+IO_PORT "link_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "link_io[0]" 71;
+IO_PORT "link_io[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "link_io[1]" 72;
+IO_PORT "link_io[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "link_io[2]" 55;
+IO_PORT "link_io[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "link_io[3]" 31;
+IO_PORT "link_io[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "link_irq_n" 85;
+IO_PORT "link_irq_n" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+
+// BL616 (cp_spi): запрос возврата в слот 0
+IO_LOC  "cp_sck" 13;
+IO_PORT "cp_sck" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+IO_LOC  "cp_cs_n" 86;
+IO_PORT "cp_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "cp_mosi" 76;
+IO_PORT "cp_mosi" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "cp_miso" 75;
+IO_PORT "cp_miso" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+IO_LOC  "cp_irq_n" 69;
+IO_PORT "cp_irq_n" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+
+// Входы от Evo, которые ядру не нужны, — с подтяжками ядер VDAC4 (ts_fb_hdmi_top.cst): без них
+// Gowin ставит неиспользуемым выводам подтяжку вверх, а такт SPI Evo (FPGA20, его же слушает ESP)
+// у TS-Config подтянут вниз
+IO_LOC  "mux_d[0]" 27;
+IO_PORT "mux_d[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[1]" 28;
+IO_PORT "mux_d[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[2]" 29;
+IO_PORT "mux_d[2]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[3]" 30;
+IO_PORT "mux_d[3]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[4]" 41;
+IO_PORT "mux_d[4]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[5]" 42;
+IO_PORT "mux_d[5]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[6]" 48;
+IO_PORT "mux_d[6]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "mux_d[7]" 54;
+IO_PORT "mux_d[7]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "hsync_in" 15;
+IO_PORT "hsync_in" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "vsync_in" 16;
+IO_PORT "vsync_in" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "pclk_in" 80;
+IO_PORT "pclk_in" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "m_sel" 73;
+// M_SEL — сброс Evo для ядра (next_evo_reset): без Evo (стол) линию никто не ведёт — подтяжка
+// вниз держит 0, и ядро не взводится; в Evo линию ведёт Evo
+IO_PORT "m_sel" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+IO_LOC  "ft_sck" 20;
+IO_PORT "ft_sck" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+IO_LOC  "ft_cs_n" 17;
+IO_PORT "ft_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "ft_mosi" 19;
+IO_PORT "ft_mosi" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+
+// Выходы платы VDAC4 — в покое (как у ядра VDAC4 без работы)
+IO_LOC  "mux_sel" 56;
+IO_PORT "mux_sel" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+IO_LOC  "pa_en" 51;
+IO_PORT "pa_en" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=DOWN;
+IO_LOC  "ft_int_n" 74;
+IO_PORT "ft_int_n" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+IO_LOC  "ft_miso" 79;
+IO_PORT "ft_miso" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;

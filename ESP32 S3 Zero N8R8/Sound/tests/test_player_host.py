@@ -104,7 +104,7 @@ def build() -> pathlib.Path | None:
     # Пути от ROOT (Sound); заголовки ядра и компонент tracker — из прошивки (абсолютные пути).
     includes = ['tests/stubs_player', 'tests/stubs_tracker', FIRMWARE / 'modules/sdk/include',
                 FIRMWARE / 'components/tracker/include', FIRMWARE / 'components/tracker',
-                FIRMWARE / 'include', 'modules/player/main', 'components/tsf/include']
+                FIRMWARE / 'include', 'modules/player/main', 'components/tsf/include', 'player_ui']
     common = ('/nologo /c /O2 /utf-8 /D_CRT_SECURE_NO_WARNINGS /D_USE_MATH_DEFINES ' +
               ' '.join(f'/I "{short(ROOT / path)}"' for path in includes))
     module = (f'{common} /std:c11 /FI zm_compat.h /I "{short(HELIX / "pub")}" /DLIBXMP_STATIC '
@@ -143,6 +143,12 @@ def build() -> pathlib.Path | None:
         (f'{ymfm} /w', 'components/ymfm/src/ymfm_adpcm.cpp', 'ymfm_adpcm.obj'),
         (f'{ymfm} /w', 'components/ymfm/src/fast_opl.cpp', 'fast_opl.obj'),
         (f'{common} /EHsc /std:c++17', 'modules/player/main/cover_glue.cpp', 'cover_glue.obj'),
+        (module, 'modules/player/main/online_cover.c', 'online_cover.obj'),
+        # Экран PLAYER на Tang (screen.cpp, 1.26): логика — PlayerOverlay прошивки, отрисовка — Codex
+        (f'{common} /EHsc /std:c++17', 'modules/player/main/screen.cpp', 'screen.obj'),
+        (f'{common} /EHsc /std:c++17', FIRMWARE / 'src/player_overlay.cpp', 'player_overlay.obj'),
+        (f'{common} /EHsc /std:c++17', 'player_ui/player_ui.cpp', 'player_view.obj'),
+        (f'{common} /EHsc /std:c++17', 'player_ui/fonts/pui_font.cpp', 'pui_font.obj'),
         (f'{common} /EHsc /std:c++17', FIRMWARE / 'src/cover_art.cpp', 'cover_art.obj'),
     ]
     units += [(f'{saa} /Dmain=saa_main', 'modules/saa/main/saa_source.cpp', 'saa_source.obj'),
@@ -593,6 +599,17 @@ class PlayerHostTest(unittest.TestCase):
         self.assertEqual(values.get('replies_outside', '0'), '0')
         return values
 
+    def test_starts_and_plays_in_board_internal_memory(self) -> None:
+        # Внутренняя память ESP на плате (0.1.86 без приложения: свободно 49 503, самый большой
+        # кусок 29 696). Плееру с задачами декодера, помощника и обложек из меток — не больше
+        # 36 КБ: 1.21…1.24 держали ещё задачу обложек из сети (и 1.21/1.22 — таблицы спектра)
+        # и брали 41…61 КБ — на плате start −2, плеер не запускался. Здесь — с запасом 40 000.
+        r = self.run_host('mp3', silent_mp3(300, tag=2000), internal=40000, **{'internal-block': 29696})
+        self.assertEqual((r['state'], r['finished'], r['decoded']), ('0', '1', '1'))
+        self.assertEqual(int(r['pcm_frames']), 300 * FRAME_SAMPLES)
+        self.assertLessEqual(int(r['internal_peak']), 36000, 'внутренней памяти ESP плееру нужно больше')
+        self.assertNotIn('not allocated', self.log)
+
     def test_every_mp3_frame_reaches_the_output(self) -> None:
         r = self.run_host('mp3', silent_mp3(300, tag=2000, junk=b'\x00\xFF\x00junk'))
         self.assertEqual(r['open'], '1')
@@ -609,6 +626,21 @@ class PlayerHostTest(unittest.TestCase):
         self.assertEqual(r['allocations_after_stop'], '6',
                          'осталась память приложения: P, кольцо, кадры, миниатюра, спектр и его история')
         self.assertEqual(r['temperature'], '48', 'кристалл 47,5 °C — в AUDIO_STATUS целыми')
+
+    def test_input_rate_is_logged(self) -> None:
+        # PLAYER 1.27: при остановке — сколько потока пришло от Z80, за сколько и сколько раз
+        # очередь была полна (0 — звук ждал данных: это предел передачи Evo → ESP).
+        mp3 = silent_mp3(300, tag=2000)
+        self.run_host('mp3', mp3)
+        found = re.search(r'player: input (\d+) KB in (\d+) ms \((\d+) KB/s\), queue full (\d+) times', self.log)
+        self.assertIsNotNone(found, self.log)
+        kb, ms, rate, full = (int(x) for x in found.groups())
+        self.assertAlmostEqual(kb, (len(mp3) - 2000) // 1024, delta=2, msg='весь поток за меткой')
+        # На стенде поток приходит разом (0 мс — скорость 0); на плате — за секунды
+        if ms > 0:
+            # КБ в строке округлены вниз (до 1 КБ): за ms это до 1000/ms КБ/с расхождения
+            self.assertAlmostEqual(rate, kb * 1000 // ms, delta=1000 // ms + 2,
+                                   msg='КБ/с — из байтов и времени')
 
     def test_vbr_xing_survives_a_tiny_first_block(self) -> None:
         # Длинную метку ID3 плагин пропускает сам; первым блоком уходит хвост
@@ -722,6 +754,121 @@ class PlayerHostTest(unittest.TestCase):
         r = self.run_host('cover', tag + silent_mp3(5))
         self.assertEqual((r['cover_state'], r['thumb_state']), ('2', '2'))
         self.assertEqual(bytes.fromhex(r['title_hex']).decode('cp866'), 'Only title')
+
+    # Ответ поиска Deezer (как у api.deezer.com/search): первая запись — чужой исполнитель.
+    DEEZER = (r'{"data":[{"id":1,"title":"Children","artist":{"id":5,"name":"Other Band",'
+              r'"picture_big":"https:\/\/cdn-images.dzcdn.net\/images\/artist\/aa\/500x500.jpg"},'
+              r'"album":{"id":7,"title":"X","cover_big":"https:\/\/cdn-images.dzcdn.net\/images'
+              r'\/cover\/bad\/500x500-000000-80-0-0.jpg"}},{"id":2,"title":"Children (Dream '
+              r'Version)","artist":{"id":6,"name":"Robert Miles"},"album":{"id":8,"title":'
+              r'"Dreamland","cover_big":"https:\/\/cdn-images.dzcdn.net\/images\/cover\/55140f8e'
+              r'\/500x500-000000-80-0-0.jpg"}}],"total":2}')
+    NET_JPEG = b'\xFF\xD8\xFF' + bytes([0x20, 0x80, 0xE0]) + bytes(2000)   # «картинка» одного цвета
+
+    def ui_run(self, tag: bytes, json: str | None = None, block: bytes | None = None) -> dict[str, str]:
+        folder = pathlib.Path(self.temp.name)
+        (folder / 'deezer.json').write_text(json if json is not None else self.DEEZER, encoding='utf-8')
+        (folder / 'net.jpg').write_bytes(self.NET_JPEG)
+        keys = {'cover-json': folder / 'deezer.json', 'cover-jpeg': folder / 'net.jpg'}
+        if block is not None:
+            (folder / 'block.bin').write_bytes(block)
+            keys['ui-block'] = folder / 'block.bin'
+        return self.run_host('ui', tag + silent_mp3(800), ui=1, speed=4, **keys)
+
+    def test_screen_whole_chain(self) -> None:
+        # Вся цепочка на ПК: тело AUDIO_STATUS, которое собрал настоящий плагин VDAC4MP3.WMF на
+        # эмуляторе Z80, → PLAYER.ELF (этот стенд) → его экран (screen.cpp, 1.26) → LINK → Tang
+        # (модель): оверлей 1 — холст 640×360 ×1 в середине кадра 1280×720, целиком в Tang до
+        # включения, проявляется по ступени прозрачности за кадр; кадры идут; плагину — флаги
+        # экрана; флаг ухода экран гасит.
+        import test_mp3_plugin_z80 as plugin
+        h = plugin.Mp3Harness(bytes(40 * 1024), name=b'CHILDREN.MP3',
+                              esp=plugin.AudioEsp(played_per_status=2048))
+        h.esc_after = 120
+        h.start()
+        block = h.audio.ui_raw[0]
+        self.assertEqual(block[0:2], b'\x01\x01', 'тело плагина: версия 1, окно открыто')
+        tag = id3_tag(id3_frame(b'TPE1', b'\x00Robert Miles') + id3_frame(b'TIT2', b'\x00Children'))
+        r = self.ui_run(tag, block=block)
+        self.assertEqual(r['ui_visible'], '1')
+        self.assertEqual(r['ui_file'], 'CHILDREN.MP3', 'имя — то, что прислал плагин')
+        self.assertEqual(r['open_screen'], '2', 'AUDIO_OPEN: Tang может показать экран')
+        ctrl = int(r['chain_ctrl'])
+        self.assertEqual((ctrl & 1, (ctrl >> 1) & 1, (ctrl >> 4) & 15), (1, 0, 15),
+                         'оверлей включён, ×1, непрозрачный')
+        self.assertEqual(int(r['chain_pos']), 320 | 180 << 16, 'место: середина кадра 1280×720')
+        self.assertEqual(int(r['chain_size']), 640 | 360 << 16, 'холст 640×360')
+        self.assertEqual(int(r['chain_base']), 131072 - 320 * 360, 'холст — в конце региона')
+        self.assertEqual(r['chain_written_before_on'], str(320 * 360), 'весь холст — до включения')
+        self.assertEqual((r['chain_written'], r['chain_outside']), (str(320 * 360), '0'),
+                         'пишется только холст')
+        alphas = [int(a) for a in r['chain_alphas'].split(',')]
+        self.assertEqual(alphas[:16], list(range(16)), 'появление: 0…15 по ступени')
+        self.assertGreater(int(r['chain_frame_words']), 0, 'кадры идут')
+        self.assertEqual(r['chain_bad'], '0')
+        self.assertEqual(r['chain_flags'], '3', 'плагину: Tang есть, экран показан')
+        self.assertEqual(r['chain_app_dones'], '1', 'плагин ушёл — PLAYER просит выгрузить себя')
+        left = [int(a) for a in r['chain_left_alphas'].split(',')]
+        self.assertEqual(left, list(range(14, -1, -1)) + [-1], 'уходит плавно 15 → 0, затем выкл.')
+        self.assertEqual(r['chain_left_on'], '0')
+
+    def test_screen_model_and_online_cover(self) -> None:
+        # Экран оверлеем Tang (PLAYER 1.21): что прислал плагин в теле AUDIO_STATUS, метки,
+        # спектр и формат — в снимке; обложки нет ни в метке, ни в папке — из сети, с флагом 64.
+        tag = id3_tag(id3_frame(b'TPE1', b'\x00Robert Miles') + id3_frame(b'TIT2', b'\x00Children'))
+        r = self.ui_run(tag)
+        self.assertEqual(r['ui_table'], '0', 'экран рисует сам PLAYER: прошивке снимка нет')
+        self.assertEqual(r['ui_before_visible'], '0', 'плагин тела не прислал — экрана нет')
+        self.assertEqual((r['ui_visible'], r['ui_page'], r['ui_track'], r['ui_tracks']),
+                         ('1', '2', '3', '10'))
+        self.assertEqual(r['ui_sent_kb'], str(123456 // 1024))
+        self.assertEqual((r['ui_file'], r['ui_status']), ('CHILDREN.MP3', 'Buffering'))
+        self.assertEqual(r['tag_cover_state'], '2', 'в метке картинки нет')
+        self.assertEqual((r['ui_view'], r['ui_count']), ('1', '64'), 'спектр: 64 полосы')
+        self.assertIn(r['ui_state'], ('3', '5'), 'играет или доигрывает')
+        self.assertEqual((r['ui_title'], r['ui_artist']), ('Children', 'Robert Miles'))
+        self.assertEqual(r['ui_format'], 'MP3  128 kbps  44.1 kHz  stereo')
+        self.assertEqual(r['ui_temperature'], '48')
+        self.assertGreaterEqual(int(r['ui_played_ms']), 10000)
+        self.assertEqual(r['cover_searches'], '1')
+        self.assertEqual(r['cover_search_url'],
+                         'https://api.deezer.com/search?limit=5&q=Robert%20Miles%20Children')
+        self.assertEqual(r['cover_pictures'], '1')
+        self.assertIn('/cover/55140f8e/', r['cover_picture_url'], 'запись своего исполнителя')
+        self.assertEqual(r['cover_flag'], '1', 'окно Evo спросит миниатюру')
+        self.assertNotEqual(r['ui_cover_serial'], '0')
+        self.assertEqual(r['ui_cover'], '0')
+        rgb565 = (0x20 >> 3) << 11 | (0x80 >> 2) << 5 | 0xE0 >> 3
+        self.assertEqual((r['ui_cover_pixel'], r['ui_cover_corner']), (str(rgb565), str(rgb565)))
+        self.assertEqual(r['ui_left_visible'], '0', 'плагин уходит — экран сразу прочь')
+
+    def test_own_cover_is_not_replaced_from_the_net(self) -> None:
+        picture = b'\xFF\xD8\xFF' + bytes([255, 255, 255]) + bytes(3000)
+        tag = id3_tag(id3_frame(b'TPE1', b'\x00Robert Miles') + id3_frame(b'TIT2', b'\x00Children') +
+                      id3_frame(b'APIC', b'\x00image/jpeg\x00\x03\x00' + picture))
+        r = self.ui_run(tag)
+        self.assertEqual(r['tag_cover_state'], '1')
+        self.assertEqual(r['cover_searches'], '0', 'своя обложка есть — в сеть не ходить')
+        self.assertEqual(r['ui_cover'], '0')
+        self.assertEqual(r['ui_cover_pixel'], str(0xFFFF), 'обложка из метки — белая')
+
+    def test_online_cover_cyrillic_and_foreign_artist(self) -> None:
+        tag = id3_tag(id3_frame(b'TPE1', b'\x03' + 'Кино'.encode('utf-8')) +
+                      id3_frame(b'TIT2', b'\x03' + 'Группа крови'.encode('utf-8')))
+        r = self.ui_run(tag)
+        query = '%D0%9A%D0%B8%D0%BD%D0%BE%20%D0%93%D1%80%D1%83%D0%BF%D0%BF%D0%B0%20' \
+                '%D0%BA%D1%80%D0%BE%D0%B2%D0%B8'
+        self.assertEqual(r['cover_search_url'], 'https://api.deezer.com/search?limit=5&q=' + query)
+        self.assertEqual(r['cover_pictures'], '0', 'чужой исполнитель — обложки нет')
+        self.assertEqual((r['cover_flag'], r['ui_cover_serial']), ('0', '0'))
+        # Имя в ответе — экранированное \\uXXXX, регистр другой: тот же исполнитель
+        json = ('{"data":[{"id":3,"artist":{"id":9,"name":"\\u041a\\u0418\\u041d\\u041e"},"album":'
+                '{"id":4,"cover_big":"https:\\/\\/cdn-images.dzcdn.net\\/images\\/cover\\/kino'
+                '\\/500x500-000000-80-0-0.jpg"}}],"total":1}')
+        r = self.ui_run(tag, json)
+        self.assertEqual(r['cover_pictures'], '1')
+        self.assertIn('/cover/kino/', r['cover_picture_url'])
+        self.assertEqual(r['cover_flag'], '1')
 
     def test_missing_decoder(self) -> None:
         r = self.run_host('missing')

@@ -37,6 +37,12 @@ enum Command : uint8_t {
   kNetRecv = 0x12,
   kNetClose = 0x13,
   kNetHttpGet = 0x14,
+  // Виртуальный диск VDAC4 VFS (zifi/vdisk_service.hpp): устройство 6 WC вместо SD2.
+  kVdiskInfo = 0x15,
+  kVdiskRead = 0x16,   // [lba LE32][смещение LE16][длина <= 248]
+  kVdiskReset = 0x17,
+  kVdiskWrite = 0x18,  // [lba LE32][данные 512]: только SD2 = карта Tang
+  kVdiskMode = 0x19,   // [0 — том VFS, 1 — карта Tang посекторно]
   kNetPing = 0x20,
   kNetIpConfig = 0x21,
   kNetNtp = 0x22,
@@ -57,6 +63,19 @@ enum Command : uint8_t {
   // Часы ESP по часам Evo (плагин NTP Time Sync, когда NTP не ответил):
   // [год LE16][месяц][число][часы][минуты][секунды] — местное время по time: из zifi.ini.
   kSysClock = 0x29,
+  // Папка программы Evo на SD — path.cfg во flash ESP (path_table.hpp). Программа берёт её
+  // по имени и серийному номеру тома FAT32, проверяет в ней свои файлы и, если их там нет,
+  // ищет по карте и записывает найденную. Ответ сразу, без ACK.
+  // GET: [серийный LE32][имя, 0] -> kRespPathGet [1 — есть / 0 — нет][кластер LE32].
+  // SET: [серийный LE32][кластер LE32][имя, 0] -> kRespPathSet [1 — записано / 0 — нет].
+  kPathGet = 0x2A,
+  kPathSet = 0x2B,
+  // Ядра ПЛИС для кэша BL616 на microSD Tang (/CORES/, core_store.hpp; плагин VDAC4 Cores):
+  // CORE_LIST → [1][число][записи: имя 16 байт, длина LE32, флаги: 0 — есть ИМЯ.ELF] или
+  // [0][текст ошибки, 0]; CORE_APP [имя, 0] — слой ESP ядра: ИМЯ.ELF с SD Tang в кэш модулей и
+  // запуск (своего ELF нет — встроенный общий слой «CORE») → [итог int8][приложение, 0][версия, 0]
+  kCoreList = 0x2C,
+  kCoreApp = 0x2D,
   // Окно проигрывателя (PLAYER.ELF): спектр или уровни каналов, позиция,
   // длительность. Не #3E: этот код у kLinkProbe, его перехватывает ядро.
   kAudioView = 0x2F,
@@ -169,6 +188,15 @@ enum Command : uint8_t {
   kRespWcuApply = 0xA6,  // [1 — принято]
   kRespWcuStop = 0xA7,   // [1 — сеанс остановлен]
   kRespSysClock = 0xA9,  // [1 — часы ESP выставлены, 0 — время негодное]
+  kRespPathGet = 0xAA,   // [1 — есть / 0 — нет][кластер LE32]
+  kRespPathSet = 0xAB,
+  kRespCoreList = 0xAC,
+  kRespCoreApp = 0xAD,   // [1 — записано / 0 — нет]
+  kRespVdiskInfo = 0x95,   // [итог][флаги][поколение LE32][секторов LE32][источников]
+  kRespVdiskRead = 0x96,   // [итог][данные]
+  kRespVdiskReset = 0x97,  // [итог][поколение LE32]
+  kRespVdiskWrite = 0x98,  // [итог]
+  kRespVdiskMode = 0x99,   // [итог][флаги][секторов LE32]
   kRespTangRead = 0xC5,  // [1 — прочитано / 0 — LINK к Tang не работает][слова LE32]
   kRespTangWrite = 0xC6, // [1 — записано / 0 — нет LINK или регистр не настройка]
   kRespWcuSync = 0xA8,   // [1 — повтор списка поставлен в очередь]

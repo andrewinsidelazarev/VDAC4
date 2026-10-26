@@ -25,7 +25,7 @@
 module hdmi_tx #(
     parameter bit         HDMI     = 1'b1,
     parameter bit         VS_HIGH  = 1'b1,     // активный уровень VSYNC на входе
-    parameter logic [7:0] VIC      = 8'd19,    // 19 — 1280×720p50; 17 — 720×576p50 4:3
+    parameter logic [7:0] VIC      = 8'd19,    // 19 — 1280×720p50; 4 — 1280×720p60; 17 — 720×576p50 4:3
     parameter logic [1:0] PIC_AR   = 2'b10     // формат кадра: 1 — 4:3, 2 — 16:9
 ) (
     input  wire       pixel_clk,

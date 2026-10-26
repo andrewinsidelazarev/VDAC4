@@ -40,6 +40,19 @@ Esp_Restart:
 Track_Count:
         call Page1_Call
         dw P1.Track_Count
+; Входы в окно плагина и экран Tang (screen.asm).
+Ui_Probe:
+        call Page1_Call
+        dw P1.Ui_Probe
+Ui_Screen:
+        call Page1_Call
+        dw P1.Ui_Screen
+Ui_Track:
+        call Page1_Call
+        dw P1.Ui_Track
+Ui_Show:
+        call Page1_Call
+        dw P1.Ui_Show
 
 ; Полоса загрузки — снова у файла плеера (Mod_Play).
 Esp_LoadDone:

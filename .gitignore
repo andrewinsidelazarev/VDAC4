@@ -58,6 +58,13 @@ MEMORY.md
 /ESP32 S3 Zero N8R8/*/modules/*/sdkconfig.old
 /ESP32 S3 Zero N8R8/*/modules/*/managed_components/
 
+# Запускатель приложений ESP: хранятся готовые ИМЯ.SPG и копии ИМЯ.ELF, промежуточное —
+# нет (app_cfg.inc, куски ELF, spgbld.ini, esp_app.bin и .sym — их создаёт build.bat)
+/ESP32 S3 Zero N8R8/Network/ESP App SPG/_spg/
+/ESP32 S3 Zero N8R8/Network/ESP App SPG/build/*
+!/ESP32 S3 Zero N8R8/Network/ESP App SPG/build/*.SPG
+!/ESP32 S3 Zero N8R8/Network/ESP App SPG/build/*.ELF
+
 # Чужие материалы — музыка, банки звуков, ПЗУ, картинки для проверок — в
 # репозиторий не выкладываются: проверки берут их снаружи (E:\zx\Music и т. п.).
 # Публикуются только плейлисты радио (*.M3U): это не авторский материал.
@@ -117,3 +124,8 @@ MEMORY.md
 *.rom
 *.scr
 *.sxg
+
+# VDAC4 VFS: образы и журналы сборок прошивки (публикуется firmware/vdac4) и страницы WC для
+# стенда (их делает tools/make_wc_tables.py из boot.$C самого WC)
+/ESP32 S3 Zero N8R8/Network/VDAC4 VFS/release/
+/ESP32 S3 Zero N8R8/Network/VDAC4 VFS/build/wc/

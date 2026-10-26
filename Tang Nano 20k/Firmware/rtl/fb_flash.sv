@@ -5,8 +5,8 @@
 // SLOTS ячеек по 32 байта, восемь слов старшим байтом вперёд:
 //   0 MAGIC "VDST";
 //   1 [3:0] MUX CLOCK, [5:4] MUX DELAY − 1, 6 MUX PHASE, 7 AUTO ALIGN, [15:8] формат (1),
-//     16 ASPECT (0 — 4:3, 1 — 16:9), [18:17] SIZE (0 — 100 %, 1 — 95 %, 2 — 90 %);
-//     в записях до них — нули;
+//     16 ASPECT (0 — 4:3, 1 — 16:9), [18:17] SIZE (0 — 100 %, 1 — 95 %, 2 — 90 %),
+//     19 FRAME BLEND (ядро 1.32); в записях до них — нули;
 //   2…5 поправки окна по растрам: слово 2 + m/2, полуслово m%2 — {V ADJUST, H ADJUST} растра m;
 //   6 запас (0);
 //   7 ~(сумма слов 0…6).
@@ -51,7 +51,7 @@ module fb_flash #(
 
     // Загруженные настройки
     output reg          load_stb,
-    output reg  [10:0]  load_cfg,
+    output reg  [11:0]  load_cfg,
     output reg  [127:0] load_adj
 );
     localparam logic [31:0] MAGIC = 32'h5644_5354;
@@ -96,11 +96,38 @@ module fb_flash #(
     end
 
     // ------------------------------------------------------------------
-    // Буфер моста
+    // Буфер моста: четыре байтовые полосы по 16 слов в распределённой памяти (байт k слова —
+    // полоса k); копия A — для чтения окном LINK, копия B — для передачи во flash. Порт
+    // записи у полосы один: принятый из flash байт важнее записи LINK (её во время команды
+    // по протоколу и не бывает — ESP ждёт busy = 0).
     // ------------------------------------------------------------------
-    reg [7:0] bufm [0:63] /* synthesis syn_ramstyle = "registers" */;
-    assign buf_rdata = {bufm[{buf_raddr, 2'd0}], bufm[{buf_raddr, 2'd1}],
-                        bufm[{buf_raddr, 2'd2}], bufm[{buf_raddr, 2'd3}]};
+    reg [7:0] ba0 [0:15], ba1 [0:15], ba2 [0:15], ba3 [0:15];
+    reg [7:0] bb0 [0:15], bb1 [0:15], bb2 [0:15], bb3 [0:15];
+    wire       rx_we;                     // байт из flash — в буфер (S_RX)
+    wire [6:0] bp_w;                      // его номер
+    wire [3:0] lane_we = rx_we ? (4'b0001 << bp_w[1:0]) : {4{buf_we}};
+    wire [3:0] wa      = rx_we ? bp_w[5:2] : buf_waddr;
+    wire [7:0] wd0 = rx_we ? x_rx : buf_wdata[31:24];
+    wire [7:0] wd1 = rx_we ? x_rx : buf_wdata[23:16];
+    wire [7:0] wd2 = rx_we ? x_rx : buf_wdata[15:8];
+    wire [7:0] wd3 = rx_we ? x_rx : buf_wdata[7:0];
+    always_ff @(posedge clk) begin
+        if (lane_we[0]) begin ba0[wa] <= wd0; bb0[wa] <= wd0; end
+        if (lane_we[1]) begin ba1[wa] <= wd1; bb1[wa] <= wd1; end
+        if (lane_we[2]) begin ba2[wa] <= wd2; bb2[wa] <= wd2; end
+        if (lane_we[3]) begin ba3[wa] <= wd3; bb3[wa] <= wd3; end
+    end
+    assign buf_rdata = {ba0[buf_raddr], ba1[buf_raddr], ba2[buf_raddr], ba3[buf_raddr]};
+    // байт для передачи: idx — номер в буфере
+    function automatic [7:0] tx_pick(input [5:0] idx, input [7:0] q0, input [7:0] q1,
+                                     input [7:0] q2, input [7:0] q3);
+        case (idx[1:0])
+            2'd0: tx_pick = q0;
+            2'd1: tx_pick = q1;
+            2'd2: tx_pick = q2;
+            default: tx_pick = q3;
+        endcase
+    endfunction
 
     // ------------------------------------------------------------------
     // Загрузка и мост
@@ -121,6 +148,12 @@ module fb_flash #(
     reg [6:0]   bp;
     reg         keep, busy;
     reg [3:0]   gap_cnt;
+
+    assign rx_we = st == S_RX && x_done;
+    assign bp_w  = bp;
+    wire [5:0] tx_idx = st == S_IDLE ? 6'd0 : bp[5:0] + 6'd1;
+    wire [7:0] tx_byte = tx_pick(tx_idx, bb0[tx_idx[5:2]], bb1[tx_idx[5:2]], bb2[tx_idx[5:2]],
+                                 bb3[tx_idx[5:2]]);
 
     // Разбор ячейки: слово готово на четвёртом байте
     wire [31:0] word       = {wacc, x_rx};
@@ -147,12 +180,6 @@ module fb_flash #(
         end else begin
             x_start  <= 1'b0;
             load_stb <= 1'b0;
-            if (buf_we) begin
-                bufm[{buf_waddr, 2'd0}] <= buf_wdata[31:24];
-                bufm[{buf_waddr, 2'd1}] <= buf_wdata[23:16];
-                bufm[{buf_waddr, 2'd2}] <= buf_wdata[15:8];
-                bufm[{buf_waddr, 2'd3}] <= buf_wdata[7:0];
-            end
             case (st)
                 // ---- загрузка настроек ----
                 S_WAIT: begin
@@ -188,7 +215,7 @@ module fb_flash #(
                     end
                     if (slot_valid) begin
                         found <= 1'b1; found_slot <= slot;
-                        load_cfg <= {t1[18:16], t1[7:0]};
+                        load_cfg <= {t1[19:16], t1[7:0]};
                         load_adj <= {t5, t4, t3, t2};
                     end
                     bi <= bi + 5'd1;
@@ -207,7 +234,7 @@ module fb_flash #(
                     busy <= 1'b1; bp <= '0;
                     f_cs_n <= 1'b0;
                     if (cmd[6:0] != 7'd0) begin
-                        x_start <= 1'b1; x_byte <= bufm[0]; st <= S_TX;
+                        x_start <= 1'b1; x_byte <= tx_byte; st <= S_TX;
                     end else if (cmd[14:8] != 7'd0) begin
                         x_start <= 1'b1; x_byte <= 8'h00; st <= S_RX;
                     end else begin
@@ -219,7 +246,7 @@ module fb_flash #(
                 S_TX: if (x_done) begin
                     if (bp + 7'd1 < tx_n) begin
                         bp <= bp + 7'd1;
-                        x_start <= 1'b1; x_byte <= bufm[bp[5:0] + 6'd1];
+                        x_start <= 1'b1; x_byte <= tx_byte;
                     end else if (rx_n != 7'd0) begin
                         bp <= '0;
                         x_start <= 1'b1; x_byte <= 8'h00; st <= S_RX;
@@ -230,7 +257,7 @@ module fb_flash #(
                     end
                 end
                 S_RX: if (x_done) begin
-                    bufm[bp[5:0]] <= x_rx;
+                    // байт — в буфер (rx_we)
                     if (bp + 7'd1 < rx_n) begin
                         bp <= bp + 7'd1;
                         x_start <= 1'b1; x_byte <= 8'h00;

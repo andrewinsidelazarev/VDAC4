@@ -20,18 +20,34 @@
 
 #include "esp_elf.h"
 #include "zifi/audio_player.hpp"
+#include "zifi/apps/core_builtin.hpp"
 #include "zifi/bringup_log.hpp"
+#include "zifi/core_store.hpp"
 #include "zifi/crash_record.hpp"
 #include "zifi/elf_image.hpp"
+#include "zifi/ft_host.hpp"
+#include "zifi/tang_link.hpp"
+#include "zifi/tang_sd.hpp"
+#include "zifi/tang_files.hpp"
 #include "zifi/flash_fs.hpp"
 #include "zifi/http_stream.hpp"
+#include "zifi/player_overlay.hpp"
 #include "zifi/resource_disk_cache.hpp"
 #include "zifi/z80_transport.hpp"
 #include "zifi/usb_drive.hpp"
 
+#include <WiFi.h>
+
+// lwIP — после заголовков Arduino: его INADDR_NONE — макрос, а IPAddress.h объявляет такую переменную
+#include <fcntl.h>
+#include <lwip/netdb.h>
+#include <lwip/sockets.h>
+
 namespace zifi {
 
 void registerModuleSymbols();   // zm_symbols.cpp
+
+constexpr uint32_t kSendTimeoutMs = 3000;   // sock_send: TCP не ждёт места дольше
 
 // Каталог кэша в LittleFS (раздел "littlefs" смонтирован в /littlefs).
 class LittleFsStorage : public ZmStorage {
@@ -165,6 +181,10 @@ volatile int16_t g_temperature = ZM_TEMPERATURE_UNKNOWN;
 }  // namespace
 
 ModuleApp* ModuleApp::instance_ = nullptr;
+ModuleApp::CoreJob ModuleApp::coreJob_ = {};
+SemaphoreHandle_t ModuleApp::coreJobGo_ = nullptr;
+SemaphoreHandle_t ModuleApp::coreJobDone_ = nullptr;
+TaskHandle_t ModuleApp::coreLoader_ = nullptr;
 
 ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(player) {
   instance_ = this;
@@ -205,11 +225,43 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.net_header = coreNetHeader;
   core_.net_read = coreNetRead;
   core_.net_close = coreNetClose;
+  core_.ft_open = coreFtOpen;
+  core_.ft_write = coreFtWrite;
+  core_.ft_read = coreFtRead;
+  core_.ft_host_cmd = coreFtHostCmd;
+  core_.ft_close = coreFtClose;
+  core_.core_load = coreCoreLoad;
+  core_.core_back = coreCoreBack;
+  core_.link_read = coreLinkRead;
+  core_.link_write = coreLinkWrite;
+  core_.sock_open = coreSockOpen;
+  core_.sock_send = coreSockSend;
+  core_.sock_recv = coreSockRecv;
+  core_.sock_close = coreSockClose;
+  core_.net_resolve = coreNetResolve;
+  core_.wifi_info = coreWifiInfo;
+  core_.ui_available = coreUiAvailable;
+  core_.app_done = coreAppDone;
+  core_.sd_list = coreSdList;
+  core_.sd_read = coreSdRead;
+  core_.sd_write = coreSdWrite;
 }
 
 void ModuleApp::begin() {
   registerModuleSymbols();
   appLock_ = xSemaphoreCreateMutex();
+#if ZIFI_HAS_SPI_LINK
+  coreJobGo_ = xSemaphoreCreateBinary();
+  coreJobDone_ = xSemaphoreCreateBinary();
+  if (coreJobGo_ == nullptr || coreJobDone_ == nullptr ||
+      // стек — в PSRAM: внутренней памяти мало (Wi-Fi, LWIP), а задача не трогает flash ESP
+      // (SD Tang и ящик BL616 — по LINK, журнал — очередью)
+      xTaskCreatePinnedToCoreWithCaps(coreLoaderTask, "zm-coreload", 8192, this, 2, &coreLoader_, 1,
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+    coreLoader_ = nullptr;
+    bringupLog(kTag, "core loader task not started");
+  }
+#endif
   // Датчик температуры кристалла: своя задача, раз в секунду.
   temperature_sensor_config_t thermometer = TEMPERATURE_SENSOR_CONFIG_DEFAULT(20, 100);
   if (temperature_sensor_install(&thermometer, &g_thermometer) != ESP_OK) {
@@ -256,6 +308,12 @@ bool ModuleApp::handleCommand(const PacketView& packet) {
     case kAppStart:
       handleStart(packet);
       return true;
+    case kCoreList:
+      handleCoreList();
+      return true;
+    case kCoreApp:
+      handleCoreApp(packet);
+      return true;
     case kAppStop: {
       stopApp();
       const uint8_t ok = 1;
@@ -272,6 +330,12 @@ bool ModuleApp::handleCommand(const PacketView& packet) {
   inCommand_ = true;
   const int result = app_->command(packet.command, packet.data, packet.length);
   inCommand_ = false;
+  // Приложение кончило работу (app_done): ответ ушёл — выгрузить, память — назад
+  if (appDone_) {
+    appDone_ = false;
+    bringupLog(kTag, "app %s: done, unloading", appName_);
+    stopApp();
+  }
   return result == ZM_OK;
 }
 
@@ -393,6 +457,16 @@ uint8_t* ModuleApp::allocateDelivery(const char* name, uint32_t size, bool resou
   if (block != nullptr) {
     return block;
   }
+#if ZIFI_HAS_SPI_LINK
+  // Сначала — холст экрана плеера: окно плагина на экране Evo всё равно есть
+  player_overlay::releaseMemory();
+  block = static_cast<uint8_t*>(heap_caps_malloc(size, kCaps));
+  if (block != nullptr) {
+    bringupLog(kTag, "room for %s, %u KB: player screen memory released", name,
+               static_cast<unsigned>(size / 1024));
+    return block;
+  }
+#endif
   const size_t largest = heap_caps_get_largest_free_block(kCaps);
   const size_t freeBytes = heap_caps_get_free_size(kCaps);
   char stopped[sizeof(appName_)] = {};
@@ -564,6 +638,153 @@ void ModuleApp::dropDelivery() {
   deliveryName_[0] = 0;
 }
 
+// [итог int8][приложение, 0][версия, 0]; не вышло и есть текст — он вместо версии
+void ModuleApp::replyApp(uint8_t response, int result, const char* fallbackText) {
+  uint8_t reply[96];
+  size_t used = 0;
+  reply[used++] = static_cast<uint8_t>(static_cast<int8_t>(result));
+  const char* appName = app_ != nullptr && app_->name != nullptr ? app_->name : "";
+  const char* version = app_ != nullptr && app_->version != nullptr ? app_->version : "";
+  if (result != ZM_OK && fallbackText != nullptr) {
+    appName = "";
+    version = fallbackText;
+  }
+  const size_t nameLength = strnlen(appName, 24);
+  memcpy(reply + used, appName, nameLength);
+  used += nameLength;
+  reply[used++] = 0;
+  const size_t versionLength = strnlen(version, 64);
+  memcpy(reply + used, version, versionLength);
+  used += versionLength;
+  reply[used++] = 0;
+  host_.transport().send(response, reply, static_cast<uint16_t>(used));
+}
+
+// → [1][число][записи: имя 16, длина LE32, флаги (0 — есть ИМЯ.ELF)] или [0][текст, 0]
+void ModuleApp::handleCoreList() {
+#if ZIFI_HAS_SPI_LINK
+  static core_store::Entry entries[core_store::kMaxCores];
+  static uint8_t reply[2 + core_store::kMaxCores * 21];
+  size_t count = 0;
+  const char* problem = core_store::list(entries, core_store::kMaxCores, &count, false, tang_sd::kQuickMs);
+  if (problem != nullptr) {
+    reply[0] = 0;
+    const size_t n = strnlen(problem, 120);
+    memcpy(reply + 1, problem, n);
+    reply[1 + n] = 0;
+    host_.transport().send(kRespCoreList, reply, static_cast<uint16_t>(n + 2));
+    return;
+  }
+  size_t used = 0;
+  reply[used++] = 1;
+  reply[used++] = static_cast<uint8_t>(count);
+  for (size_t i = 0; i < count; ++i) {
+    memcpy(reply + used, entries[i].name, 16);
+    used += 16;
+    writeLe32(reply + used, entries[i].size);
+    used += 4;
+    reply[used++] = entries[i].elf ? 1 : 0;
+  }
+  host_.transport().send(kRespCoreList, reply, static_cast<uint16_t>(used));
+#else
+  static const uint8_t reply[] = "\0no LINK to the Tang";
+  host_.transport().send(kRespCoreList, reply, sizeof(reply));
+#endif
+}
+
+// [имя ядра, 0] → [итог int8][приложение, 0][версия или текст ошибки, 0]. ИМЯ.ELF с SD Tang —
+// в кэш модулей (если изменился) и запуск; своего ELF у ядра нет — общий слой из прошивки.
+void ModuleApp::handleCoreApp(const PacketView& packet) {
+#if ZIFI_HAS_SPI_LINK
+  char raw[16] = {};
+  char name[16] = {};
+  const size_t length = strnlen(reinterpret_cast<const char*>(packet.data), packet.length);
+  if (length == 0 || length >= sizeof(raw)) {
+    replyApp(kRespCoreApp, ZM_ERROR, "bad core name");
+    return;
+  }
+  memcpy(raw, packet.data, length);
+  if (!core_cache::normalizeName(raw, name)) {
+    replyApp(kRespCoreApp, ZM_ERROR, "bad core name");
+    return;
+  }
+  uint8_t* data = nullptr;
+  uint32_t size = 0;
+  uint32_t stamp = 0;
+  const char* problem = core_store::readElf(name, &data, &size, &stamp, tang_sd::kQuickMs);
+  if (problem == core_store::kNoElf) {
+    bringupLog(kTag, "core %s: no ELF on the Tang SD, built-in core layer", name);
+    replyApp(kRespCoreApp, startBuiltin(coreBuiltinApp(), "CORE"), nullptr);
+    return;
+  }
+  if (problem != nullptr) {
+    bringupLog(kTag, "core %s: %s", name, problem);
+    replyApp(kRespCoreApp, ZM_ERROR, problem);
+    return;
+  }
+  char module[13];
+  if (strlen(name) > 8) {
+    heap_caps_free(data);
+    replyApp(kRespCoreApp, ZM_ERROR, "core name longer than 8 for its ELF");
+    return;
+  }
+  snprintf(module, sizeof(module), "%s.ELF", name);
+  int result = ZM_OK;
+  if (!cache_->has(module, size, stamp)) {
+    if (const char* bad = elfImageProblem(data, size)) {
+      bringupLog(kTag, "core %s: %s is not a loadable ELF (%s)", name, module, bad);
+      heap_caps_free(data);
+      replyApp(kRespCoreApp, ZM_ERROR, "core ELF is not loadable");
+      return;
+    }
+    if (app_ != nullptr && strcmp(appName_, module) == 0) {
+      stopApp();                         // своё прежнее — заменяется
+    }
+    const bool stored = cache_->store(module, stamp, data, size, app_ != nullptr ? appName_ : nullptr);
+    bringupLog(kTag, "core %s: %s, %u bytes from the Tang SD %s", name, module,
+               static_cast<unsigned>(size), stored ? "stored" : "REFUSED");
+    if (!stored) {
+      result = ZM_NO_MEMORY;
+    }
+    appStale_ = appStale_ || stored;
+  }
+  heap_caps_free(data);
+  if (result == ZM_OK) {
+    result = startApp(module);
+  }
+  replyApp(kRespCoreApp, result, result == ZM_NO_MEMORY ? "no room for the core ELF in the ESP cache" : nullptr);
+#else
+  (void)packet;
+  replyApp(kRespCoreApp, ZM_ERROR, "no LINK to the Tang");
+#endif
+}
+
+int ModuleApp::startBuiltin(const zm_app_t* app, const char* name) {
+  if (app_ == app && strcmp(appName_, name) == 0) {
+    return ZM_OK;
+  }
+  stopApp();
+  appStale_ = false;
+  xSemaphoreTake(appLock_, portMAX_DELAY);
+  appElf_ = nullptr;
+  app_ = app;
+  strncpy(appName_, name, sizeof(appName_) - 1);
+  appName_[sizeof(appName_) - 1] = 0;
+  xSemaphoreGive(appLock_);
+  const int result = app->start(&core_);
+  if (result != ZM_OK) {
+    bringupLog(kTag, "built-in app %s: start failed (%d)", name, result);
+    stopApp();
+    return result;
+  }
+  xSemaphoreTake(appLock_, portMAX_DELAY);
+  appStarted_ = true;
+  xSemaphoreGive(appLock_);
+  bringupLog(kTag, "built-in app %s %s started, commands %02X..%02X", name, app->version,
+             app->command_first, app->command_last);
+  return ZM_OK;
+}
+
 // [имя, 0] → [итог int8][имя, 0][версия, 0]
 void ModuleApp::handleStart(const PacketView& packet) {
   char name[13] = {};
@@ -677,8 +898,9 @@ int ModuleApp::startApp(const char* name) {
     bringupLog(kTag, "app %s: not loaded (%d)", name, result);
     return result;
   }
+  // Таблица приложения minor 4 и старше короче нынешней (без ui_*): годится до поля poll
   if (entryResult != ZM_APP_ABI_MAJOR || app == nullptr || app->abi_major != ZM_APP_ABI_MAJOR ||
-      app->size < sizeof(zm_app_t) || app->start == nullptr) {
+      app->size < offsetof(zm_app_t, ui_model) || app->start == nullptr) {
     bringupLog(kTag, "app %s: interface %d/%d, not %d", name, entryResult,
                app != nullptr ? app->abi_major : -1, ZM_APP_ABI_MAJOR);
     freeAllocations();
@@ -693,10 +915,17 @@ int ModuleApp::startApp(const char* name) {
   const int64_t started = esp_timer_get_time();
   result = app->start(&core_);
   if (result != ZM_OK) {
-    bringupLog(kTag, "app %s: start failed (%d)", name, result);
+    bringupLog(kTag, "app %s: start failed (%d); internal %u free, %u largest, %u min; PSRAM %u free", name,
+               result, static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+               static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+               static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+               static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
     stopApp();
     return result;
   }
+  xSemaphoreTake(appLock_, portMAX_DELAY);
+  appStarted_ = true;
+  xSemaphoreGive(appLock_);
   bringupLog(kTag, "app %s %s %s started in %u us, commands %02X..%02X", name,
              app->name != nullptr ? app->name : "?", app->version != nullptr ? app->version : "",
              static_cast<unsigned>(esp_timer_get_time() - started), app->command_first,
@@ -711,7 +940,11 @@ void ModuleApp::stopApp() {
   xSemaphoreTake(appLock_, portMAX_DELAY);
   const zm_app_t* app = app_;
   app_ = nullptr;
+  appStarted_ = false;
   xSemaphoreGive(appLock_);
+#if ZIFI_HAS_SPI_LINK
+  player_overlay::appGone();             // экран приложения — сразу прочь
+#endif
   if (app != nullptr && app->stop != nullptr) {
     app->stop();
   }
@@ -731,6 +964,28 @@ void ModuleApp::stopApp() {
       vTaskDelete(slot.handle);
     }
     slot = TaskSlot{};
+  }
+  // Приложение было хостом FT812: вернуть его Evo (задачи приложения уже не пишут)
+  coreFtClose();
+  for (size_t i = 0; i < kMaxSockets; ++i) {
+    coreSockClose(static_cast<int>(i));
+  }
+  // Приложение загрузило ядро из кэша BL616 (ZX Next): Tang — назад в TS-Config. Ядро ещё грузится —
+  // вернёт задача загрузки, когда кончит. Возврат не вышел — ядро остаётся без хозяина, и задача
+  // LINK через несколько секунд повторит BOOT сама (tang::kOrphanMs).
+  if (coreLoaded_) {
+    coreLoaded_ = false;
+#if ZIFI_HAS_SPI_LINK
+    if (coreJob_.running) {
+      coreJob_.abandoned = true;
+      bringupLog(kTag, "app stopped while its core loads: the loader returns to slot 0");
+    } else {
+      if (coreCoreBack(10000) != ZM_OK) {
+        bringupLog(kTag, "app stopped: back to slot 0 FAILED, the LINK task retries");
+      }
+      tang::releaseCore();
+    }
+#endif
   }
   for (SemaphoreHandle_t& sync : sync_) {
     if (sync != nullptr) {
@@ -791,9 +1046,17 @@ void* ModuleApp::coreAlloc(size_t size, uint32_t caps) {
     // Другой вид памяти лучше, чем никакой.
     header = static_cast<AllocHeader*>(
         heap_caps_malloc(size + sizeof(AllocHeader), heapCaps(caps ^ ZM_MEM_INTERNAL)));
-    if (header == nullptr) {
-      return nullptr;
-    }
+  }
+#if ZIFI_HAS_SPI_LINK
+  if (header == nullptr && (caps & ZM_MEM_INTERNAL) == 0) {
+    // PSRAM нужна приложению: холст экрана плеера — прочь (окно плагина на Evo остаётся)
+    player_overlay::releaseMemory();
+    header = static_cast<AllocHeader*>(
+        heap_caps_malloc(size + sizeof(AllocHeader), heapCaps(caps)));
+  }
+#endif
+  if (header == nullptr) {
+    return nullptr;
   }
   header->caps = caps;
   header->magic = kAllocMagic;
@@ -886,6 +1149,10 @@ int ModuleApp::coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t p
       const BaseType_t core = cpu < 0 ? tskNO_AFFINITY : cpu;
       if (xTaskCreatePinnedToCore(taskTrampoline, "zm-app", stack < 2048 ? 2048 : stack, &slot,
                                   priority > 20 ? 20 : priority, &slot.handle, core) != pdPASS) {
+        bringupLog(kTag, "app task: %u-byte stack not allocated (internal %u free, %u largest)",
+                   static_cast<unsigned>(stack),
+                   static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                   static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         slot = TaskSlot{};
         return ZM_NO_MEMORY;
       }
@@ -1059,6 +1326,414 @@ void ModuleApp::coreNetClose(void* stream) {
       self->streamUsed_[i] = false;
     }
   }
+}
+
+// --- FT812 эмулятора Tang: приложение — хост (ft_host.hpp) --------------------------------------
+int ModuleApp::coreFtOpen(uint32_t timeoutMs) {
+#if ZIFI_HAS_SPI_LINK
+  if (!tang::ready()) {
+    return ZM_NOT_FOUND;
+  }
+  if (!ft_host::switchToFtCore(timeoutMs)) {
+    return ZM_NOT_FOUND;
+  }
+  if (!ft_host::setHost(true)) {
+    return ZM_ERROR;
+  }
+  instance_->ftOpened_ = true;
+  return ft_host::boot1024x768() ? ZM_OK : ZM_ERROR;
+#else
+  (void)timeoutMs;
+  return ZM_NOT_FOUND;
+#endif
+}
+
+int ModuleApp::coreFtWrite(uint32_t address, const uint32_t* words, uint32_t count) {
+#if ZIFI_HAS_SPI_LINK
+  return words != nullptr && (address & 3) == 0 && ft_host::writeBlock(address, words, count)
+             ? ZM_OK
+             : ZM_ERROR;
+#else
+  (void)address; (void)words; (void)count;
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreFtRead(uint32_t address, uint32_t* value) {
+#if ZIFI_HAS_SPI_LINK
+  return value != nullptr && (address & 3) == 0 && ft_host::read32(address, value) ? ZM_OK : ZM_ERROR;
+#else
+  (void)address; (void)value;
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreFtHostCmd(uint8_t command, uint8_t parameter) {
+#if ZIFI_HAS_SPI_LINK
+  return ft_host::hostCommand(command, parameter) ? ZM_OK : ZM_ERROR;
+#else
+  (void)command; (void)parameter;
+  return ZM_ERROR;
+#endif
+}
+
+void ModuleApp::coreFtClose() {
+#if ZIFI_HAS_SPI_LINK
+  if (instance_->ftOpened_) {
+    instance_->ftOpened_ = false;
+    ft_host::setHost(false);
+  }
+#endif
+}
+
+// --- ABI 1.4: ядра ПЛИС из кэша BL616 (core_store.hpp), LINK, сокеты TCP/UDP ------------------
+#if ZIFI_HAS_SPI_LINK
+void ModuleApp::coreLoaderTask(void* context) {
+  ModuleApp* self = static_cast<ModuleApp*>(context);
+  for (;;) {
+    xSemaphoreTake(self->coreJobGo_, portMAX_DELAY);
+    CoreJob& job = self->coreJob_;
+    uint32_t v = 0;
+    const char* problem = core_store::load(job.name, &v, nullptr, nullptr);
+    if (problem != nullptr) {
+      bringupLog(kTag, "core_load %s: %s", job.name, problem);
+      job.result = strstr(problem, "no such core") != nullptr ? ZM_NOT_FOUND : ZM_ERROR;
+    } else {
+      job.version = v;
+      job.result = ZM_OK;
+    }
+    if (job.abandoned) {
+      // приложения уже нет: ядро — назад, хозяина у него больше нет
+      if (job.result == ZM_OK && !tang::backToSlot0(10000)) {
+        bringupLog(kTag, "core %s: back to slot 0 FAILED, the LINK task retries", job.name);
+      }
+      tang::releaseCore();
+    }
+    job.running = false;
+    xSemaphoreGive(self->coreJobDone_);
+  }
+}
+#endif
+
+int ModuleApp::coreCoreLoad(const char* name, uint32_t* version) {
+#if ZIFI_HAS_SPI_LINK
+  ModuleApp* self = instance_;
+  if (name == nullptr || !tang::ready() || self->coreLoader_ == nullptr) {
+    return ZM_ERROR;
+  }
+  if (self->coreJob_.running) {
+    return ZM_BUSY;
+  }
+  CoreJob& job = self->coreJob_;
+  strncpy(job.name, name, sizeof job.name - 1);
+  job.name[sizeof job.name - 1] = 0;
+  job.version = 0;
+  job.result = ZM_ERROR;
+  job.abandoned = false;
+  job.running = true;
+  // Переключение начато: при выгрузке приложения — назад в слот 0, а у нового ядра — хозяин
+  self->coreLoaded_ = true;
+  tang::claimCore();
+  xSemaphoreTake(self->coreJobDone_, 0);
+  xSemaphoreGive(self->coreJobGo_);
+  xSemaphoreTake(self->coreJobDone_, portMAX_DELAY);   // задачу приложения могут снять здесь
+  if (job.result != ZM_OK) {
+    self->coreLoaded_ = false;
+    tang::releaseCore();
+    return job.result;
+  }
+  if (version != nullptr) {
+    *version = job.version;
+  }
+  return ZM_OK;
+#else
+  (void)name; (void)version;
+  return ZM_NOT_FOUND;
+#endif
+}
+
+int ModuleApp::coreCoreBack(uint32_t timeoutMs) {
+#if ZIFI_HAS_SPI_LINK
+  // Приложение отпускает ядро в любом случае: возврат не вышел — задача LINK повторит BOOT сама
+  // (tang::kOrphanMs), а выгрузка приложения — ещё раз здесь. Вышел — ядра у приложения больше нет:
+  // выгрузка не тронет то, что будет на Tang потом (FT812, ядро консоли).
+  tang::releaseCore();
+  if (!tang::ready() || !tang::backToSlot0(timeoutMs)) {
+    return tang::ready() ? ZM_TIMEOUT : ZM_ERROR;
+  }
+  instance_->coreLoaded_ = false;
+  return ZM_OK;
+#else
+  (void)timeoutMs;
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreLinkRead(uint32_t address, uint32_t* words, uint32_t count) {
+#if ZIFI_HAS_SPI_LINK
+  return words != nullptr && (address & 3) == 0 && count > 0 && count <= 16 && tang::read(address, words, count)
+             ? ZM_OK
+             : ZM_ERROR;
+#else
+  (void)address; (void)words; (void)count;
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreLinkWrite(uint32_t address, const uint32_t* words, uint32_t count) {
+#if ZIFI_HAS_SPI_LINK
+  return words != nullptr && (address & 3) == 0 && count > 0 && count <= 16 && tang::write(address, words, count)
+             ? ZM_OK
+             : ZM_ERROR;
+#else
+  (void)address; (void)words; (void)count;
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreSockOpen(int udp, const char* host, uint16_t port, uint32_t timeoutMs) {
+  ModuleApp* self = instance_;
+  if (host == nullptr) {
+    return ZM_ERROR;
+  }
+  addrinfo hints = {};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = udp ? SOCK_DGRAM : SOCK_STREAM;
+  addrinfo* found = nullptr;
+  char service[8];
+  snprintf(service, sizeof service, "%u", static_cast<unsigned>(port));
+  if (getaddrinfo(host, service, &hints, &found) != 0 || found == nullptr) {
+    bringupLog(kTag, "sock: %.40s: no address", host);
+    return ZM_ERROR;
+  }
+  const int fd = socket(found->ai_family, found->ai_socktype, 0);
+  if (fd < 0) {
+    freeaddrinfo(found);
+    return ZM_ERROR;
+  }
+  // TCP: соединение без блокировки, ждать до timeoutMs
+  const int flags = fcntl(fd, F_GETFL, 0);
+  fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+  int rc = connect(fd, found->ai_addr, found->ai_addrlen);
+  freeaddrinfo(found);
+  if (rc != 0 && errno == EINPROGRESS) {
+    fd_set w;
+    FD_ZERO(&w);
+    FD_SET(fd, &w);
+    timeval tv = {static_cast<long>(timeoutMs / 1000), static_cast<long>((timeoutMs % 1000) * 1000)};
+    rc = select(fd + 1, nullptr, &w, nullptr, &tv) == 1 ? 0 : -1;
+    int error = 0;
+    socklen_t len = sizeof error;
+    if (rc == 0 && (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) != 0 || error != 0)) {
+      rc = -1;
+    }
+  }
+  if (rc != 0) {
+    close(fd);
+    return ZM_ERROR;
+  }
+  fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+  int slot = -1;
+  portENTER_CRITICAL(&self->sockLock_);
+  for (size_t i = 0; i < kMaxSockets; ++i) {
+    if (self->sockets_[i] < 0) {
+      self->sockets_[i] = fd;
+      slot = static_cast<int>(i);
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&self->sockLock_);
+  if (slot < 0) {
+    close(fd);
+    return ZM_ERROR;
+  }
+  if (!udp) {
+    const int on = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+    // Отправка не ждёт дольше kSendTimeoutMs: сервер перестал читать — ошибка, а не задача
+    // приложения, стоящая навсегда (у NEXT.ELF за ней — F12 и возврат; разбор Codex, № 3)
+    const timeval send = {static_cast<long>(kSendTimeoutMs / 1000),
+                          static_cast<long>((kSendTimeoutMs % 1000) * 1000)};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &send, sizeof send);
+  }
+  return slot;
+}
+
+int ModuleApp::coreSockSend(int sock, const void* data, uint32_t count) {
+  ModuleApp* self = instance_;
+  if (sock < 0 || sock >= static_cast<int>(kMaxSockets) || self->sockets_[sock] < 0 || data == nullptr) {
+    return ZM_ERROR;
+  }
+  const uint8_t* p = static_cast<const uint8_t*>(data);
+  while (count > 0) {
+    const int sent = send(self->sockets_[sock], p, count, 0);
+    if (sent <= 0) {
+      return ZM_ERROR;
+    }
+    p += sent;
+    count -= static_cast<uint32_t>(sent);
+  }
+  return ZM_OK;
+}
+
+int ModuleApp::coreSockRecv(int sock, void* data, uint32_t count, uint32_t timeoutMs) {
+  ModuleApp* self = instance_;
+  if (sock < 0 || sock >= static_cast<int>(kMaxSockets) || self->sockets_[sock] < 0 || data == nullptr) {
+    return -1;
+  }
+  const int fd = self->sockets_[sock];
+  fd_set r;
+  FD_ZERO(&r);
+  FD_SET(fd, &r);
+  timeval tv = {static_cast<long>(timeoutMs / 1000), static_cast<long>((timeoutMs % 1000) * 1000)};
+  const int ready = select(fd + 1, &r, nullptr, nullptr, &tv);
+  if (ready == 0) {
+    return 0;
+  }
+  if (ready < 0) {
+    return -1;
+  }
+  const int got = recv(fd, data, count, 0);
+  if (got > 0) {
+    return got;
+  }
+  if (got == 0) {
+    // пустая датаграмма UDP — не закрытие (у TCP 0 — удалённая сторона закрыла)
+    int type = 0;
+    socklen_t length = sizeof type;
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &length) == 0 && type == SOCK_DGRAM) {
+      return 0;
+    }
+  }
+  return -1;
+}
+
+void ModuleApp::coreSockClose(int sock) {
+  ModuleApp* self = instance_;
+  if (sock < 0 || sock >= static_cast<int>(kMaxSockets)) {
+    return;
+  }
+  int fd = -1;
+  portENTER_CRITICAL(&self->sockLock_);
+  fd = self->sockets_[sock];
+  self->sockets_[sock] = -1;
+  portEXIT_CRITICAL(&self->sockLock_);
+  if (fd >= 0) {
+    close(fd);
+  }
+}
+
+int ModuleApp::coreNetResolve(const char* host, char ip[16]) {
+  if (host == nullptr || ip == nullptr) {
+    return ZM_ERROR;
+  }
+  addrinfo hints = {};
+  hints.ai_family = AF_INET;
+  addrinfo* found = nullptr;
+  if (getaddrinfo(host, nullptr, &hints, &found) != 0 || found == nullptr) {
+    return ZM_NOT_FOUND;
+  }
+  const sockaddr_in* in = reinterpret_cast<const sockaddr_in*>(found->ai_addr);
+  inet_ntoa_r(in->sin_addr, ip, 16);
+  freeaddrinfo(found);
+  return ZM_OK;
+}
+
+int ModuleApp::coreSdList(const char* path, const char* suffix, uint32_t skip,
+                           zm_sd_entry_t* entries, uint32_t capacity, uint32_t* count,
+                           int* more, const volatile int* active) {
+#if ZIFI_HAS_SPI_LINK
+  if (count) *count = 0;
+  if (more) *more = 0;
+  tang_sd::Session session(tang_sd::kQuickMs);
+  if (!session.ok()) return ZM_BUSY;
+  if (tang_sd::mount()) return ZM_ERROR;
+  return tang_files::list(path, suffix, skip, entries, capacity, count, more, active,
+                          coreMillis, coreDelay);
+#else
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreSdRead(const char* path, uint8_t** data, size_t* size, size_t maxSize,
+                           const volatile int* active) {
+#if ZIFI_HAS_SPI_LINK
+  if (data) *data = nullptr;
+  if (size) *size = 0;
+  tang_sd::Session session(tang_sd::kQuickMs);
+  if (!session.ok()) return ZM_BUSY;
+  if (tang_sd::mount()) return ZM_ERROR;
+  return tang_files::read(path, data, size, maxSize, active, coreAlloc, coreFree,
+                          coreMillis, coreDelay);
+#else
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreSdWrite(const char* path, const uint8_t* data, size_t size,
+                            const volatile int* active) {
+#if ZIFI_HAS_SPI_LINK
+  tang_sd::Session session(tang_sd::kQuickMs);
+  if (!session.ok()) return ZM_BUSY;
+  if (tang_sd::mount()) return ZM_ERROR;
+  return tang_files::write(path, data, size, active, coreMillis, coreDelay);
+#else
+  return ZM_ERROR;
+#endif
+}
+
+void ModuleApp::coreAppDone() {
+  if (instance_->inCommand_) instance_->appDone_ = true;
+}
+
+int ModuleApp::coreUiAvailable() {
+#if ZIFI_HAS_SPI_LINK
+  return player_overlay::available() ? 1 : 0;
+#else
+  return 0;
+#endif
+}
+
+// Снимок экрана — под appLock_, без ожидания (как poll): выгрузка приложения его ждёт, а
+// приложение, которое ещё запускается (start не вернулся), снимок не даёт.
+int ModuleApp::uiModel(zm_ui_model_t* model) {
+  ModuleApp* self = instance_;
+  if (self == nullptr || self->appLock_ == nullptr || xSemaphoreTake(self->appLock_, 0) != pdTRUE) {
+    return ZM_BUSY;
+  }
+  int result = ZM_NOT_FOUND;
+  const zm_app_t* app = self->app_;
+  if (app != nullptr && self->appStarted_ &&
+      app->size >= offsetof(zm_app_t, ui_model) + sizeof(app->ui_model) && app->ui_model != nullptr) {
+    result = app->ui_model(model);
+  }
+  xSemaphoreGive(self->appLock_);
+  return result;
+}
+
+int ModuleApp::uiCover(uint16_t* pixels, uint16_t side) {
+  ModuleApp* self = instance_;
+  if (self == nullptr || self->appLock_ == nullptr || xSemaphoreTake(self->appLock_, 0) != pdTRUE) {
+    return ZM_BUSY;
+  }
+  int result = ZM_NOT_FOUND;
+  const zm_app_t* app = self->app_;
+  if (app != nullptr && self->appStarted_ &&
+      app->size >= offsetof(zm_app_t, ui_cover) + sizeof(app->ui_cover) && app->ui_cover != nullptr) {
+    result = app->ui_cover(pixels, side);
+  }
+  xSemaphoreGive(self->appLock_);
+  return result;
+}
+
+int ModuleApp::coreWifiInfo(char ssid[33], char ip[16], char mac[18]) {
+  if (ssid == nullptr || ip == nullptr || mac == nullptr || WiFi.status() != WL_CONNECTED) {
+    return ZM_ERROR;
+  }
+  snprintf(ssid, 33, "%s", WiFi.SSID().c_str());
+  snprintf(ip, 16, "%s", WiFi.localIP().toString().c_str());
+  snprintf(mac, 18, "%s", WiFi.macAddress().c_str());
+  return ZM_OK;
 }
 
 // Пока поток открыт, Wi-Fi не спит (с 0.1.34). В энергосбережении ESP забирает кадры

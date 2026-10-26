@@ -42,6 +42,16 @@ uint32_t clockHz();
 bool transfer(uint8_t command, uint32_t address, uint32_t* words, size_t count, bool reading,
               int dummyCycles);
 
+// Запись слов подряд в один и тот же адрес (окно FT_DATA Tang — адрес за слово ведомый
+// двигает сам): по транзакции в одно слово, но контроллер настраивается один раз, а на
+// слово — только данные, старт и CS. Слов — сколько угодно.
+bool writeRepeat(uint8_t command, uint32_t address, const uint32_t* words, size_t count);
+
+// Запись слов транзакциями по 16 (буфер контроллера — 64 байта, без DMA) на один и тот же
+// адрес: окно FT_BURST Tang (ядро 1.29) кладёт слова в очередь окна FT812 по порядку, адрес
+// LINK внутри окна ему не важен. Контроллер настраивается один раз. Слов — сколько угодно.
+bool writeBurst(uint8_t command, uint32_t address, const uint32_t* words, size_t count);
+
 }  // namespace link_spi3
 }  // namespace zifi
 

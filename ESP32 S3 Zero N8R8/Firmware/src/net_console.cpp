@@ -6,17 +6,24 @@
 #include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
+#include <dirent.h>
 #include <lwip/sockets.h>
+#include <sys/stat.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "zifi/core_store.hpp"
 #include "zifi/diagnostic_log.hpp"
+#include "zifi/ft_host.hpp"
+#include "zifi/player_overlay.hpp"
 #include "zifi/tang_flash.hpp"
 #include "zifi/tang_link.hpp"
+#include "zifi/tang_sd.hpp"
 
 namespace zifi {
 namespace {
@@ -24,7 +31,7 @@ namespace {
 constexpr uint16_t kPort = 23;
 constexpr size_t kRingBytes = 32 * 1024;
 constexpr size_t kLineBytes = 256;
-constexpr uint32_t kTaskStack = 4096;
+constexpr uint32_t kTaskStack = 6144;   // 4096 переполнялся (0.1.85: tang sd/core, FatFs, LittleFS)
 constexpr UBaseType_t kTaskPriority = 2;      // ниже звука и обмена с Z80
 constexpr BaseType_t kTaskCore = 0;
 
@@ -96,6 +103,145 @@ bool sendStoredLog(int client) {
   return ok;
 }
 
+// LINK для клиента кэша BL616 из консоли (tang core format)
+bool consoleLinkRead(void*, uint32_t address, uint32_t* words, size_t count) {
+  return tang::read(address, words, count);
+}
+bool consoleLinkWrite(void*, uint32_t address, const uint32_t* words, size_t count) {
+  return tang::write(address, words, count);
+}
+void consoleSleep(void*, uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms == 0 ? 1 : ms)); }
+uint32_t consoleNow(void*) { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
+
+// microSD Tang через мост ядра TS-Config 1.30 (tang_sd.hpp): смонтировать и показать, список
+// папки, скорость чтения блоков, снять.
+bool runTangSd(int client, const char* arguments) {
+  tang_sd::Session session;            // том и файлы — пока команда не кончилась
+  char verb[8] = {};
+  char path[96] = {};
+  sscanf(arguments, " %7s %95[^\n]", verb, path);
+  if (strcmp(verb, "off") == 0) {
+    tang_sd::unmount();
+    return sendText(client, "tang sd: unmounted\n");
+  }
+  const char* problem = tang_sd::mount();
+  if (problem != nullptr) {
+    return sendText(client, "tang sd: %s\n", problem);
+  }
+  if (strcmp(verb, "ls") == 0) {
+    char full[128];
+    snprintf(full, sizeof(full), "%s/%s", tang_sd::kMountPoint, path[0] == '/' ? path + 1 : path);
+    DIR* dir = opendir(full);
+    if (dir == nullptr) {
+      return sendText(client, "tang sd: no folder %s\n", full);
+    }
+    unsigned count = 0;
+    while (dirent* entry = readdir(dir)) {
+      char item[200];
+      snprintf(item, sizeof(item), "%s/%s", full, entry->d_name);
+      struct stat st = {};
+      const bool folder = entry->d_type == DT_DIR;
+      if (!folder) {
+        stat(item, &st);
+      }
+      if (!sendText(client, folder ? "  %s/\n" : "  %s  %ld\n", entry->d_name, static_cast<long>(st.st_size))) {
+        closedir(dir);
+        return false;
+      }
+      ++count;
+    }
+    closedir(dir);
+    return sendText(client, "tang sd: %u entries in %s\n", count, full);
+  }
+  if (strcmp(verb, "speed") == 0) {
+    // 2 МБ подряд с блока 8192 (за таблицей разделов и началом FAT)
+    constexpr uint32_t kBlocks = 64;
+    uint8_t* buffer = static_cast<uint8_t*>(heap_caps_malloc(kBlocks * 512, MALLOC_CAP_8BIT));
+    if (buffer == nullptr) {
+      return sendText(client, "tang sd speed: no memory\n");
+    }
+    const int64_t start = esp_timer_get_time();
+    bool ok = true;
+    for (uint32_t i = 0; i < 64 && ok; ++i) {
+      ok = tang_sd::readBlocks(8192 + i * kBlocks, buffer, kBlocks);
+    }
+    const uint32_t us = static_cast<uint32_t>(esp_timer_get_time() - start);
+    heap_caps_free(buffer);
+    if (!ok) {
+      return sendText(client, "tang sd speed: read failed\n");
+    }
+    return sendText(client, "tang sd speed: 2048 KB in %u ms, %u KB/s\n", static_cast<unsigned>(us / 1000),
+                    static_cast<unsigned>(2048ULL * 1000000 / (us ? us : 1)));
+  }
+  char text[160];
+  tang_sd::describe(text, sizeof(text));
+  return sendText(client, "tang sd: %s\n", text);
+}
+
+// Ядра для кэша BL616 на SD Tang (core_store.hpp): список с отметкой «в кэше», запись в кэш,
+// загрузка в ПЛИС.
+bool runTangCore(int client, const char* arguments) {
+  char verb[8] = {};
+  char name[24] = {};
+  sscanf(arguments, " %7s %23s", verb, name);
+  if (strcmp(verb, "format") == 0) {
+    // пустой каталог кэша (INFO 255: на месте кэша чьи-то данные) — только командой пользователя
+    if (strcmp(name, "yes") != 0) {
+      return sendText(client, "tang core format yes — erases the BL616 cache directory (data there is lost)\n");
+    }
+    tang_sd::Session session;
+    const bl616::PushIo io = {nullptr, consoleLinkRead, consoleLinkWrite, consoleSleep, consoleNow, nullptr};
+    core_cache::Client cache(io, esp_random());
+    const char* problem = cache.format();
+    return sendText(client, "tang core format: %s\n", problem != nullptr ? problem : "empty cache directory written");
+  }
+  if (strcmp(verb, "put") == 0 || strcmp(verb, "load") == 0) {
+    if (name[0] == 0) {
+      return sendText(client, "tang core %s NAME\n", verb);
+    }
+    const char* problem = nullptr;
+    uint32_t version = 0;
+    if (strcmp(verb, "put") == 0) {
+      problem = core_store::sync(name, nullptr, nullptr);
+    } else {
+      // ядро ведёт консоль: назад — «tang boot»
+      tang::claimCore();
+      problem = core_store::load(name, &version, nullptr, nullptr);
+      if (problem != nullptr) {
+        tang::releaseCore();
+      }
+    }
+    if (problem != nullptr) {
+      return sendText(client, "tang core %s %s: %s\n", verb, name, problem);
+    }
+    return strcmp(verb, "put") == 0 ? sendText(client, "tang core put %s: in the BL616 cache\n", name)
+                                    : sendText(client, "tang core load %s: runs, VERSION %08X\n", name,
+                                               static_cast<unsigned>(version));
+  }
+  static core_store::Entry entries[core_store::kMaxCores];
+  size_t count = 0;
+  const char* problem = core_store::list(entries, core_store::kMaxCores, &count, true);
+  if (problem != nullptr) {
+    return sendText(client, "tang core: %s\n", problem);
+  }
+  for (size_t i = 0; i < count; ++i) {
+    const char* mark = entries[i].cached == core_cache::Found::kFound   ? "in cache"
+                       : entries[i].cached == core_cache::Found::kStale ? "cache has another build"
+                                                                        : "not in cache";
+    if (!sendText(client, "  %-15s %8u  %s\n", entries[i].name, static_cast<unsigned>(entries[i].size), mark)) {
+      return false;
+    }
+  }
+  return sendText(client, "tang core: %u cores in %s\n", static_cast<unsigned>(count), core_store::kFolder);
+}
+
+// Обмен не прошёл: LINK мог быть занят другой задачей дольше tang::kLockWaitMs — кто его держит
+bool transferFailed(int client, const char* what) {
+  char lock[128];
+  tang::describeLock(lock, sizeof(lock));
+  return sendText(client, "%s: transfer failed; LINK %s\n", what, lock);
+}
+
 // Регистры Tang по LINK (tang_link.hpp): сводка, чтение и запись одного слова.
 bool runTang(int client, const char* arguments) {
   if (!tang::ready()) {
@@ -104,10 +250,133 @@ bool runTang(int client, const char* arguments) {
   unsigned address = 0;
   unsigned value = 0;
   char verb[8] = {};
-  if (sscanf(arguments, " %7s", verb) == 1 && strcmp(verb, "flash") == 0) {
+  if (sscanf(arguments, " %7s", verb) == 1 && strcmp(verb, "sd") == 0) {
+    return runTangSd(client, strstr(arguments, "sd") + 2);
+  }
+  if (strcmp(verb, "core") == 0) {
+    return runTangCore(client, strstr(arguments, "core") + 4);
+  }
+  if (strcmp(verb, "lock") == 0) {
+    // Кто держит LINK — без обмена по LINK: отвечает, даже когда LINK занят
+    char lock[128];
+    tang::describeLock(lock, sizeof(lock));
+    return sendText(client, "tang LINK %s\n", lock);
+  }
+  if (strcmp(verb, "flash") == 0) {
     char text[120];
     tang_flash::describe(text, sizeof(text));
     return sendText(client, "tang %s\n", text);
+  }
+  if (strcmp(verb, "player") == 0) {
+    // Экран проигрывателя оверлеем: состояние, кадры, время отрисовки и передачи
+    char text[256];
+    player_overlay::describe(text, sizeof(text));
+    return sendText(client, "tang player: %s\n", text);
+  }
+  if (strcmp(verb, "fthost") == 0) {
+    // Хост FT812 — ESP (FT_CFG бит 2, ядро 1.12+): SPI Evo к FT812 отключается
+    char mode[8] = {};
+    sscanf(arguments, " %*7s %7s", mode);
+    const bool on = strcmp(mode, "on") == 0;
+    if (!on && strcmp(mode, "off") != 0) {
+      return sendText(client, "tang fthost on|off\n");
+    }
+    uint32_t boot = 0;
+    if (tang::read(tang::kRegBoot, &boot, 1) && (boot >> 20) == tang::kBootTag &&
+        ((boot >> 17) & 1U) == 0) {
+      return sendText(client, "tang fthost: no FT812 in this core (tang boot to the FT812 core)\n");
+    }
+    uint32_t st = 0;
+    if (!tang::read(tang::kRegFtStat, &st, 1)) {
+      return transferFailed(client, "tang");
+    }
+    // Прочие биты FT_CFG — как были: RAM_G 3 МБ (FT_STAT 27), без дизеринга (13)
+    const uint32_t cfg = ((st >> 27) & 1U) | (((st >> 13) & 1U) << 1) | (on ? tang::kFtCfgEspHost : 0U);
+    if (!tang::write(tang::kRegFtStat, &cfg, 1) || !tang::read(tang::kRegFtStat, &st, 1)) {
+      return transferFailed(client, "tang");
+    }
+    return sendText(client, "tang fthost: FT812 host is %s (FT_STAT %08X)\n",
+                    ((st >> 12) & 1U) ? "ESP, Evo SPI disconnected" : "Evo",
+                    static_cast<unsigned>(st));
+  }
+  if (strcmp(verb, "ftspeed") == 0) {
+    // Скорость записи в RAM_G окном FT_ADDR/FT_DATA — тем же путём, что у приложений
+    // (ft_host::writeBlock, блоки по 256 слов, как у DOOM): N КБ с 0x080000, затем сверка
+    // чтением 64 случайных слов. Содержимое RAM_G там портится — только для проверки.
+    unsigned kb = 0;
+    sscanf(arguments, " %*7s %u", &kb);
+    if (kb == 0 || kb > 512) {
+      kb = 64;
+    }
+    uint32_t boot = 0;
+    if (tang::read(tang::kRegBoot, &boot, 1) && (boot >> 20) == tang::kBootTag &&
+        ((boot >> 17) & 1U) == 0) {
+      return sendText(client, "tang ftspeed: no FT812 in this core (tang boot to the FT812 core)\n");
+    }
+    static uint32_t block[256];
+    constexpr uint32_t kBase = 0x080000;
+    const uint32_t words = kb * 256U;
+    const uint32_t seed = esp_random();
+    auto pattern = [seed](uint32_t index) { return seed ^ (index * 2654435761U); };
+    const int64_t started = esp_timer_get_time();
+    for (uint32_t done = 0; done < words; done += 256) {
+      for (uint32_t i = 0; i < 256; ++i) {
+        block[i] = pattern(done + i);
+      }
+      if (!ft_host::writeBlock(kBase + 4U * done, block, 256)) {
+        return sendText(client, "tang ftspeed: write failed at %06X\n",
+                        static_cast<unsigned>(kBase + 4U * done));
+      }
+    }
+    const uint32_t us = static_cast<uint32_t>(esp_timer_get_time() - started);
+    unsigned good = 0;
+    for (unsigned k = 0; k < 64; ++k) {
+      const uint32_t index = k == 63 ? words - 1 : esp_random() % words;
+      uint32_t back = 0;
+      if (ft_host::read32(kBase + 4U * index, &back) && back == pattern(index)) {
+        ++good;
+      }
+    }
+    return sendText(client, "tang ftspeed: %u KB in %u us, %u ns/word, %u KB/s; check %u/64 ok, %u kHz\n",
+                    kb, static_cast<unsigned>(us), static_cast<unsigned>(1000ULL * us / words),
+                    static_cast<unsigned>(us ? 1000000ULL * kb / us : 0), good,
+                    static_cast<unsigned>(tang::clockHz() / 1000));
+  }
+  if (strcmp(verb, "boot") == 0) {
+    const uint32_t personality = tang::coreVersion() >> 24;
+    if (personality >= 0x03U) {
+      // Ядро из кэша BL616 (ZX Next и другие): BOOT у него только на запись и не читается —
+      // запись «BOOT» уходит BL616, тот перезагружает ПЛИС в слот 0 (TS-Config)
+      if (!tang::backToSlot0(15000)) {
+        return sendText(client, "tang boot: core %02X did not return to slot 0 in 15 s\n",
+                        static_cast<unsigned>(personality));
+      }
+      tang::releaseCore();
+      return sendText(client, "tang boot: core %02X -> slot 0, TS-Config %u.%u runs\n",
+                      static_cast<unsigned>(personality),
+                      static_cast<unsigned>((tang::coreVersion() >> 8) & 0xFF),
+                      static_cast<unsigned>(tang::coreVersion() & 0xFF));
+    }
+    if (tang_sd::heldByWc()) {
+      return sendText(client, "tang boot: %s\n", tang_sd::kHeldByWc);
+    }
+    // Multiboot (ядро 1.11+): перезагрузить ПЛИС в слот перехода, если там битстрим GW2AR-18
+    uint32_t boot = 0;
+    if (!tang::read(tang::kRegBoot, &boot, 1) || (boot >> 20) != tang::kBootTag) {
+      return sendText(client, "tang boot: the core has no BOOT register (core 1.11+ needed)\n");
+    }
+    const unsigned own = boot & 0xFF;
+    const unsigned next = (boot >> 8) & 0xFF;
+    if (!tang_flash::slotHasBitstream(next * tang::kSlotBytes)) {
+      return sendText(client, "tang boot: slot %u (%06X) holds no GW2AR-18 bitstream, not rebooting\n",
+                      next, next * static_cast<unsigned>(tang::kSlotBytes));
+    }
+    const uint32_t magic = tang::kBootMagic;
+    if (!tang::write(tang::kRegBoot, &magic, 1)) {
+      return transferFailed(client, "tang boot");
+    }
+    return sendText(client, "tang boot: slot %u -> slot %u, Tang reloads (seen reloads so far: %u)\n",
+                    own, next, static_cast<unsigned>(tang::reloads()));
   }
   unsigned rounds = 0;
   if (sscanf(arguments, " test %u", &rounds) == 1) {
@@ -138,7 +407,7 @@ bool runTang(int client, const char* arguments) {
     const uint32_t word = value;
     uint32_t back = 0;
     if (!tang::write(address & ~3U, &word, 1) || !tang::read(address & ~3U, &back, 1)) {
-      return sendText(client, "tang: transfer failed\n");
+      return transferFailed(client, "tang");
     }
     return sendText(client, "tang %02X <- %08X, reads %08X\n", address & ~3U,
                     static_cast<unsigned>(word), static_cast<unsigned>(back));
@@ -146,18 +415,36 @@ bool runTang(int client, const char* arguments) {
   if (sscanf(arguments, " rd %x", &address) == 1) {
     uint32_t word = 0;
     if (!tang::read(address & ~3U, &word, 1)) {
-      return sendText(client, "tang: transfer failed\n");
+      return transferFailed(client, "tang");
     }
     return sendText(client, "tang %02X = %08X\n", address & ~3U, static_cast<unsigned>(word));
   }
   if (arguments[0] != 0) {
     return sendText(client,
-                    "tang [rd ADDR | wr ADDR VALUE | flash], hex; no arguments: summary\n");
+                    "tang [rd ADDR | wr ADDR VALUE | flash | boot | lock | fthost on|off | test N | ftspeed KB | "
+                    "sd [ls DIR | speed | off] | core [put NAME | load NAME | format yes] | player], hex; "
+                    "no arguments: "
+                    "summary\n");
   }
   uint32_t r[8] = {};
   uint32_t c[2] = {};
+  const uint32_t version = tang::coreVersion();
+  if ((version >> 24) >= 0x03U) {
+    // Ядро из кэша BL616: регистры свои — как есть, без разбора TS-Config
+    if (!tang::read(tang::kRegStatus, r, 8)) {
+      return transferFailed(client, "tang");
+    }
+    return sendText(client,
+                    "tang core %02X %u.%u from the BL616 cache; 08..24: %08X %08X %08X %08X %08X %08X "
+                    "%08X %08X; %u kHz\n",
+                    static_cast<unsigned>(version >> 24), static_cast<unsigned>((version >> 8) & 0xFF),
+                    static_cast<unsigned>(version & 0xFF), static_cast<unsigned>(r[0]),
+                    static_cast<unsigned>(r[1]), static_cast<unsigned>(r[2]), static_cast<unsigned>(r[3]),
+                    static_cast<unsigned>(r[4]), static_cast<unsigned>(r[5]), static_cast<unsigned>(r[6]),
+                    static_cast<unsigned>(r[7]), static_cast<unsigned>(tang::clockHz() / 1000));
+  }
   if (!tang::read(tang::kRegStatus, r, 8) || !tang::read(tang::kRegCtrl, c, 2)) {
-    return sendText(client, "tang: transfer failed\n");
+    return transferFailed(client, "tang");
   }
   static const char* const kSources[] = {"AUTO", "EVO", "TEST", "?"};
   return sendText(client, "tang 08..24: %08X %08X %08X %08X %08X %08X %08X %08X\n",
@@ -167,13 +454,14 @@ bool runTang(int client, const char* arguments) {
                   static_cast<unsigned>(r[6]), static_cast<unsigned>(r[7])) &&
          sendText(client,
                   "tang CTRL %08X: source %s, MUX phase %u delay %u clock %X, align %u, "
-                  "SD read %u, OSD %u, aspect %s, size %s; ADJUST %08X: h %d v %d; %u kHz\n",
+                  "SD read %u, OSD %u, aspect %s, size %s, frame blend %s; ADJUST %08X: h %d v %d; %u kHz\n",
                   static_cast<unsigned>(c[0]), kSources[c[0] & 3],
                   static_cast<unsigned>((c[0] >> 2) & 1), static_cast<unsigned>(((c[0] >> 3) & 3) + 1),
                   static_cast<unsigned>((c[0] >> 10) & 0xF), static_cast<unsigned>((c[0] >> 5) & 1),
                   static_cast<unsigned>((c[0] >> 6) & 3), static_cast<unsigned>((c[0] >> 8) & 1),
                   ((c[0] >> 14) & 1) ? "16:9" : "4:3",
                   ((c[0] >> 15) & 3) == 1 ? "95%" : ((c[0] >> 15) & 3) == 2 ? "90%" : "100%",
+                  ((c[0] >> 17) & 1) ? ((r[7] >> 18) & 1 ? "on (now)" : "on") : "off",
                   static_cast<unsigned>(c[1]), static_cast<int>(static_cast<int8_t>(c[1] & 0xFF)),
                   static_cast<int>(static_cast<int8_t>((c[1] >> 8) & 0xFF)),
                   static_cast<unsigned>(tang::clockHz() / 1000));

@@ -2,6 +2,10 @@
 
 file(GLOB ZIFI_SOURCES "${CMAKE_CURRENT_LIST_DIR}/../src/*.cpp"
                        "${CMAKE_CURRENT_LIST_DIR}/../src/apps/*.cpp")
+# Отрисовка экрана плеера на HDMI Tang (player_overlay): дизайн Codex, утверждён пользователем
+# 2026-10-21, — исходники в Sound/player_ui без копии (zifi/player_view.hpp ведёт на player_ui.h).
+set(PLAYER_UI_DIR "${CMAKE_CURRENT_LIST_DIR}/../../Sound/player_ui")
+list(APPEND ZIFI_SOURCES "${PLAYER_UI_DIR}/player_ui.cpp" "${PLAYER_UI_DIR}/fonts/pui_font.cpp")
 
 # Сборка сужена до нужного (COMPONENTS в корневом CMakeLists.txt), поэтому зависимости
 # перечислены явно. joltwallet__littlefs нужен Arduino-обёртке LittleFS: она подключает его,
@@ -10,7 +14,7 @@ file(GLOB ZIFI_SOURCES "${CMAKE_CURRENT_LIST_DIR}/../src/*.cpp"
 # отдаёт только вместе с библиотекой WiFiProv, которая здесь выключена.
 idf_component_register(
     SRCS ${ZIFI_SOURCES}
-    INCLUDE_DIRS "../include" "../modules/sdk/include"
+    INCLUDE_DIRS "../include" "../modules/sdk/include" "../../Sound/player_ui"
     REQUIRES
         espressif__arduino-esp32
         espressif__network_provisioning

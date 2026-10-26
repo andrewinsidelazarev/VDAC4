@@ -46,9 +46,24 @@ uint8_t cover_picture(uint32_t total, uint32_t offset, const uint8_t* data, size
  * своей копией в сведение. 1 — взята (JPEG), 0 — нет (PNG и прочее TJpgDec не
  * сводит). Можно звать из задачи декодера. */
 int cover_image(const uint8_t* data, size_t size);
+/* То же для картинки из сети (online_job): сводится сразу, в задаче, что её принесла. */
+int cover_image_here(const uint8_t* data, size_t size);
 /* Часть миниатюры → итог (THUMB_*); готовая — 512 байт в out. */
 uint8_t cover_thumb(uint8_t part, uint8_t* out);
 void cover_tags(player_tags_t* out);
+/* Обложка для экрана оверлеем Tang (ABI 1.5): сводится вместе с миниатюрой, если ядро может
+ * показать экран (core->ui_available), — квадрат 256×256 RGB565. cover_ui_serial — номер
+ * обложки (меняется с каждой новой; 0 — нет); cover_ui_copy — сведённая к side×side в out:
+ * 1 — есть, 0 — нет. */
+uint16_t cover_ui_serial(void);
+int cover_ui_copy(uint16_t* out, uint16_t side);
+/* Для обложки из сети (online_cover.c): номер картинки — меняется с новым файлом и с каждой
+ * новой картинкой к сведению (старый номер — результат поиска опоздал); есть ли у трека своя
+ * обложка или она в пути (метка досылается, картинка из папки идёт, сводится, готова);
+ * убрать обложку экрана (у радио — песня сменилась). */
+uint32_t cover_epoch(void);
+int cover_present(void);
+void cover_ui_clear(void);
 
 #ifdef __cplusplus
 }

@@ -1080,7 +1080,8 @@ Ui_Visible:
 ; нарисовать столбики. Старая прошивка AUDIO_VIEW не знает: больше не спрашивать.
 Ui_View:
         ld a,(UiViewOff)
-        or a
+        ld hl,UiHidden
+        or (hl)                          ; окна нет — спектр по SPI не нужен
         ret nz
         ld a,(WC_FRAMES)
         ld hl,UiViewFrame
@@ -1394,6 +1395,9 @@ Ui_CountVisible:
 ; Метки файла (AUDIO_TAGS): [название,0][исполнитель,0][альбом,0][год,0][номер,0].
 ; Старая прошивка AUDIO_TAGS не знает — тогда название из AUDIO_INFO.
 Ui_FetchTags:
+        ld a,(UiHidden)
+        or a
+        ret nz                           ; окна нет — метки ему не нужны (Ui_Track спросит)
         ld a,CMD_AUDIO_TAGS
         call Proto_SendEmpty
         jr c,.info
@@ -1645,6 +1649,79 @@ Ui_InfoEnd:
         ld ix,UiInfoWindow
         jp WC_TXTPR
 
+; Тело AUDIO_STATUS для экрана оверлеем Tang (PLAYER 1.21; Docs/VDAC4.md, «Экран плеера на
+; HDMI Tang»): [версия 1][флаги: 1 — окно открыто, 2 — плагин уходит в WC][окно поверх: 0,
+; 1 — справка, 2 — подробности][номер LE16][из LE16][отдано ESP, байт LE32][имя файла, 0]
+; [строка состояния, 0]. Номер — «Track N of M» (0 — вызван не на файле панели).
+; Выход: HL — тело, BC — длина.
+UI_BLOCK_VERSION equ 1
+UI_F_OPEN       equ 1
+UI_F_LEAVING    equ 2
+UI_BLOCK_TEXT   equ 63
+UI_BLOCK_SIZE   equ 11+2*(UI_BLOCK_TEXT+1)
+
+Ui_PackBlock:
+        ld de,UiBlock
+        ld a,UI_BLOCK_VERSION
+        ld (de),a
+        inc de
+        ld a,(UiBlockFlags)
+        ld (de),a
+        inc de
+        ld a,(UiDialog)
+        ld (de),a
+        inc de
+        ld hl,(Mp3Count)
+        ld a,h
+        or l
+        ld hl,0
+        ld bc,0
+        jr z,.track                      ; вызван не на файле панели: номера нет
+        ld hl,(TrackNo)
+        ld bc,(TrackCount)
+.track:
+        ex de,hl                         ; HL — куда, DE — номер
+        ld (hl),e
+        inc hl
+        ld (hl),d
+        inc hl
+        ld (hl),c
+        inc hl
+        ld (hl),b
+        inc hl
+        ex de,hl
+        ld hl,Mp3Sent
+        ld bc,4
+        ldir
+        ld hl,UiName
+        call .text
+        ld hl,(UiState)
+        call .text
+        ex de,hl
+        ld de,UiBlock
+        or a
+        sbc hl,de
+        ld b,h
+        ld c,l
+        ld hl,UiBlock
+        ret
+; Строка HL — по DE, не длиннее UI_BLOCK_TEXT знаков, с нулём; DE — за нулём.
+.text:
+        ld b,UI_BLOCK_TEXT
+.copy:
+        ld a,(hl)
+        or a
+        jr z,.end
+        ld (de),a
+        inc de
+        inc hl
+        djnz .copy
+.end:
+        xor a
+        ld (de),a
+        inc de
+        ret
+
 ; Показать запись состояния (после каждого AUDIO_STATUS). Строки окна — не
 ; чаще раза в 10 кадров (или сразу, если сменилось состояние), столбики и
 ; время — по опросу AUDIO_VIEW (Ui_View).
@@ -1871,6 +1948,10 @@ UiLoadTotal:    dw Mp3Total             ; ... из длины
 UiLabels:       dw UiTextSamples        ; подписи третьей строки модуля: две подряд
 UiInfoStart:    dw 0
 UiName:         ds UI_NAME+1
+UiBlockFlags:   db UI_F_OPEN            ; тело AUDIO_STATUS (Ui_PackBlock; само — UiBlock, main.asm)
+UiHidden:       db 1                    ; окна на Evo нет: экран Tang или решения ещё нет (screen.asm)
+UiTangWait:     db 0                    ; кадров без экрана Tang при скрытом окне
+UiTangFrame:    db 0                    ; WC_FRAMES на прошлом AUDIO_STATUS
 UiSongTitle:    ds UI_TITLE+1           ; название модуля (AUDIO_INFO) с нулём
 
 ; Обнуляется при каждом открытии окна (Ui_Open).

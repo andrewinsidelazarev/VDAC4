@@ -79,7 +79,8 @@ ST_POSITION     equ 26                  ; модуль: позиция табл�
 ST_LENGTH       equ 28                  ; модуль: длина таблицы порядка, LE16
 ST_MOD_CHANNELS equ 30                  ; модуль: каналов
 ST_TEMPERATURE  equ 31                  ; кристалл ESP, °C (0 — неизвестна; PLAYER 1.0)
-ST_SIZE         equ 32
+ST_SCREEN       equ 32                  ; флаги экрана Tang (PLAYER 1.26, SCREEN_F_*, screen.asm)
+ST_SIZE         equ 33
 
 AUDIO_IDLE      equ 0
 AUDIO_PLAYING   equ 1
@@ -181,12 +182,19 @@ PLUGIN:
         ld (UiSongTitle),a
         ld (CoverState),a
         ld (Mp3HasTag),a
+        ld (Mp3Silent),a                 ; ESP молчала в прошлый раз — теперь спрашивать снова
+        ld (UiDialog),a                  ; окна поверх от прошлого вызова нет
         ; Запись состояния — от прошлого файла: формат и позиции в окне — не его.
         ld hl,Mp3Status
         ld de,Mp3Status+1
         ld bc,ST_SIZE-1
         ld (hl),a
         ldir
+        ; Флаг ухода прошлого выхода (Mp3_Leave) — не этому вызову: с ним PLAYER считает окно
+        ; закрытым, и экран оверлеем Tang не показывался до выключения Evo (плагин 1.19).
+        ld a,UI_F_OPEN
+        ld (UiBlockFlags),a
+        ld (UiHidden),a                  ; окно — скрыто, пока не решено (screen.asm)
         ; Прерывания WC (часы, опрос клавиатуры) не трогаем: окно часы не
         ; закрывает, и они должны идти.
         call WC_GEDPL
@@ -217,6 +225,7 @@ PLUGIN:
         ld hl,UiErrorSilent
         jp Mp3_Fatal
 .ready:
+        call Ui_Probe                    ; нет Tang с оверлеями — окно сразу
         ld a,(Mp3Call)
         cp CALL_MENU
         jp z,Mp3_NoFile
@@ -404,6 +413,7 @@ Mp3_Play:
         ld hl,UiErrorAudioOff
         jp z,Mp3_Fatal
         call Mp3_TakeFree
+        call Ui_Screen                   ; окно или экран Tang — по ответу
         call Cover_Begin
         ld hl,UiStatePlaying
         ld (Mp3PhaseText),hl
@@ -836,6 +846,7 @@ Mod_Play:
         ld de,MP3_WAIT
         call Mp3_Wait
         jp c,Mp3_NoAnswer
+        call Ui_Screen                   ; окно или экран Tang — по ответу
         ld a,(ProtoBuf)
         or a
         jr nz,.load
@@ -1329,11 +1340,14 @@ Mp3_TakeFree:
         ld (Mp3Free+2),hl
         ret
 
-; Спросить состояние звука и показать его.
+; Спросить состояние звука и показать его. В теле запроса — что знает только плагин
+; (имя файла, номер, окно поверх, строка состояния): по нему PLAYER 1.21 ведёт экран
+; оверлеем Tang (Ui_PackBlock); прежний PLAYER и прошивка тело не читают.
 ; Выход: CF=1 — ESP не ответила.
 Mp3_Refresh:
+        call Ui_PackBlock
         ld a,CMD_AUDIO_STATUS
-        call Proto_SendEmpty
+        call Proto_Send
         ret c
         ld a,RESP_AUDIO_STATUS
         ld de,MP3_WAIT
@@ -1370,6 +1384,7 @@ Mp3_Refresh:
         ld hl,(Mp3Status+ST_FREE+2)
         ld (Mp3Free+2),hl
         call Mp3_PickState
+        call Ui_Track                    ; экран Tang показан — окна нет; не появился — окно
         call Ui_ShowStatus
         ; Флаг 32 — метки сменились: у радио — песня или станция, у файла —
         ; название от декодера (комментарии Vorbis, LIST INFO у WAV; PLAYER 1.5).
@@ -1614,6 +1629,8 @@ Mp3_CardError:
 ; ESP не ответила на команду. Если она успела прислать причину (#EE) —
 ; например, прошивка без звука отвечает "unsupported:30", — показать её.
 Mp3_NoAnswer:
+        ld a,1
+        ld (Mp3Silent),a                 ; на выходе ESP уже не спрашивать
         ld hl,UiErrorSilent
         ld a,(ProtoErr)
         or a
@@ -1621,6 +1638,9 @@ Mp3_NoAnswer:
         ld hl,ProtoErrText
 ; HL — сообщение. Показать и ждать Esc.
 Mp3_Fatal:
+        push hl
+        call Ui_Show                     ; ошибка — в окне на Evo
+        pop hl
         call Ui_SetState
         call Ui_Draw
 .wait:
@@ -1631,6 +1651,11 @@ Mp3_Fatal:
 Mp3_Exit:
         call Ui_Close                    ; окно поверх — прочь
         call Ui_Flush                    ; окно — как есть на выходе
+        ; Совсем в WC (не к соседнему файлу): экран оверлеем Tang — уйти сразу, а не через 4 с
+        ld a,(Mp3ExitCode)
+        ld hl,Mp3Silent
+        or (hl)
+        call z,Mp3_Leave
         call Cover_Hide
         ld ix,Mp3Window
         call WC_RRESB
@@ -1643,9 +1668,23 @@ Mp3_Exit:
         ld a,(Mp3ExitCode)
         ret
 
+; Последнее AUDIO_STATUS с флагом ухода: PLAYER 1.21 сразу гасит экран оверлеем Tang.
+; Ответ ждётся как обычно; ошибки не важны — без ответа экран уйдёт сам.
+Mp3_Leave:
+        ld a,UI_F_OPEN|UI_F_LEAVING
+        ld (UiBlockFlags),a
+        call Ui_PackBlock
+        ld a,CMD_AUDIO_STATUS
+        call Proto_Send
+        ret c
+        ld a,RESP_AUDIO_STATUS
+        ld de,MP3_WAIT
+        jp Mp3_Wait
+
 ; --- данные -------------------------------------------------------------------
 
 Mp3Call:        db 0                    ; способ вызова плагина
+Mp3Silent:      db 0                    ; ESP перестала отвечать (Mp3_NoAnswer)
 Mp3Kind:        db KIND_MP3             ; MP3, модуль или MIDI (по расширению)
 Mp3NamePtr:     dw 0                    ; имя файла от WC (BC входа)
 Mp3Total:       ds 4                    ; длина файла (у MP3 — без длинной метки)

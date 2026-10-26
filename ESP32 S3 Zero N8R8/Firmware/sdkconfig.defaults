@@ -132,3 +132,6 @@ CONFIG_ESP_TASK_WDT_TIMEOUT_S=5
 CONFIG_ESP_TASK_WDT_PANIC=y
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 # CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
+# Буферы TLS (16 + 4 КБ на соединение и контекст) — в PSRAM: во внутренней памяти их не было
+# места, пока работает PLAYER, и HTTPS (обложки Deezer) падал (0.1.88)
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y

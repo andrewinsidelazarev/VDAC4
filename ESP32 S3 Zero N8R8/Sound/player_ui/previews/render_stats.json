@@ -1,0 +1,7 @@
+{
+  "animation_incremental_frames": 99,
+  "animation_mean_dirty_pixels": 3017.6,
+  "animation_max_dirty_pixels": 4528,
+  "static_pngs": 29,
+  "note": "Статистика генерации превью, не тесты этапа 2 и не замер времени ESP."
+}

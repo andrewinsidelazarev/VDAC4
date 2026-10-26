@@ -59,7 +59,8 @@ FT_CLK_MUL      equ 8                   ; частота FT812: x8 = 64 МГц
 ; команды сопроцессора
 CMD_INFLATE     equ #FFFFFF22
 
-FT_BOOT_FRAMES  equ 50                  ; до 1 с ждать ответа чипа
+FT_BOOT_FRAMES  equ 25                  ; до 0,5 с ждать ответа чипа после запуска
+FT_BOOT_TRIES   equ 10                  ; запусков, пока VDAC4 грузит ядро FT812 (до ~12 с)
 FT_IDLE_FRAMES  equ 250                 ; до 5 с на работу сопроцессора
 FT_IDLE_POLLS   equ 32                  ; опросов за кадр при ожидании
 
@@ -142,7 +143,14 @@ FT_Frames:
 ; --- запуск -----------------------------------------------------------------------------
 ; Запустить FT812 в режиме 1024x768@59. Выход: CF=1 — чипа нет (платы VDAC2
 ; нет или она не ответила): REG_ID так и не стал #7C.
+; VDAC4: FT812 — отдельное ядро ПЛИС Tang (слот 1 flash), оно грузится 3…6 с после первой
+; посылки, а до того на месте FT812 ядро без него — REG_ID читается #00 (MISO — 0). Поэтому
+; при #00 запуск повторяется целиком (CORERST…ACTIVE: ядро FT812 должно получить и такты),
+; до FT_BOOT_TRIES раз. #FF — MISO висит на подтяжке Evo: платы нет, выход сразу.
 FT_Boot:
+        ld a,FT_BOOT_TRIES
+        ld (FtBootTries),a
+.try:
         ld a,HOST_RST_PULSE             ; сброс ядра чипа
         ld c,0
         call FT_Host
@@ -177,10 +185,18 @@ FT_Boot:
         ld a,l
         cp #7C
         jr z,.ready
+        ld (FtLastId),a
         push bc
         call Saver_Frame
         pop bc
         djnz .wait_id
+        ld a,(FtLastId)
+        inc a
+        jr z,.absent                    ; #FF — платы нет
+        ld hl,FtBootTries               ; нули — VDAC4 ещё грузит ядро FT812
+        dec (hl)
+        jr nz,.try
+.absent:
         scf                             ; не ответил — платы нет
         ret
 .ready:
@@ -466,3 +482,5 @@ AssetPad:       db 0,0,0
 CmdSpace:       dw 0                    ; сколько байтов ещё влезет в очередь
 BlkLeft:        dw 0                    ; сколько байтов блока осталось передать
 FtFault:        db 0                    ; 1 — очередь FT812 так и не освободилась
+FtBootTries:    db 0                    ; запусков FT812 осталось (FT_Boot)
+FtLastId:       db 0                    ; последнее прочитанное REG_ID (FT_Boot)

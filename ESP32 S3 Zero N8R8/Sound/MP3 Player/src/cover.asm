@@ -444,6 +444,9 @@ Cover_Stop:
 
 ; ESP сводит миниатюру: спрашивать раз в COVER_POLL кадров, готовую — забрать.
 Cover_Poll:
+        ld a,(UiHidden)
+        or a
+        jr nz,.idle                      ; окна нет — миниатюру не забирать (Ui_Show)
         ld a,(WC_FRAMES)
         ld hl,CoverPollFrame
         sub (hl)

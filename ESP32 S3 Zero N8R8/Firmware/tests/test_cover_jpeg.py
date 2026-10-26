@@ -76,7 +76,8 @@ class CoverJpegTest(unittest.TestCase):
         complete, _ = self.decode(path)
         for allocation in range(1, complete['allocations']+1):
             r, _ = self.decode(path, fail=allocation)
-            self.assertIn(r['result'], (1, 2))
+            # Первое — пул TJpgDec во внутренней памяти: нет его — тот же пул в PSRAM (0.1.88+)
+            self.assertIn(r['result'], (0, 1, 2) if allocation == 1 else (1, 2))
 
     def test_only_unsupported_rom_format_enters_software(self):
         path = self.jpeg()
@@ -94,6 +95,59 @@ class CoverJpegTest(unittest.TestCase):
             r, _ = self.decode(path)
             self.assertNotEqual(r['result'], 0)
             self.assertLessEqual(r['peak_bytes'], 4*1024*1024 + 65536)
+
+    def decode_picture(self, path, fail=0):
+        out = self.directory / 'thumb.bin'
+        big = self.directory / 'picture.bin'
+        run = subprocess.run([str(self.exe), str(path), str(out), '0', str(fail), '8', str(big)],
+                             capture_output=True, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        result = json.loads(run.stdout)
+        self.assertEqual(result['live_bytes'], 0, result)
+        data = big.read_bytes()
+        pixels = [int.from_bytes(data[i:i + 2], 'little') for i in range(0, len(data), 2)]
+        return result, pixels
+
+    def test_screen_cover_is_an_area_average_of_the_centre(self):
+        # Обложка экрана (CoverPicture, ABI 1.5): квадрат из середины, усреднение по площади до
+        # 256×256 — как BOX-уменьшение Pillow, с точностью до RGB565 и шума JPEG.
+        for size in ((700, 500), (500, 700), (120, 90)):
+            with self.subTest(size=size):
+                image = Image.new('RGB', size)
+                image.putdata([(x * 255 // size[0], y * 255 // size[1], 128)
+                               for y in range(size[1]) for x in range(size[0])])
+                path = self.directory / 'cover.jpg'
+                image.save(path, quality=95, subsampling=0, progressive=True)
+                r, pixels = self.decode_picture(path)
+                self.assertEqual((r['result'], r['picture']), (0, 1))
+                side = min(size)
+                left, top = (size[0] - side) // 2, (size[1] - side) // 2
+                reference = Image.open(path).convert('RGB').crop(
+                    (left, top, left + side, top + side)).resize((256, 256), Image.BOX)
+                worst = total = 0
+                raw = reference.tobytes()
+                for index, p in enumerate(pixels):
+                    r8, g8, b8 = raw[3 * index:3 * index + 3]
+                    got = ((p >> 11) * 255 // 31, ((p >> 5) & 63) * 255 // 63, (p & 31) * 255 // 31)
+                    for a, b in zip(got, (r8, g8, b8)):
+                        worst = max(worst, abs(a - b))
+                        total += abs(a - b)
+                mean = total / (256 * 256 * 3)
+                self.assertLess(mean, 4.0, (size, mean))
+                self.assertLess(worst, 40, (size, worst))
+
+    def test_screen_cover_without_memory_keeps_the_thumbnail(self):
+        path = self.directory / 'cover.jpg'
+        Image.new('RGB', (600, 600), (200, 40, 90)).save(path, progressive=True, subsampling=0)
+        complete, _ = self.decode_picture(path)
+        self.assertEqual((complete['result'], complete['picture']), (0, 1))
+        for allocation in range(1, complete['allocations'] + 1):
+            with self.subTest(allocation=allocation):
+                r, _ = self.decode_picture(path, fail=allocation)
+                # Не хватило на обложку экрана — миниатюра всё равно есть; иначе — отказ. Пул
+                # TJpgDec (первое выделение) берётся и в PSRAM — тогда всё сводится
+                expected = ((0, 0), (1, 0), (2, 0)) + (((0, 1),) if allocation == 1 else ())
+                self.assertIn((r['result'], r['picture']), expected)
 
     def test_invalid_headers(self):
         for data in (b'', b'not a jpeg', b'\xff\xd8\xff\xc2\x00\x11'):

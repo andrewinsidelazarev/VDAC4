@@ -1,0 +1,246 @@
+[
+  {
+    "file": "01_mp3.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "02_cyrillic.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "03_xm_8_channels.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "04_xm_32_channels.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "05_vgz_opl3.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "06_midi.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "07_radio_icy.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "08_radio_stations.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "09_loading_45.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "10_buffering.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "11_paused.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "12_error_skipping.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "13_error_stream_closed.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "14_help_files.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "15_help_radio.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "16_details.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "17_idle.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "18_finishing.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "19_temperature_70.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "20_temperature_75.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "21_filename_fallback.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "22_unknown_duration.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "23_flac.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "24_connecting.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "25_view_none.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "26_fade_alpha_4.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "27_fade_alpha_8.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "28_fade_alpha_12.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "29_wc_background.png",
+    "size": [
+      1280,
+      720
+    ],
+    "mode": "RGB"
+  },
+  {
+    "file": "spectrum_25fps.apng",
+    "size": [
+      1280,
+      720
+    ],
+    "frames": 100,
+    "duration_ms": 4000.0,
+    "frame_durations_ms": [
+      40.0
+    ]
+  }
+]

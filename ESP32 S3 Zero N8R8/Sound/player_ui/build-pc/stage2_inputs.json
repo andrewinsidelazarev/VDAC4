@@ -1,0 +1,15 @@
+{
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Sound\\player_ui\\player_ui.cpp": "f39b072c9960a33a92b4c86f6510b0e5dbf2d21aa8d24516b9fea3898e105c1d",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Sound\\player_ui\\player_ui.h": "0fed1923b54a23cbdc154947b0a1898666dda6ecf5bf32f2ad3728b5258d9fb8",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Sound\\player_ui\\fonts\\pui_font.cpp": "9d14f3f2b40506ca03b164e01b91681b6b4303e74a5922ec16ddf0d9d47dba4a",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Sound\\player_ui\\tests\\pui_stage2.cpp": "bda850391f84e313ea8146c43ab46b64c210908eb51bfa55a9fc22a7256dcc14",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Sound\\player_ui\\tests\\pui_unit.cpp": "22d496618f823ce9fb27ddec5943bfa647c4eadc3d7d3996a4e0b15b3e623828",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Sound\\player_ui\\tests\\pui_profile.cpp": "8267be00a73238411b078c5e4bdf22795d4133980ccd915f4d75c6a0ac362ce0",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Sound\\player_ui\\tests\\pui_profile.h": "bec196ff56ba7bf35d4a955ec711e576fcd4b89affdfd8872e5da4d963bf57cb",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Sound\\player_ui\\tests\\run_stage2.py": "10d2a25e45b6937bdc7cbd577565386c3b76f09ee5d1fc9b5d0581c9d7908e5c",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Firmware\\tests\\player_overlay_host.cpp": "30db42ecf687dcffd768415b30a2ef99cd59158cbc34abe97587c60cbdc248eb",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Firmware\\tests\\test_player_overlay_host.py": "422f569e3d3b7ed542c0ea79dc2f21ff61fb620afe241890ff21f3a1dfdc9361",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Firmware\\src\\player_overlay.cpp": "874faaf62ae24fef543709ecfa5ac97c75715ca03f75dbc71ca171b611593b71",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Firmware\\include\\zifi\\player_overlay.hpp": "dcb92c513d8a301d5449f2a2777d9cbd88412ddc801ab1ba4824d1a7746d15c8",
+  "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\ESP32 S3 Zero N8R8\\Firmware\\modules\\sdk\\include\\zm_app.h": "ad358ca6a42d18cad0e5cfd21ca7ba8d07811038bdf9266b7339c6a274ba4000"
+}

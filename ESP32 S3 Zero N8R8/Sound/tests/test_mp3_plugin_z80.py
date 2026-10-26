@@ -63,6 +63,8 @@ FN_SPACE, FN_UP, FN_DOWN, FN_LEFT, FN_RIGHT, FN_LOAD512 = 0x10, 0x11, 0x12, 0x13
 FN_PGUP, FN_PGDN, FN_WAITUP, FN_ENTER, FN_LOADNONE = 0x19, 0x1A, 0x2E, 0x16, 0x3D
 EXIT_NEXT, EXIT_PREV = 2, 4
 CMD_PING, RESP_READY, RESP_ERROR = 0x04, 0xF0, 0xEE
+TANG_READ = 0x45                            # регистры Tang (прошивка 0.1.72+)
+SCREEN_F_SHOWN, SCREEN_F_TANG = 1, 2        # флаги экрана Tang (PLAYER 1.26)
 AUDIO_VIEW = 0x2F
 AUDIO_OPEN, AUDIO_DATA, AUDIO_CLOSE, AUDIO_STATUS, AUDIO_TONE, AUDIO_VOLUME = range(0x30, 0x36)
 AUDIO_PAUSE, AUDIO_PROBE, AUDIO_SEEK, AUDIO_FLUSH, AUDIO_INFO = range(0x36, 0x3B)
@@ -151,6 +153,23 @@ def entry_of(short: bytes, size: int, time: int = 0, date: int = 0) -> bytes:
             date.to_bytes(2, "little") + bytes(2) + size.to_bytes(4, "little"))
 
 
+UI_F_OPEN, UI_F_LEAVING = 1, 2
+
+
+def parse_ui_block(payload: bytes) -> dict | None:
+    """Тело AUDIO_STATUS: [версия 1][флаги][окно поверх][номер LE16][из LE16][отдано LE32]
+    [имя, 0][строка состояния, 0]; пусто или другая версия — None."""
+    if len(payload) < 11 or payload[0] != 1:
+        return None
+    texts = payload[11:].split(b"\0")
+    return {'flags': payload[1], 'page': payload[2],
+            'track': int.from_bytes(payload[3:5], 'little'),
+            'tracks': int.from_bytes(payload[5:7], 'little'),
+            'sent': int.from_bytes(payload[7:11], 'little'),
+            'name': texts[0].decode('cp866'), 'status': texts[1].decode('cp866') if len(texts) > 1 else '',
+            'size': len(payload)}
+
+
 class AudioEsp:
     """Звуковая часть прошивки: очередь MP3, буфер файла целиком и ответы AUDIO_*."""
 
@@ -177,6 +196,9 @@ class AudioEsp:
         self.pauses: list[int] = []
         self.buffering = False
         self.status_queue = 0               # очередь в последнем ответе о состоянии
+        # Тела AUDIO_STATUS (плагин 1.19: экран оверлеем Tang): разобранные поля по порядку.
+        self.ui_blocks: list[dict] = []
+        self.ui_raw: list[bytes] = []       # они же как пришли (test_player_host: вся цепочка)
         self.decode_errors = 0
         self.underruns = 0
         self.i2s_faults = 0
@@ -236,6 +258,10 @@ class AudioEsp:
         self.stored: dict[bytes, bytes] = {}    # что дошло целиком
         self.started: list[bytes] = []
         self.start_result = 0
+        # Tang: VERSION (None — Tang нет / прошивка без TANG_READ) и флаги экрана PLAYER 1.26
+        # в ответах AUDIO_OPEN и AUDIO_STATUS (None — прежний PLAYER: байта нет).
+        self.tang_version: int | None = None
+        self.screen: int | None = None
         # Столбики (AUDIO_VIEW) и метки (AUDIO_TAGS) — только у PLAYER.ELF:
         # встроенный плеер прошивки их не знает.
         self.view_known = False
@@ -380,12 +406,18 @@ class AudioEsp:
                    (self.length if module else 0).to_bytes(2, "little") +
                    bytes([8 if module else 0, self.temperature]))
         assert len(record) == 32
-        return record
+        return record + (bytes([self.screen]) if self.screen is not None else b"")
+
+    def opened(self, body: bytes) -> bytes:
+        return frame(0xB0, body + (bytes([self.screen]) if self.screen is not None else b""))
 
     def __call__(self, command: int, payload: bytes) -> bytes:
         self.commands.append(command)
         if command == CMD_PING:
             return frame(RESP_READY)
+        if command == TANG_READ and self.tang_version is not None:
+            assert payload == bytes([0x04, 0x00, 1]), 'плагин читает только VERSION'
+            return frame(0xC5, bytes([1]) + self.tang_version.to_bytes(4, "little"))
         if not self.supported:
             return frame(RESP_ERROR, b"unsupported:%02X" % command)
         if command in (MOD_QUERY, MOD_PUT, MOD_COMMIT, APP_START) and self.modules_known:
@@ -393,25 +425,25 @@ class AudioEsp:
         if command == AUDIO_OPEN:
             self.opens.append(payload)
             if not self.online:
-                return frame(0xB0, bytes([0]) + bytes(4))
+                return self.opened(bytes([0]) + bytes(4))
             if payload == bytes([OPEN_RELEASE]):
                 self.releases += 1
                 for name in (b"MIDI.SF2", b"YRW801.ROM"):
                     self.resources.pop(name, None)
                 self.state = STATE_IDLE
-                return frame(0xB0, bytes([1]) + self.free())
+                return self.opened(bytes([1]) + self.free())
             if payload and payload[0] & OPEN_MODULE:
                 if not self.module_take:
-                    return frame(0xB0, bytes([0]) + bytes(4))
+                    return self.opened(bytes([0]) + bytes(4))
                 self.module_opens += 1
                 if self.module_opens > 1:
                     self.received, self.loading_polls = bytearray(), 2    # файл заново
                     self.position = self.row = 0
                 self.module_size = int.from_bytes(payload[1:5], "little")
                 self.state = STATE_LOADING
-                return frame(0xB0, bytes([1]) + self.free())
+                return self.opened(bytes([1]) + self.free())
             self.queue, self.state, self.finished = 0, STATE_PLAYING, False
-            return frame(0xB0, bytes([1]) + self.free())
+            return self.opened(bytes([1]) + self.free())
         if command == AUDIO_DATA:
             if self.module_size:
                 if (self.module_refuse_at is not None and self.state == STATE_LOADING and
@@ -496,6 +528,12 @@ class AudioEsp:
             return frame(0xBA, bytes([self.module_format, 8]) +
                          self.length.to_bytes(2, "little") + self.title + bytes(1))
         if command == AUDIO_STATUS:
+            block = parse_ui_block(payload)
+            self.ui_blocks.append(block)
+            self.ui_raw.append(bytes(payload))
+            if block and block['flags'] & UI_F_LEAVING:
+                # Прощальный запрос: ответ — как есть, без хода «проигрывания»
+                return frame(0xB3, self.status())
             self.status_polls += 1
             if self.tags_flag_at == self.status_polls:
                 self.tags_flag = True
@@ -1110,7 +1148,7 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertEqual(data[63], 0, "и Enter, и F3")
         self.assertEqual(data[64:161], bytes(97), "старое поле 32 расширений у #11 пустое")
         self.assertEqual(data[161:165], b"\xFF" * 4, "размер файла не ограничен")
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.18")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.22")
         self.assertEqual((data[34], data[35]), (2, 0), "две страницы, запуск — страница 0")
         self.assertEqual(data[38], 1, "второй блок файла — в страницу 1")
         self.assertEqual(data[197], 4, "меню выбора просмотрщика, в F10 плеера нет")
@@ -1141,7 +1179,8 @@ class Mp3PluginTest(unittest.TestCase):
                 self.assertEqual(bytes(esp.received), content)
                 self.assertTrue(all(0 < block <= 1024 for block in esp.blocks))
                 self.assertEqual(h.own_sectors(), -(-size // 512), "с карты прочитано ровно нужное")
-                self.assertEqual(esp.commands[:2], [CMD_PING, AUDIO_OPEN])
+                # Плагин 1.21: после PING — VERSION Tang (есть ли экран на HDMI)
+                self.assertEqual(esp.commands[:3], [CMD_PING, TANG_READ, AUDIO_OPEN])
                 self.assertEqual(esp.opens, [bytes([0]) + size.to_bytes(4, "little") + bytes([3]) +
                                              b"MP3"],
                                  "поток MP3 открывается с длиной (по ней ESP считает время); "
@@ -1553,6 +1592,64 @@ class Mp3PluginTest(unittest.TestCase):
         h.start()
         self.assertEqual(h.at(STATUS_ROW, TEXT_MP3), "Buffering")
 
+    def test_status_body_feeds_the_tang_screen(self) -> None:
+        # Плагин 1.19: в теле каждого AUDIO_STATUS — то, что знает только он (экран оверлеем
+        # Tang в PLAYER 1.21): имя, окно поверх, сколько отдано, строка состояния; на выходе
+        # Esc — последний запрос с флагом ухода.
+        h = Mp3Harness(bytes(80 * 1024), esp=AudioEsp(played_per_status=2048))
+        h.esc_after = 200
+        h.start()
+        blocks = h.audio.ui_blocks
+        self.assertTrue(blocks and all(b is not None for b in blocks), 'тело — в каждом запросе')
+        self.assertTrue(all(b['size'] <= 11 + 2 * 64 for b in blocks))
+        first, last = blocks[0], blocks[-1]
+        self.assertEqual(first['flags'], UI_F_OPEN)
+        self.assertEqual(first['page'], 0)
+        self.assertTrue(first['name'], 'имя файла есть')
+        self.assertEqual(last['flags'], UI_F_OPEN | UI_F_LEAVING, 'Esc — уход сразу')
+        self.assertTrue(all(b['flags'] == UI_F_OPEN for b in blocks[:-1]))
+        self.assertEqual(sum(1 for b in blocks if b['flags'] & UI_F_LEAVING), 1)
+        sent = [b['sent'] for b in blocks]
+        self.assertEqual(sent, sorted(sent), 'отдано — только растёт')
+        self.assertEqual(sent[-1], 80 * 1024)
+
+    def test_leaving_flag_does_not_outlive_the_call(self) -> None:
+        # Страница плагина живёт в памяти Evo между вызовами: флаг ухода прошлого выхода не
+        # должен доставаться следующему вызову. В 1.19 он оставался — PLAYER считал окно
+        # закрытым, и экран оверлеем Tang показывался только до первого выхода в WC.
+        h = Mp3Harness(bytes(30000), esp=AudioEsp(played_per_status=2048))
+        h.esc_after = 30
+        h.start()
+        first = len(h.audio.ui_blocks)
+        self.assertEqual(h.audio.ui_blocks[-1]['flags'], UI_F_OPEN | UI_F_LEAVING)
+        h.esc_polls = 0
+        h.start()
+        second = h.audio.ui_blocks[first:]
+        self.assertGreater(len(second), 1)
+        self.assertTrue(all(b['flags'] == UI_F_OPEN for b in second[:-1]), 'окно снова открыто')
+        self.assertEqual(second[-1]['flags'], UI_F_OPEN | UI_F_LEAVING)
+
+    def test_silent_esp_does_not_outlive_the_call(self) -> None:
+        # ESP не ответила в прошлый раз — в следующий вызов прощальный запрос снова уходит.
+        h = Mp3Harness(bytes(50000))
+        calls = 0
+
+        def app(command: int, payload: bytes) -> bytes:
+            nonlocal calls
+            calls += 1
+            return b"" if calls > 12 else h.audio(command, payload)
+        h.app = app
+        h.esc_after = 40
+        h.start()
+        self.assertEqual(h.at(STATUS_ROW, TEXT_MP3), "ERROR: ESP does not answer")
+        h.app = h.audio
+        h.esc_polls = 0
+        first = len(h.audio.ui_blocks)
+        h.start()
+        second = h.audio.ui_blocks[first:]
+        self.assertTrue(second and second[-1]['flags'] == UI_F_OPEN | UI_F_LEAVING,
+                        'на выходе — прощальный запрос')
+
     def test_progress_bar_follows_the_decoder(self) -> None:
         # Файл в 80 КБ отдан целиком, часть его ещё в очереди: полоса показывает
         # то, что уже ушло в декодер.
@@ -1624,6 +1721,117 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertNotIn(AUDIO_OPEN, h.audio.commands)
         self.assertEqual(h.sectors, [])
         self.assertEqual(h.machine.a, 0)
+
+
+class TangScreenTest(unittest.TestCase):
+    """Плагин 1.21 и экран проигрывателя на HDMI Tang (PLAYER 1.26, screen.asm): экран показан —
+    окна плагина на Evo нет (ни окон WC, ни текста), и по SPI идут только звук и тело
+    AUDIO_STATUS: спектра, меток и миниатюры окну не нужно."""
+
+    TANG = 0x0101011E                       # личность 01 (TS-Config), версия 1.30
+    WINDOW_ONLY = {AUDIO_VIEW, AUDIO_TAGS, AUDIO_INFO, AUDIO_THUMB}
+
+    def harness(self, content: bytes = bytes(40 * 1024), name: bytes = b"MUSIC.MP3",
+                **esp) -> Mp3Harness:
+        audio = AudioEsp(played_per_status=2048)
+        audio.view_known = audio.tags_known = True
+        for key, value in esp.items():
+            setattr(audio, key, value)
+        return Mp3Harness(content, name=name, esp=audio)
+
+    def assert_no_window(self, h: Mp3Harness) -> None:
+        for api in (FN_PRWOW, base.FN_TXTPR, base.FN_RRESB):
+            self.assertNotIn(api, h.calls, f'окно на Evo: API {api}')
+        self.assertFalse(self.WINDOW_ONLY & set(h.audio.commands),
+                         'по SPI — только звук и состояние')
+
+    def test_screen_shown_no_window_and_no_extra_spi(self) -> None:
+        content = random.Random(21).randbytes(40 * 1024)
+        h = self.harness(content, tang_version=self.TANG, screen=SCREEN_F_TANG | SCREEN_F_SHOWN)
+        h.esc_after = 150
+        h.start()
+        self.assert_no_window(h)
+        self.assertIn(TANG_READ, h.audio.commands)
+        self.assertEqual(bytes(h.audio.received), content, 'звук — весь')
+        blocks = h.audio.ui_blocks
+        self.assertTrue(all(b['flags'] == UI_F_OPEN for b in blocks[:-1]), 'экрану: окно открыто')
+        self.assertEqual(blocks[-1]['flags'], UI_F_OPEN | UI_F_LEAVING)
+        self.assertEqual(h.machine.a, 0)
+
+    def test_module_on_the_screen_has_no_window(self) -> None:
+        # Модуль целиком в ESP и до конца песни: ни окна, ни AUDIO_INFO с названием.
+        content = random.Random(41).randbytes(50_000)
+        h = self.harness(content, name=b"TUNE.XM", tang_version=self.TANG,
+                         screen=SCREEN_F_TANG | SCREEN_F_SHOWN)
+        h.start(index=2, count=5)
+        self.assert_no_window(h)
+        self.assertEqual(bytes(h.audio.received), content)
+        self.assertEqual(h.machine.a, EXIT_NEXT, 'в конце песни — следующий файл')
+
+    def test_screen_that_never_appears_gives_the_window(self) -> None:
+        # Tang есть, а экран не показался (PLAYER не нашёл памяти): через 5 с (250 кадров) — окно,
+        # и метки для него спрошены.
+        h = self.harness(bytes(2 << 20), tang_version=self.TANG, screen=SCREEN_F_TANG)
+        h.audio.capacity = 8192
+        h.esc_after = 1500
+        h.start()
+        self.assertIn(FN_PRWOW, h.calls, 'окно открыто')
+        first_window = h.calls.index(FN_PRWOW)
+        self.assertGreaterEqual(h.interrupts, 250)
+        self.assertIn(AUDIO_TAGS, h.audio.commands, 'метки — для окна')
+        self.assertTrue(h.text(TITLE_ROW), 'окно нарисовано')
+        self.assertGreater(first_window, 0)
+
+    def test_screen_appearing_later_removes_the_window(self) -> None:
+        # Окно было (Tang вернулся позже): экран показан — окно закрыто, спрайт обложки снят.
+        h = self.harness(bytes(2 << 20), tang_version=self.TANG, screen=SCREEN_F_TANG)
+        h.audio.capacity = 8192
+        after = 0
+        audio = h.audio
+
+        def app(command: int, payload: bytes) -> bytes:
+            nonlocal after
+            if command == AUDIO_STATUS and FN_PRWOW in h.calls:
+                after += 1                  # окно уже открыто: ещё немного — и экран показан
+                if after == 50:
+                    audio.screen = SCREEN_F_TANG | SCREEN_F_SHOWN
+            return audio(command, payload)
+        h.app = app
+        h.esc_after = 2000
+        h.start()
+        self.assertIn(FN_PRWOW, h.calls, 'сначала — окно')
+        opened = h.calls.index(FN_PRWOW)
+        self.assertIn(base.FN_RRESB, h.calls[opened:], 'экран показан — окно закрыто')
+
+    def test_module_delivery_on_the_screen_has_no_window(self) -> None:
+        # Плагин 1.22: новый PLAYER.ELF уходит в кэш ESP — с Tang окна нет и на время передачи
+        # (1.21 открывал его: «обычный интерфейс вначале»).
+        h = self.harness(tang_version=self.TANG, screen=SCREEN_F_TANG | SCREEN_F_SHOWN)
+        player = b"\x7fELF" + random.Random(5).randbytes(3000)
+        h.root = {b"WC": {b"ESP": {b"PLAYER.ELF": (player, 0x9C2B, 0x5D43),
+                                   b"MP3.ELF": (b"\x7fELF" + bytes(600), 0x9C2B, 0x5D43)}},
+                  b"ZIFI": {}}
+        h.esc_after = 150
+        h.start()
+        self.assertEqual(h.audio.stored.get(b"PLAYER.ELF"), player, 'PLAYER.ELF передан')
+        self.assert_no_window(h)
+
+    def test_no_tang_window_from_the_start(self) -> None:
+        # Tang нет (TANG_READ — отказ): окно сразу, до AUDIO_OPEN, как в 1.20.
+        h = self.harness()
+        h.esc_after = 60
+        h.start()
+        self.assertIn(FN_PRWOW, h.calls)
+        self.assertEqual(h.audio.commands.count(TANG_READ), 1)
+        self.assertNotEqual(h.at(STATUS_ROW, TEXT_MP3), "unsupported:45", 'отказ — не ошибка')
+
+    def test_old_player_with_tang_opens_the_window(self) -> None:
+        # Прежний PLAYER (экрана своего нет, ответ AUDIO_OPEN — 5 байт): окно — после ответа.
+        h = self.harness(tang_version=self.TANG, screen=None)
+        h.esc_after = 60
+        h.start()
+        self.assertIn(FN_PRWOW, h.calls)
+        self.assertIn(AUDIO_VIEW, h.audio.commands, 'окну — спектр')
 
 
 class TrackNumberTest(unittest.TestCase):

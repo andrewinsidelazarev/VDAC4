@@ -31,7 +31,9 @@
 //   picture — картинка файлом (cover.jpg из папки) кадрами AUDIO_PICTURE,
 //             с одним повтором куска не с того места;
 //   spectrum — анализатор спектра (view.c) на синусе --hz Гц;
-//   release — AUDIO_OPEN [#20]: приложение освобождает ресурсы (банк, ПЗУ).
+//   release — AUDIO_OPEN [#20]: приложение освобождает ресурсы (банк, ПЗУ);
+//   ui      — экран оверлеем Tang (ABI 1.5, --ui 1): тело AUDIO_STATUS → ui_model, метка ID3
+//             файла (AUDIO_COVER) и звук, обложка из сети (--cover-json, --cover-jpeg).
 // --psram N — PSRAM стенда, байтов (как у ESP: память кончается): в счёт идут
 // core->alloc с ZM_MEM_PSRAM, память libxmp (xmp_host_alloc из xmp_esp_shim.c)
 // и ресурсы (банк, ПЗУ, наборы), пока они не освобождены; на выходе psram_peak
@@ -52,6 +54,7 @@
 
 #include <windows.h>
 
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -67,6 +70,7 @@
 extern "C" {
 #include "view.h"
 #include "player_cover.h"
+#include "screen.h"
 #include "zm_app.h"
 #include "zm_source.h"
 int player_main(int argc, char* argv[]);
@@ -126,6 +130,33 @@ std::set<void*> allocations;
 size_t psramBudget = 0;                // --psram: 0 — без предела
 size_t psramUsed = 0;                  // под allocLock
 size_t psramPeak = 0;
+// --internal N [--internal-block M]: внутренняя память ESP (как ModuleApp на плате): в счёт идут
+// выделения ZM_MEM_INTERNAL (не влезли — PSRAM, как coreAlloc прошивки), стеки задач с их TCB
+// (не влезли — задача не создаётся, ZM_NO_MEMORY) и мьютексы/сигналы FreeRTOS. M — самый большой
+// свободный кусок: больший запрос не выделяется, даже если всего памяти хватает.
+size_t internalBudget = 0;
+size_t internalBlock = 0;
+size_t internalUsed = 0;
+size_t internalPeak = 0;
+std::map<void*, size_t> internalBlocks;
+constexpr size_t kTaskOverhead = 360;    // TCB FreeRTOS ESP-IDF
+constexpr size_t kSyncBytes = 96;        // мьютекс или двоичный семафор
+bool internalTakeLocked(size_t size) {
+  if (internalBudget == 0) {
+    return true;
+  }
+  if ((internalBlock != 0 && size > internalBlock) || internalUsed + size > internalBudget) {
+    return false;
+  }
+  internalUsed += size;
+  if (size >= 1024 && getenv("INTERNAL_TRACE") != nullptr) {
+    fprintf(stderr, "internal +%zu = %zu\n", size, internalUsed);
+  }
+  if (internalUsed > internalPeak) {
+    internalPeak = internalUsed;
+  }
+  return true;
+}
 size_t xmpUsed = 0;                    // память libxmp (xmp_host_alloc), под allocLock
 size_t xmpPeak = 0;
 std::map<void*, size_t> xmpBlocks;
@@ -153,8 +184,16 @@ bool noFlac = false;
 bool noWorker = false;
 
 void* coreAlloc(size_t size, uint32_t caps) {
-  const bool psram = (caps & ZM_MEM_INTERNAL) == 0;
+  bool psram = (caps & ZM_MEM_INTERNAL) == 0;
   std::lock_guard<std::mutex> lock(allocLock);
+  bool internal = false;
+  if (!psram) {
+    internal = internalTakeLocked(size);
+    psram = !internal;                   // внутренней нет — PSRAM (coreAlloc прошивки)
+    if (psram && internalBudget != 0) {
+      fprintf(stderr, "internal: %zu bytes -> PSRAM (used %zu of %zu)\n", size, internalUsed, internalBudget);
+    }
+  }
   if (psram && !psramTakeLocked(size)) {
     return nullptr;
   }
@@ -163,6 +202,9 @@ void* coreAlloc(size_t size, uint32_t caps) {
     allocations.insert(pointer);
     if (psram) {
       psramBlocks[pointer] = size;
+    }
+    if (internal && internalBudget != 0) {
+      internalBlocks[pointer] = size;
     }
   } else if (psram) {
     psramUsed -= size;
@@ -216,6 +258,11 @@ void coreFree(void* pointer) {
       psramUsed -= block->second;
       psramBlocks.erase(block);
     }
+    auto inner = internalBlocks.find(pointer);
+    if (inner != internalBlocks.end()) {
+      internalUsed -= inner->second;
+      internalBlocks.erase(inner);
+    }
   }
   free(pointer);
 }
@@ -236,19 +283,35 @@ uint32_t coreMillis() {
 
 void coreDelay(uint32_t ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
-int coreTaskStart(zm_task_fn fn, void* arg, uint32_t, uint8_t priority, int8_t core) {
+int coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t priority, int8_t core) {
   if (noWorker && core == 1 && priority == 5) {
     return ZM_ERROR;                   // помощник PLAYER на ядре 1
   }
+  const size_t bytes = (stack < 2048 ? 2048 : stack) + kTaskOverhead;
+  {
+    std::lock_guard<std::mutex> lock(allocLock);
+    if (!internalTakeLocked(bytes)) {
+      fprintf(stderr, "internal: task stack %u not allocated (used %zu of %zu, block %zu)\n",
+              static_cast<unsigned>(stack), internalUsed, internalBudget, internalBlock);
+      return ZM_NO_MEMORY;             // как coreTaskStart прошивки: xTaskCreate не создал
+    }
+  }
   ++tasks;
-  std::thread([fn, arg] {
+  std::thread([fn, arg, bytes] {
     fn(arg);
+    std::lock_guard<std::mutex> lock(allocLock);
+    if (internalBudget != 0) internalUsed -= bytes;
     --tasks;
   }).detach();
   return ZM_OK;
 }
 
-void* coreMutexCreate() { return new std::mutex(); }
+bool syncTake() {
+  std::lock_guard<std::mutex> lock(allocLock);
+  return internalTakeLocked(kSyncBytes);
+}
+
+void* coreMutexCreate() { return syncTake() ? new std::mutex() : nullptr; }
 void coreMutexLock(void* mutex) { static_cast<std::mutex*>(mutex)->lock(); }
 void coreMutexUnlock(void* mutex) { static_cast<std::mutex*>(mutex)->unlock(); }
 
@@ -258,7 +321,7 @@ struct Signal {
   bool given = false;
 };
 
-void* coreSignalCreate() { return new Signal(); }
+void* coreSignalCreate() { return syncTake() ? new Signal() : nullptr; }
 
 void coreSignalGive(void* handle) {
   Signal* signal = static_cast<Signal*>(handle);
@@ -284,6 +347,14 @@ bool inCommand = false;
 int replyCode = -1;
 std::vector<uint8_t> replyData;
 int repliesOutside = 0;
+
+// app_done (ABI 1.6): как прошивка — только из command; ответив, ядро выгружает приложение.
+bool appDoneAsked = false;
+int appDones = 0;
+bool appUnloaded = false;              // выгружено по app_done: команд и второго stop больше нет
+void coreAppDone() {
+  if (inCommand) appDoneAsked = true;
+}
 
 int coreReply(uint8_t response, const void* data, uint16_t length) {
   if (!inCommand) {
@@ -462,6 +533,61 @@ uint8_t coreVolume() { return volume; }
 uint16_t corePcmFaults() { return 0; }
 
 int16_t coreTemperature() { return 475; }   // 47,5 °C: в AUDIO_STATUS — 48
+int coreUiAvailable() { return 1; }          // --ui 1: Tang с оверлеями есть (ABI 1.5)
+
+// --- LINK Tang (--ui 1): экран PLAYER (screen.cpp) пишет оверлей 1 и регион оверлеев ---------
+// Модель — то, что видит Tang: регистры оверлея 1 (CTRL, POS, SIZE, BASE с 0xD0), регион оверлеев
+// 131 072 слова (окно 0x80000…), каждое включение CTRL — его прозрачность. Запись куда-то ещё —
+// ошибка экрана.
+std::mutex linkLock;
+std::vector<uint32_t> tangRegion(131072, 0xDEADBEEF);
+std::vector<uint8_t> tangWritten(131072, 0);
+uint32_t ovlRegs[4] = {};
+std::vector<int> ovlAlphas;            // каждая запись CTRL: прозрачность или −1 (выкл.)
+long long writtenBeforeOn = -1;        // слов региона записано к первому включению оверлея
+long long linkWords = 0;
+long long wordsAtOn = -1;              // linkWords к первому включению: дальше — кадры
+int linkBad = 0;
+
+int coreLinkWrite(uint32_t address, const uint32_t* words, uint32_t count) {
+  std::lock_guard<std::mutex> lock(linkLock);
+  if (words == nullptr || (address & 3) != 0 || count == 0 || count > 16) {
+    ++linkBad;
+    return ZM_ERROR;                   // как coreLinkWrite прошивки
+  }
+  if (address >= 0x80000 && address < 0x100000) {
+    const uint32_t first = (address - 0x80000) / 4;
+    if (first + count > tangRegion.size()) {
+      ++linkBad;
+      return ZM_ERROR;
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+      tangRegion[first + i] = words[i];
+      tangWritten[first + i] = 1;
+    }
+    linkWords += count;
+    return ZM_OK;
+  }
+  if (address >= 0xD0 && address + 4 * count <= 0xE0) {
+    for (uint32_t i = 0; i < count; ++i) {
+      const uint32_t reg = (address - 0xD0) / 4 + i;
+      ovlRegs[reg] = words[i];
+      if (reg != 0) continue;
+      const bool on = (words[i] & 1) != 0;
+      ovlAlphas.push_back(on ? static_cast<int>((words[i] >> 4) & 15) : -1);
+      if (on && writtenBeforeOn < 0) {
+        wordsAtOn = linkWords;
+        writtenBeforeOn = 0;
+        for (uint8_t w : tangWritten) writtenBeforeOn += w;
+      }
+    }
+    return ZM_OK;
+  }
+  ++linkBad;
+  return ZM_ERROR;
+}
+
+int coreLinkRead(uint32_t, uint32_t*, uint32_t) { return ZM_ERROR; }   // экран Tang не читает
 
 // --- сеть (net_*): станции интернет-радио ------------------------------------------------
 // Любой адрес отдаёт --net-file (MP3) по кругу; с «Icy-MetaData: 1» — метаданные ICY
@@ -488,6 +614,15 @@ size_t netBurst = 0;
 size_t netStallAt = 0;
 uint32_t netStallMs = 0;
 uint32_t netJitterMs = 0;
+// Обложка из сети (online_cover.c): адреса api.deezer.com и *.dzcdn.net — подмена поиска
+// (--cover-json ФАЙЛ) и картинки (--cover-jpeg ФАЙЛ); без них — 404. В счёт соединений радио
+// (net_opens) не идут.
+std::string coverJson;
+std::vector<uint8_t> coverJpeg;
+int coverSearches = 0;
+int coverPictures = 0;
+std::string coverSearchUrl;
+std::string coverPictureUrl;
 std::mutex netLock;
 int netOpens = 0;
 int netCloses = 0;
@@ -504,6 +639,8 @@ struct FakeStream {
   std::vector<uint8_t> pending;        // метаданные к отдаче
   Clock::time_point opened = Clock::now();
   Clock::time_point stalled{};         // когда началась задержка (--net-stall-at)
+  bool isBody = false;                 // ответ сервиса обложек: тело целиком, потом конец
+  std::vector<uint8_t> body;
 };
 
 // Сколько байтов звука станция успела отдать к этому мгновению (--net-kbps).
@@ -531,6 +668,30 @@ size_t netAllowed(FakeStream* s) {
 void* coreNetOpen(const char* url, const char* extra, uint32_t timeoutMs, int* status) {
   (void)timeoutMs;
   std::lock_guard<std::mutex> lock(netLock);
+  const std::string address = url != nullptr ? url : "";
+  const bool search = address.rfind("https://api.deezer.com/", 0) == 0;
+  if (search || address.find(".dzcdn.net/") != std::string::npos) {
+    std::vector<uint8_t> data;
+    if (search) {
+      ++coverSearches;
+      coverSearchUrl = address;
+      data.assign(coverJson.begin(), coverJson.end());
+    } else {
+      ++coverPictures;
+      coverPictureUrl = address;
+      data = coverJpeg;
+    }
+    if (data.empty()) {
+      if (status != nullptr) *status = 404;
+      return nullptr;
+    }
+    FakeStream* s = new FakeStream;
+    s->isBody = true;
+    s->body = data;
+    s->headers = "content-length:" + std::to_string(data.size()) + "\n";
+    if (status != nullptr) *status = 200;
+    return s;
+  }
   ++netOpens;
   netUrls.push_back(url != nullptr ? url : "");
   if (status != nullptr) {
@@ -576,6 +737,14 @@ const char* coreNetHeader(void* stream, const char* name) {
 
 int netReadNow(FakeStream* s, void* data, uint32_t count) {
   uint8_t* out = static_cast<uint8_t*>(data);
+  if (s->isBody) {
+    const size_t left = s->body.size() - s->position;
+    if (left == 0) return -1;
+    const size_t part = count < left ? count : left;
+    memcpy(out, s->body.data() + s->position, part);
+    s->position += part;
+    return static_cast<int>(part);
+  }
   const size_t allowed = netAllowed(s);
   uint32_t done = 0;
   while (done < count && done < 4096) {
@@ -798,12 +967,21 @@ namespace {
 }
 
 std::vector<uint8_t> command(uint8_t code, const std::vector<uint8_t>& data = {}) {
+  if (appUnloaded) {
+    return {0xFF, 0xFF};                // приложения нет: команду ядро не знает
+  }
   inCommand = true;
   replyCode = -1;
   replyData.clear();
   const int result = app->command(code, data.empty() ? nullptr : data.data(),
                                   static_cast<uint16_t>(data.size()));
   inCommand = false;
+  if (appDoneAsked) {                   // ответ ушёл — выгрузить (ModuleApp::handleCommand)
+    appDoneAsked = false;
+    ++appDones;
+    appUnloaded = true;
+    app->stop();
+  }
   if (result != ZM_OK) {
     return {0xFF, 0xFF};                // команда не приложения: её выполнит ядро
   }
@@ -823,11 +1001,12 @@ struct Status {
   uint32_t free, queue;
   uint32_t rate;                      // с флагом ST_F_RATE_HIGH (бит 7 флагов) — +65536
   uint16_t bitrate, seconds, faults, errors, underruns, order, length;
+  uint8_t screen;                     // флаги экрана Tang (1.26, SCREEN_F_*)
 };
 
 Status status() {
   const std::vector<uint8_t> r = command(kStatus);
-  if (r.size() != 32) {
+  if (r.size() != 33) {
     fail("status of %u bytes", static_cast<unsigned>(r.size()));
   }
   Status s;
@@ -849,6 +1028,7 @@ Status status() {
   s.order = le16(&r[26]);
   s.length = le16(&r[28]);
   s.voices = r[30];
+  s.screen = r[32];
   return s;
 }
 
@@ -963,7 +1143,8 @@ std::vector<uint8_t> readFile(const char* path) {
 }
 
 void stopApp() {
-  app->stop();
+  if (!appUnloaded) app->stop();
+  print("app_dones", appDones);
   for (int wait = 0; wait < 200 && tasks != 0; ++wait) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
@@ -1003,6 +1184,8 @@ int main(int argc, char** argv) {
   size_t stopAt = 0;                    // --stop-at N: стоп посреди приёма модуля
   int pauseAt = 0;                      // --pause-at МС: пауза посреди модуля
   int noNet = 0;                        // --no-net 1: ядро без net_* (старая прошивка)
+  int uiOn = 0;                         // --ui 1: ядро с экраном оверлеем Tang (ui_available)
+  std::vector<uint8_t> uiFirst;         // --ui-block ФАЙЛ: первое тело AUDIO_STATUS (от плагина Z80)
   int waitMs = 15000;                   // --wait-ms: радио — столько ждать первого звука
   int listWait = 0;                     // --list-wait 1: радио — дождаться конца списка станций
   int coverWait = 0;                    // --cover-wait 1: обложка от декодера (флаг 64)
@@ -1037,6 +1220,8 @@ int main(int argc, char** argv) {
       else if (key == "--first") first = strtoul(value, nullptr, 10);
       else if (key == "--sized") sized = atoi(value);
       else if (key == "--psram") psramBudget = strtoul(value, nullptr, 10);
+      else if (key == "--internal") internalBudget = strtoul(value, nullptr, 10);
+      else if (key == "--internal-block") internalBlock = strtoul(value, nullptr, 10);
       else if (key == "--stop-at") stopAt = strtoul(value, nullptr, 10);
       else if (key == "--pause-at") pauseAt = atoi(value);
       else if (key == "--net-file") netFile = readFile(value);
@@ -1055,6 +1240,13 @@ int main(int argc, char** argv) {
       else if (key == "--pcm-ms") sink.capacityMs = strtoul(value, nullptr, 10);
       else if (key == "--view-sync") viewSync = atoi(value);
       else if (key == "--no-net") noNet = atoi(value);
+      else if (key == "--ui") uiOn = atoi(value);
+      else if (key == "--ui-block") uiFirst = readFile(value);
+      else if (key == "--cover-json") {
+        const std::vector<uint8_t> json = readFile(value);
+        coverJson.assign(json.begin(), json.end());
+      }
+      else if (key == "--cover-jpeg") coverJpeg = readFile(value);
       else if (key == "--wait-ms") waitMs = atoi(value);
       else if (key == "--list-wait") listWait = atoi(value);
       else if (key == "--cover-wait") coverWait = atoi(value);
@@ -1111,6 +1303,12 @@ int main(int argc, char** argv) {
     core.net_read = coreNetRead;
     core.net_close = coreNetClose;
   }
+  if (uiOn) {
+    core.link_read = coreLinkRead;
+    core.link_write = coreLinkWrite;
+    core.ui_available = coreUiAvailable;
+  }
+  core.app_done = coreAppDone;
 
   const zm_app_t* table = nullptr;
   char* args[3] = {const_cast<char*>("PLAYER.ELF"), reinterpret_cast<char*>(&core),
@@ -1230,6 +1428,157 @@ int main(int argc, char** argv) {
       if (!state) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     print("thumb_state", state);
+  } else if (scenario == "ui") {
+    // Экран оверлеем Tang (ABI 1.5): тело AUDIO_STATUS от плагина 1.19 → снимок ui_model;
+    // поток с меткой ID3 (досылается AUDIO_COVER с начала, как у плагина) и звуком после неё;
+    // файлу без своей обложки — обложка из сети (подмена Deezer), с флагом 64 окну Evo.
+    auto uiBlock = [](uint8_t flags, uint8_t page, const char* name, const char* state) {
+      std::vector<uint8_t> b = {1, flags, page, 3, 0, 10, 0, 0x40, 0xE2, 0x01, 0x00};   // 123456
+      b.insert(b.end(), name, name + strlen(name) + 1);
+      b.insert(b.end(), state, state + strlen(state) + 1);
+      return b;
+    };
+    static zm_ui_model_t m;
+    auto model = [&]() {
+      memset(&m, 0, sizeof(m));
+      m.size = sizeof(m);
+      return player_ui_model(&m);
+    };
+    // Экран рисует сам PLAYER: экрану прошивки снимка нет (ui_model, ui_cover — NULL)
+    print("ui_table", app->size >= offsetof(zm_app_t, ui_cover) + sizeof(app->ui_cover) &&
+                          (app->ui_model != nullptr || app->ui_cover != nullptr) ? 1 : 0);
+    print("ui_before_visible", model() == ZM_OK ? m.visible : -1);
+    command(kStatus, uiFirst.empty() ? uiBlock(1, 2, "CHILDREN.MP3", "Buffering") : uiFirst);
+    model();
+    print("ui_visible", m.visible);
+    print("ui_page", m.page);
+    print("ui_track", m.track);
+    print("ui_tracks", m.tracks);
+    print("ui_sent_kb", m.sent_kb);
+    printf("ui_file=%s\nui_status=%s\n", m.file, m.status);
+    // Метка ID3 в начале файла: её длина — из заголовка (синхробезопасные 7 бит)
+    size_t tag = 0;
+    if (file.size() >= 10 && memcmp(file.data(), "ID3", 3) == 0) {
+      tag = 10 + ((file[6] & 0x7F) << 21 | (file[7] & 0x7F) << 14 | (file[8] & 0x7F) << 7 |
+                  (file[9] & 0x7F));
+    }
+    const uint32_t streamSize = static_cast<uint32_t>(file.size() - tag);
+    const std::vector<uint8_t> opened = command(kOpen, {0, static_cast<uint8_t>(streamSize),
+        static_cast<uint8_t>(streamSize >> 8), static_cast<uint8_t>(streamSize >> 16),
+        static_cast<uint8_t>(streamSize >> 24), 4, 'M', 'P', '3'});
+    print("open", opened[0]);
+    print("open_screen", opened.size() >= 6 ? opened[5] : -1);
+    if (tag != 0) {
+      uint32_t want = 0;
+      uint8_t state = 0;
+      for (int feeds = 0; state == 0 && feeds < 2000; ++feeds) {
+        const size_t length = want < tag ? std::min<size_t>(1020, tag - want) : 0;
+        std::vector<uint8_t> data = {static_cast<uint8_t>(want), static_cast<uint8_t>(want >> 8),
+                                     static_cast<uint8_t>(want >> 16),
+                                     static_cast<uint8_t>(want >> 24)};
+        data.insert(data.end(), file.begin() + want, file.begin() + want + length);
+        const std::vector<uint8_t> r = command(kCover, data);
+        state = r[0];
+        want = le32(&r[1]);
+      }
+      print("tag_cover_state", state);
+    }
+    feed(file, tag, file.size(), block);
+    command(kClose, {1});
+    // Звук идёт: ждать 11 с позиции (обложку из сети PLAYER ищет через 10 с звука)
+    for (int wait = 0; wait < 3000; ++wait) {
+      const Status s = status();
+      if (s.seconds >= 11 || (s.flags & 1)) break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    command(kStatus, uiBlock(1, 0, "CHILDREN.MP3", ""));
+    model();
+    print("ui_view", m.view);
+    print("ui_count", m.count);
+    print("ui_state", m.state);
+    printf("ui_title=%s\nui_artist=%s\nui_format=%s\n", m.title, m.artist, m.format);
+    print("ui_volume", m.volume);
+    print("ui_temperature", m.temperature);
+    print("ui_played_ms", m.played_ms);
+    int flag = 0;
+    for (int wait = 0; wait < 600 && !flag; ++wait) {
+      flag = (status().flags >> 6) & 1;
+      if (!flag) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    print("cover_flag", flag);
+    {
+      std::lock_guard<std::mutex> lock(netLock);
+      print("cover_searches", coverSearches);
+      print("cover_pictures", coverPictures);
+      printf("cover_search_url=%s\ncover_picture_url=%s\n", coverSearchUrl.c_str(),
+             coverPictureUrl.c_str());
+    }
+    int serial = 0;
+    for (int wait = 0; wait < 400 && serial == 0; ++wait) {
+      model();
+      serial = m.cover_serial;
+      if (!serial) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    print("ui_cover_serial", serial);
+    static uint16_t pixels[160 * 160];
+    const int coverResult = cover_ui_copy(pixels, 160) ? ZM_OK : ZM_NOT_FOUND;
+    print("ui_cover", coverResult);
+    print("ui_cover_pixel", coverResult == ZM_OK ? pixels[0] : -1);
+    print("ui_cover_corner", coverResult == ZM_OK ? pixels[160 * 160 - 1] : -1);
+    // Экран PLAYER (screen.cpp: задача обложек сама ведёт оверлей 1) → LINK → Tang (модель).
+    // Звук ещё идёт, плагин спрашивает состояние раз в 200 мс.
+    {
+      const std::vector<uint8_t> body = uiFirst.empty() ? uiBlock(1, 0, "CHILDREN.MP3", "") : uiFirst;
+      int flags = 0;
+      for (int t = 0; t < 15; ++t) {
+        const std::vector<uint8_t> r = command(kStatus, body);
+        if (r.size() > 32) flags |= r[32];
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+      }
+      {
+        std::lock_guard<std::mutex> lock(linkLock);
+        print("chain_ctrl", ovlRegs[0]);
+        print("chain_pos", ovlRegs[1]);
+        print("chain_size", ovlRegs[2]);
+        print("chain_base", ovlRegs[3]);
+        std::string alphas;
+        for (size_t i = 0; i < ovlAlphas.size() && i < 24; ++i) {
+          alphas += (i ? "," : "") + std::to_string(ovlAlphas[i]);
+        }
+        printf("chain_alphas=%s\n", alphas.c_str());
+        print("chain_written_before_on", writtenBeforeOn);
+        long long inside = 0, outside = 0;
+        for (size_t i = 0; i < tangWritten.size(); ++i) {
+          if (tangWritten[i]) (i >= ovlRegs[3] ? inside : outside) += 1;
+        }
+        print("chain_written", inside);
+        print("chain_outside", outside);
+        print("chain_frame_words", wordsAtOn < 0 ? -1 : linkWords - wordsAtOn);
+        print("chain_bad", linkBad);
+      }
+      print("chain_flags", flags);
+      std::vector<uint8_t> leave = body;
+      leave[1] |= 2;                                // флаг ухода, как на выходе плагина
+      size_t before = 0;
+      {
+        std::lock_guard<std::mutex> lock(linkLock);
+        before = ovlAlphas.size();
+      }
+      command(kStatus, leave);              // ответ, затем выгрузка: stop гасит экран плавно
+      {
+        std::lock_guard<std::mutex> lock(linkLock);
+        print("chain_left_on", ovlRegs[0] & 1);
+        std::string alphas;
+        for (size_t i = before; i < ovlAlphas.size(); ++i) {
+          alphas += (i != before ? "," : "") + std::to_string(ovlAlphas[i]);
+        }
+        printf("chain_left_alphas=%s\n", alphas.c_str());
+      }
+      print("chain_app_dones", appDones);
+    }
+    command(kStatus, uiBlock(3, 0, "CHILDREN.MP3", ""));
+    model();
+    print("ui_left_visible", m.visible);
   } else if (scenario == "cover") {
     print("open", command(kOpen, {0})[0]);
     uint32_t want = 0;
@@ -1769,6 +2118,7 @@ int main(int argc, char** argv) {
   {
     std::lock_guard<std::mutex> lock(allocLock);
     print("psram_peak", static_cast<long long>(psramPeak));
+    print("internal_peak", static_cast<long long>(internalPeak));
     print("xmp_peak", static_cast<long long>(xmpPeak));
   }
   stopApp();

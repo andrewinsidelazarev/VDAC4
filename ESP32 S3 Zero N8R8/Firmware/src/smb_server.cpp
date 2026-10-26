@@ -1813,9 +1813,11 @@ bool SmbServer::Impl::start(const uint8_t* payload, uint16_t length,
   lastServeResult = 0;
   taskAlive = true;
   runningFlag = false;
-  if (xTaskCreatePinnedToCore(taskEntry, "zifi-smb", kSmbTaskStackBytes, this,
-                              kSmbTaskPriority, &task,
-                              kSmbTaskCore) != pdPASS) {
+  // стек 24 КБ — в PSRAM: во внутренней памяти с SMB не оставалось места задачам плеера (PLAYER
+  // не запускался); задача flash ESP не трогает — файлы идут через обмен с Z80, журнал — очередью
+  if (xTaskCreatePinnedToCoreWithCaps(taskEntry, "zifi-smb", kSmbTaskStackBytes, this,
+                                      kSmbTaskPriority, &task, kSmbTaskCore,
+                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
     taskAlive = false;
     task = nullptr;
     directoryCache.clear();
@@ -1933,7 +1935,7 @@ void SmbServer::Impl::taskLoop() {
   taskAlive = false;
   task = nullptr;
   diagnosticLogEvent("SMB task-exit");
-  vTaskDelete(nullptr);
+  vTaskDeleteWithCaps(nullptr);           // создана WithCaps: стек в PSRAM освободит задача очистки
 }
 
 void SmbServer::Impl::newClient(smb2_context* smb2, void* context) {

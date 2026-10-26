@@ -1,0 +1,97 @@
+{
+  "method": "sum(operation_count * assumed_cycles) + 10000 cycles/frame",
+  "clock_mhz": 240,
+  "assumed_cycles": {
+    "put": 18,
+    "stores": 20,
+    "dither": 65,
+    "background": 14,
+    "placeholder": 40,
+    "round": 15,
+    "restore": 6,
+    "glyph": 12,
+    "alpha": 45,
+    "hash": 6,
+    "copied": 2,
+    "formats": 1500
+  },
+  "uncertainty": "Roughly x0.5..x2, not a confidence interval or hard bound; PSRAM/cache/interrupts unmeasured",
+  "estimates": {
+    "normal": {
+      "frames": 1000,
+      "mean_ms": 3.397859508333333,
+      "max_ms": 3.9718791666666666,
+      "mean_counts": {
+        "put": 12225.842,
+        "stores": 10648.664,
+        "dither": 5073.528,
+        "background": 0.0,
+        "placeholder": 0.0,
+        "round": 0.0,
+        "restore": 6898.216,
+        "glyph": 25.92,
+        "alpha": 6.982,
+        "hash": 99.0,
+        "copied": 0.0,
+        "formats": 0.04
+      }
+    },
+    "stress": {
+      "frames": 1000,
+      "mean_ms": 2.1180417250000003,
+      "max_ms": 4.303308333333334,
+      "mean_counts": {
+        "put": 7936.752,
+        "stores": 6422.708,
+        "dither": 3036.8,
+        "background": 0.0,
+        "placeholder": 0.0,
+        "round": 0.0,
+        "restore": 4723.848,
+        "glyph": 25.92,
+        "alpha": 6.982,
+        "hash": 99.0,
+        "copied": 0.0,
+        "formats": 0.04
+      }
+    },
+    "full_cover": {
+      "frames": 1,
+      "mean_ms": 42.617583333333336,
+      "max_ms": 42.617583333333336,
+      "mean_counts": {
+        "put": 120157.0,
+        "stores": 97548.0,
+        "dither": 6176.0,
+        "background": 230400.0,
+        "placeholder": 0.0,
+        "round": 77248.0,
+        "restore": 21517.0,
+        "glyph": 28899.0,
+        "alpha": 8242.0,
+        "hash": 99.0,
+        "copied": 230400.0,
+        "formats": 7.0
+      }
+    },
+    "full_placeholder": {
+      "frames": 1,
+      "mean_ms": 58.927195833333336,
+      "max_ms": 58.927195833333336,
+      "mean_counts": {
+        "put": 121036.0,
+        "stores": 98427.0,
+        "dither": 41732.0,
+        "background": 230400.0,
+        "placeholder": 36852.0,
+        "round": 78548.0,
+        "restore": 21517.0,
+        "glyph": 31569.0,
+        "alpha": 9223.0,
+        "hash": 99.0,
+        "copied": 230400.0,
+        "formats": 7.0
+      }
+    }
+  }
+}

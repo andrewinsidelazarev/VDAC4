@@ -29,13 +29,33 @@
  * METADATA_BLOCK_PICTURE, zm_host_t::cover), сводит тот же код, а флаг 64 в
  * AUDIO_STATUS зовёт плагин за миниатюрой. Окну проигрывателя AUDIO_VIEW отдаёт спектр (view.c) или уровни
  * каналов модуля, позицию и длительность.
+ *
+ * Экран оверлеем Tang (1.21, ABI приложений 1.5): с Tang на LINK весь интерфейс проигрывателя
+ * рисуется поверх картинки Evo. С 1.26 его ведёт сам PLAYER (screen.cpp, задача обложек на ядре 0
+ * с приоритетом 1 — ниже обмена с Evo и декодера: оверлей 1 через
+ * core->link_write — размер, место, масштаб, прозрачность — здесь, прошивка о плеере не знает);
+ * экрану прошивки снимка больше нет (ui_model, ui_cover в таблице — NULL). Снимок — ui_model
+ * (zm_ui_model_t), обложка — 256×256 RGB565 (cover_glue.cpp), спектр — 64 полосы по 256 уровней
+ * (view.c). Что знает только плагин — имя файла, номер трека, открытое окно поверх, строку
+ * состояния, — он шлёт в теле AUDIO_STATUS (плагин 1.19; прежний PLAYER тело не читал). Экран
+ * виден, пока окно плагина открыто и плагин спрашивает состояние: молчит дольше UI_ALIVE_MS —
+ * экран уходит (сброс Evo), флаг ухода — сразу. Есть ли экран, плагин 1.21 узнаёт из ответов
+ * AUDIO_OPEN и AUDIO_STATUS (SCREEN_F_*): тогда своего окна на Evo не рисует и спектр, метки и
+ * миниатюру по SPI не спрашивает.
+ *
+ * Обложка из сети (1.21, online_cover.c): у файла потоком без своей обложки (ни в метке, ни в
+ * папке, ни у декодера) через ONLINE_AFTER_MS звука и у каждой песни радио — по исполнителю и
+ * названию в Deezer. Найденная идёт тем же путём, что обложка от декодера: миниатюра окна Evo
+ * (флаг 64) и экран Tang.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "online_cover.h"
 #include "player_cover.h"
 #include "radio_list.h"
+#include "screen.h"
 #include "view.h"
 #include "zm_app.h"
 #include "zm_source.h"
@@ -60,7 +80,7 @@ enum { FMT_NONE = 0, FMT_MP3 = 1, FMT_MOD = 2, FMT_XM = 3, FMT_S3M = 4, FMT_IT =
 #define SKIP_TITLE "Cannot play this file, skipping"   /* название на это время */
 #define MIDI_BANK "MIDI.SF2"
 #define OPL4_ROM "YRW801.ROM"
-#define STATUS_SIZE 32
+#define STATUS_SIZE 33                     /* 33-й байт — флаги экрана Tang (1.26, SCREEN_F_*) */
 
 #define RING_BYTES (128u * 1024u)         /* очередь потока с карты: 8 с при 128 кбит/с, 3 с при 320 */
 #define START_BUFFER (96u * 1024u)         /* до начала звука */
@@ -110,8 +130,24 @@ enum { FMT_NONE = 0, FMT_MP3 = 1, FMT_MOD = 2, FMT_XM = 3, FMT_S3M = 4, FMT_IT =
 #define RADIO_LIST_ROWS 7                  /* строки столбиков и строка чисел окна Z80 */
 #define RADIO_LIST_WIDTH 63                /* знаков в строке: столбики — столбцы 2..64 */
 #define WORKER_STACK 4096
-#define VIEW_PERIOD_MS 50                  /* уровни каналов — 20 раз в секунду */
+#define VIEW_PERIOD_MS 40                  /* уровни каналов — на кадр экрана (25 в секунду) */
 #define VIEW_CHANNELS 32
+/* Тело AUDIO_STATUS от плагина 1.19 (экран оверлеем Tang): [версия 1][флаги][окно поверх]
+ * [номер LE16][из LE16][отдано ESP, байт LE32][имя файла, 0][строка состояния, 0] — CP866. */
+#define UI_BLOCK_VERSION 1
+#define UI_BLOCK_HEAD 11
+#define UI_F_OPEN 1                        /* окно плагина открыто */
+#define UI_F_LEAVING 2                     /* плагин уходит в Wild Commander (Esc, ошибка, конец) */
+#define UI_ALIVE_MS 4000                   /* между файлами панели плагин молчит до ~2 с */
+/* Обложка из сети. */
+#define ONLINE_AFTER_MS 10000              /* файлу: своя обложка (метка, папка) приходит раньше */
+#define ONLINE_POLL_MS 500
+#define ONLINE_STACK 6144                  /* как у задачи радио: net_* по HTTPS */
+#define ONLINE_PRIORITY 0                  /* ядро 0, ниже всех (1.29): рукопожатие TLS — сотни мс
+                                              расчётов; выше обмена с Evo (ядро 1, loopTask, 1) оно
+                                              его останавливало (1.21…1.26: ядро 1, приоритет 3),
+                                              а экрану и звуку обложка не важнее их самих */
+#define ONLINE_STOP_MS 14000               /* ждать выхода: запрос сети — до 8 с, чтение — до 4 с */
 enum { VIEW_NONE = 0, VIEW_SPECTRUM = 1, VIEW_CHANNEL_LEVELS = 2, VIEW_STATIONS = 3 };
 
 typedef struct {
@@ -180,6 +216,12 @@ typedef struct {
   uint32_t rest_ms;                       /* когда задача декодера последний раз отдавала ядро */
   uint64_t render_cycles;                 /* такты render за песню (с вытеснением другими задачами) */
   uint32_t render_worst;                  /* худший render: тактов на кадр */
+  /* Приём потока от Z80 (AUDIO_DATA) — для журнала: сколько, за сколько, сколько раз очередь
+   * была полна (плагин ждал — данных хватало). */
+  uint32_t in_bytes;
+  uint32_t in_first_ms;
+  uint32_t in_last_ms;
+  uint32_t in_full;
   float* frames;
   char info_track[16];                    /* дополнительные метки декодера */
   zm_info_t info;                         /* снимок для Z80, пишет задача под lock */
@@ -187,6 +229,29 @@ typedef struct {
   uint32_t view_ms;                       /* когда пересчитаны уровни каналов */
   volatile uint8_t level_count;           /* уровни каналов модуля, 0..VIEW_LEVELS */
   uint8_t levels[VIEW_CHANNELS];
+  uint8_t ui_levels[VIEW_CHANNELS];       /* они же 0..255 — экрану */
+
+  /* Экран оверлеем Tang: что прислал плагин в теле AUDIO_STATUS (под ui_lock). */
+  void* ui_lock;
+  uint32_t ui_ms;                         /* когда пришло; 0 — ещё не было */
+  uint8_t ui_flags;
+  uint8_t ui_page;
+  uint16_t ui_track;
+  uint16_t ui_tracks;
+  uint32_t ui_sent;
+  char ui_file[ZM_UI_TEXT];
+  char ui_status[ZM_UI_TEXT];
+
+  /* Обложка из сети: разовая задача на ядре 1 (1.25) — живёт, только пока ищет. */
+  volatile int online_quit;
+  volatile int online_running;            /* задача поиска идёт */
+  int online_net;                         /* у ядра есть потоки HTTP(S) (ABI minor 2) */
+  uint8_t online_said;                    /* файлу уже сказано в журнал, что искать нечего */
+  uint32_t online_checked;                /* когда задача декодера смотрела в последний раз */
+  uint32_t online_epoch;                  /* cover_epoch() на запрос */
+  char online_last[ZM_UI_TEXT * 2 + 2];   /* песня, которую уже искали */
+  char online_artist[ZM_UI_TEXT];         /* запрос задаче */
+  char online_title[ZM_UI_TEXT];
 
   /* Помощник декодеров на ядре 1 (host.worker_start): одна работа за раз. */
   void* worker_go;                        /* работа есть (или пора выйти) */
@@ -633,6 +698,13 @@ static void report(const char* what) {
               (unsigned)(P->render_worst * 100u / budget), (unsigned)average,
               (unsigned)P->render_worst, (unsigned)budget);
   }
+  /* Скорость приёма: очередь ни разу не была полна — звук ждал данных, это предел передачи */
+  if (P->in_bytes != 0) {
+    const uint32_t ms = P->in_last_ms - P->in_first_ms;
+    core->log("player: input %u KB in %u ms (%u KB/s), queue full %u times", (unsigned)(P->in_bytes >> 10),
+              (unsigned)ms, (unsigned)(ms != 0 ? (uint32_t)((uint64_t)P->in_bytes * 1000u / ms >> 10) : 0),
+              (unsigned)P->in_full);
+  }
 }
 
 /* Буфер начала — прочь. */
@@ -748,6 +820,7 @@ static void update_levels(void) {
   }
   for (int c = 0; c < count; ++c) {
     P->levels[c] = (uint8_t)((raw[c] * VIEW_LEVELS + 127) / 255);
+    P->ui_levels[c] = raw[c];
   }
   P->level_count = (uint8_t)count;
 }
@@ -1343,9 +1416,12 @@ static void radio_tags_reply(void) {
 }
 
 /* Задача плеера: декодер → PCM ядру. */
+static void online_poll(void);          /* обложка из сети: ниже */
+
 static void decode_task(void* arg) {
   (void)arg;
   while (!P->stop) {
+    online_poll();
     if (P->radio && P->radio_restart != 0) {
       /* Радио: новое соединение (или смена станции) — прежний звук прочь,
        * декодер заново (поток начинается не с начала кадра) и того кодека,
@@ -1731,16 +1807,21 @@ static int open_stream_module(uint32_t size) {
   return 1;
 }
 
+/* [итог][свободно LE32][флаги экрана Tang] — шестой байт с 1.26: плагин 1.21 по нему решает,
+ * рисовать ли своё окно на Evo; прежний плагин лишнего байта не читает. */
 static void reply_open(int ok) {
-  uint8_t reply[5];
+  uint8_t reply[6];
   reply[0] = (uint8_t)ok;
   le32(reply + 1, free_space());
-  core->reply(RESPONSE(AUDIO_OPEN), reply, 5);
+  reply[5] = screen_flags();
+  core->reply(RESPONSE(AUDIO_OPEN), reply, 6);
 }
 
 static void command_open(const uint8_t* data, uint16_t length) {
   stop_all();
   cover_reset();
+  P->in_bytes = P->in_full = 0;
+  P->online_said = 0;
   P->finished = 0;
   P->stream_size = 0;
   memset(P->file_type, 0, sizeof(P->file_type));
@@ -1890,9 +1971,14 @@ static void command_data(const uint8_t* data, uint16_t length) {
     reply[0] = 2;
   } else if (length > ring_free()) {
     reply[0] = 0;                        /* блок целиком или никак: Z80 повторит */
+    ++P->in_full;
   } else {
     ring_write(data, length);
     reply[0] = 1;
+    const uint32_t now = core->millis();
+    if (P->in_bytes == 0) P->in_first_ms = now;
+    P->in_bytes += length;
+    P->in_last_ms = now;
   }
   le32(reply + 1, free_space());
   core->reply(RESPONSE(AUDIO_DATA), reply, 5);
@@ -1912,7 +1998,42 @@ static void command_close(const uint8_t* data, uint16_t length) {
   core->reply(RESPONSE(AUDIO_CLOSE), &ok, 1);
 }
 
-static void command_status(void) {
+/* Тело AUDIO_STATUS — для экрана (UI_BLOCK_*). Строки — до нуля и не длиннее поля.
+ * Выход: флаги тела (UI_F_*) или −1 — тела нет. */
+static int take_ui_block(const uint8_t* data, uint16_t length) {
+  if (length < UI_BLOCK_HEAD || data[0] != UI_BLOCK_VERSION || P->ui_lock == NULL) {
+    return -1;
+  }
+  const char* texts[2] = {"", ""};
+  size_t sizes[2] = {0, 0};
+  uint16_t at = UI_BLOCK_HEAD;
+  for (int i = 0; i < 2 && at < length; ++i) {
+    texts[i] = (const char*)data + at;
+    while (at < length && data[at] != 0) {
+      ++at;
+      ++sizes[i];
+    }
+    ++at;                                 /* нуль */
+  }
+  core->mutex_lock(P->ui_lock);
+  P->ui_ms = core->millis() | 1u;         /* не ноль */
+  P->ui_flags = data[1];
+  P->ui_page = data[2];
+  P->ui_track = (uint16_t)(data[3] | (data[4] << 8));
+  P->ui_tracks = (uint16_t)(data[5] | (data[6] << 8));
+  P->ui_sent = rd32(data + 7);
+  char* fields[2] = {P->ui_file, P->ui_status};
+  for (int i = 0; i < 2; ++i) {
+    const size_t n = sizes[i] < ZM_UI_TEXT - 1 ? sizes[i] : ZM_UI_TEXT - 1;
+    memcpy(fields[i], texts[i], n);
+    fields[i][n] = 0;
+  }
+  core->mutex_unlock(P->ui_lock);
+  return data[1];
+}
+
+static void command_status(const uint8_t* data, uint16_t length) {
+  const int ui = take_ui_block(data, length);
   uint8_t r[STATUS_SIZE];
   memset(r, 0, sizeof(r));
   r[0] = P->state;
@@ -1949,7 +2070,15 @@ static void command_status(void) {
       r[31] = (uint8_t)(celsius < 1 ? 1 : (celsius > 255 ? 255 : celsius));
     }
   }
+  r[32] = screen_flags();
   core->reply(RESPONSE(AUDIO_STATUS), r, STATUS_SIZE);
+  /* Плагин ушёл в Wild Commander (флаг ухода; к соседнему файлу его нет): PLAYER больше не
+   * нужен — ядро выгрузит его после этого ответа и отдаст всю память ESP (ABI 1.6). Экран Tang
+   * уходит плавно — в stop (screen_end). */
+  if (ui >= 0 && (ui & UI_F_LEAVING) != 0 &&
+      core->size >= offsetof(zm_core_t, app_done) + sizeof(core->app_done) && core->app_done != NULL) {
+    core->app_done();
+  }
 }
 
 static void command_seek(const uint8_t* data, uint16_t length) {
@@ -2261,7 +2390,7 @@ static int command(uint8_t cmd, const uint8_t* data, uint16_t length) {
     case AUDIO_OPEN: command_open(data, length); return ZM_OK;
     case AUDIO_DATA: command_data(data, length); return ZM_OK;
     case AUDIO_CLOSE: command_close(data, length); return ZM_OK;
-    case AUDIO_STATUS: command_status(); return ZM_OK;
+    case AUDIO_STATUS: command_status(data, length); return ZM_OK;
     case AUDIO_VOLUME: {
       if (length != 0) {
         core->set_volume(data[0]);
@@ -2290,21 +2419,378 @@ static int command(uint8_t cmd, const uint8_t* data, uint16_t length) {
   }
 }
 
+/* --- экран оверлеем Tang (ABI 1.5) ------------------------------------------------------ */
+
+static void copy_text(char* out, size_t size, const char* text) {
+  const size_t n = strnlen(text, size - 1);
+  memcpy(out, text, n);
+  out[n] = 0;
+}
+
+/* «MP3  128 kbps  44.1 kHz  stereo» — как в окне плагина. */
+static void stream_format(char* out, size_t size, const char* codec, uint32_t rate, unsigned kbps,
+                          uint8_t channels) {
+  const unsigned tenths = (unsigned)(rate % 1000) / 100;
+  char khz[16];
+  if (tenths != 0) {
+    snprintf(khz, sizeof(khz), "%u.%u", (unsigned)rate / 1000, tenths);
+  } else {
+    snprintf(khz, sizeof(khz), "%u", (unsigned)rate / 1000);
+  }
+  snprintf(out, size, "%s  %u kbps  %s kHz  %s", codec, kbps, khz, channels == 1 ? "mono" : "stereo");
+}
+
+/* Строки формата и подробностей экрана — как в окне плагина (ui.asm, Ui_DrawFormat и
+ * Ui_DrawThird): поток, модуль, MIDI, микросхемы, радио. */
+static void ui_format(zm_ui_model_t* m) {
+  const char* ext = P->file_type[0] != 0 ? P->file_type : "MP3";
+  if (P->radio) {
+    char codec[12];
+    size_t letters = 0;
+    while (letters + 1 < sizeof(codec) && P->info.format[letters] > ' ') {
+      codec[letters] = P->info.format[letters];
+      ++letters;
+    }
+    codec[letters] = 0;
+    if (P->info.rate != 0) {
+      char line[ZM_UI_TEXT - 5];          /* за «M3U  » */
+      stream_format(line, sizeof(line), codec, P->info.rate,
+                    P->info.bitrate != 0 ? P->info.bitrate : P->radio_kbps, P->info.channels);
+      snprintf(m->format, sizeof(m->format), "M3U  %s", line);
+    } else {
+      copy_text(m->format, sizeof(m->format), "M3U");
+    }
+    return;
+  }
+  if (P->stream_open || P->format == FMT_MP3) {
+    const char* name = strcmp(ext, "FLA") == 0 ? "FLAC" : ext;
+    if (P->decoded) {
+      stream_format(m->format, sizeof(m->format), name, P->rate, P->info.bitrate, P->channels);
+    } else {
+      copy_text(m->format, sizeof(m->format), name);
+    }
+    return;
+  }
+  if (!P->decoded) {
+    copy_text(m->format, sizeof(m->format), ext);
+    return;
+  }
+  switch (P->format) {
+    case FMT_MOD: case FMT_XM: case FMT_S3M: case FMT_IT: {
+      static const char* const names[] = {"MOD", "XM", "S3M", "IT"};
+      snprintf(m->format, sizeof(m->format), "%s  %u channels  %u positions",
+               names[P->format - FMT_MOD], (unsigned)P->info.voices, (unsigned)P->info.order_length);
+      if (P->info.samples != 0 || P->info.effects != 0) {
+        snprintf(m->detail, sizeof(m->detail), "Samples: %u  Effects: %u",
+                 (unsigned)P->info.samples, (unsigned)P->info.effects);
+      }
+      return;
+    }
+    case FMT_MIDI:
+      snprintf(m->format, sizeof(m->format), "MIDI  %u channels", (unsigned)P->info.voices);
+      if (P->info.samples != 0 || P->info.effects != 0) {
+        snprintf(m->detail, sizeof(m->detail), "Instruments: %u  Tracks: %u",
+                 (unsigned)P->info.samples, (unsigned)P->info.effects);
+      }
+      return;
+    default: {
+      /* OPL, SAA, TSFM: «VGZ  YMF262 (OPL3)»; у MWM — набор волн в подробностях. */
+      const char* chips = strncmp(P->info.format, "OPL ", 4) == 0 ? P->info.format + 4 : P->info.format;
+      char chip[sizeof(P->info.format)];
+      copy_text(chip, sizeof(chip), chips);
+      snprintf(m->format, sizeof(m->format), "%s  %s", ext, chip);
+      if (P->kit[0] != 0) {
+        snprintf(m->detail, sizeof(m->detail), "Kit %s", P->kit);
+      }
+      return;
+    }
+  }
+}
+
+/* Метки экрана: радио — станция и песня (или её состояние), поток — ID3 и что нашёл декодер,
+ * файл целиком — метки модуля (как AUDIO_TAGS). */
+static void ui_tags(zm_ui_model_t* m) {
+  if (P->radio) {
+    char from_decoder[sizeof(P->info.artist) + 3 + sizeof(P->info.title)];
+    radio_decoder_song(from_decoder, sizeof(from_decoder));
+    core->mutex_lock(P->radio_lock);
+    const radio_station_t* s = &P->stations[P->station < P->station_count ? P->station : 0];
+    const char* name = s->title[0] != 0 ? s->title : (P->radio_name[0] != 0 ? P->radio_name : s->url);
+    text_cp866(name, m->station, sizeof(m->station));
+    text_cp866(P->radio_song[0] != 0 ? P->radio_song : from_decoder, m->title, sizeof(m->title));
+    if (P->radio_state[0] != 0) {
+      text_cp866(P->radio_state, m->status, sizeof(m->status));
+    } else if (m->title[0] == 0) {
+      text_cp866(P->radio_about, m->album, sizeof(m->album));
+    }
+    m->track = (uint16_t)(P->station + 1);
+    m->tracks = P->station_count;
+    core->mutex_unlock(P->radio_lock);
+    return;
+  }
+  player_tags_t tags;
+  memset(&tags, 0, sizeof(tags));
+  if (P->stream_open || P->format == FMT_MP3) {
+    stream_tags(&tags);
+  } else if (P->state == ST_PLAYING || P->state == ST_DRAINING) {
+    text_cp866(P->info.title, tags.title, sizeof(tags.title));
+    text_cp866(P->info.artist, tags.artist, sizeof(tags.artist));
+    text_cp866(P->info.album, tags.album, sizeof(tags.album));
+    if (P->info.year != 0) {
+      snprintf(tags.year, sizeof(tags.year), "%u", (unsigned)P->info.year);
+    }
+  }
+  copy_text(m->title, sizeof(m->title), tags.title);
+  copy_text(m->artist, sizeof(m->artist), tags.artist);
+  copy_text(m->album, sizeof(m->album), tags.album);
+  copy_text(m->year, sizeof(m->year), tags.year);
+}
+
+/* Станции для списка экрана (пока их листают — как AUDIO_VIEW окна Z80). */
+static void ui_stations(zm_ui_model_t* m) {
+  core->mutex_lock(P->radio_lock);
+  const int count = P->station_count < ZM_UI_STATIONS ? P->station_count : ZM_UI_STATIONS;
+  for (int i = 0; i < count; ++i) {
+    const radio_station_t* s = &P->stations[i];
+    text_cp866(s->title[0] != 0 ? s->title : s->url, m->stations[i], sizeof(m->stations[i]));
+  }
+  m->count = (uint8_t)count;
+  m->current = (uint8_t)(P->station < count ? P->station : 0);
+  core->mutex_unlock(P->radio_lock);
+}
+
+/* Снимок экрана: зовёт экран (screen.cpp, задача обложек на ядре 0) 25–50 раз в секунду. Замки — короткие
+ * (ui_lock, radio_lock, замок спектра); снимок декодера (P->info) читается без замка, как в
+ * AUDIO_STATUS. */
+static int ui_model(zm_ui_model_t* model) {
+  if (P == NULL || P->ui_lock == NULL || model == NULL) {
+    return ZM_ERROR;
+  }
+  static zm_ui_model_t m;
+  memset(&m, 0, sizeof(m));
+  m.size = sizeof(m);
+  const uint32_t now = core->millis();
+  core->mutex_lock(P->ui_lock);
+  /* Метка — millis | 1 (не ноль): она бывает на 1 мс впереди — разность со знаком. */
+  const int alive = P->ui_ms != 0 && (int32_t)(now - P->ui_ms) < UI_ALIVE_MS;
+  m.visible = (uint8_t)(alive && (P->ui_flags & UI_F_OPEN) != 0 && (P->ui_flags & UI_F_LEAVING) == 0);
+  m.page = P->ui_page <= ZM_UI_PAGE_INFO ? P->ui_page : ZM_UI_PAGE_MAIN;
+  m.track = P->ui_track;
+  m.tracks = P->ui_tracks;
+  m.sent_kb = P->ui_sent / 1024u;
+  copy_text(m.file, sizeof(m.file), P->ui_file);
+  copy_text(m.status, sizeof(m.status), P->ui_status);
+  core->mutex_unlock(P->ui_lock);
+
+  m.radio = (uint8_t)(P->radio != 0);
+  ui_tags(&m);
+  ui_format(&m);
+  if (strncmp(m.status, "ERROR", 5) == 0) {
+    m.state = ZM_UI_ERROR;
+  } else if (P->module_loading || P->state == ST_LOADING) {
+    m.state = ZM_UI_LOADING;
+    m.load_percent = (uint8_t)(P->file_size != 0 ? (uint64_t)P->file_written * 100u / P->file_size : 0);
+  } else if (P->paused) {
+    m.state = ZM_UI_PAUSED;
+  } else if (P->buffering && (P->stream_open || P->radio)) {
+    m.state = ZM_UI_BUFFERING;
+  } else if (P->state == ST_PLAYING) {
+    m.state = ZM_UI_PLAYING;
+  } else if (P->state == ST_DRAINING) {
+    m.state = ZM_UI_FINISHING;
+  } else {
+    m.state = ZM_UI_IDLE;
+  }
+  m.duration_ms = P->radio ? 0 : P->info.duration_ms;
+  m.played_ms = played_ms();
+  if (m.duration_ms != 0 && m.played_ms > m.duration_ms) {
+    m.played_ms = m.duration_ms;         /* MIDI доигрывает отпускание нот, VBR — оценка */
+  }
+  m.volume = (uint8_t)((core->volume() * 100u + 127u) / 255u);
+  m.temperature = ZM_UI_TEMPERATURE_UNKNOWN;
+  if (core->size >= offsetof(zm_core_t, temperature) + sizeof(core->temperature) &&
+      core->temperature != NULL) {
+    const int tenths = core->temperature();
+    if (tenths != ZM_TEMPERATURE_UNKNOWN) {
+      const int celsius = (tenths + (tenths >= 0 ? 5 : -5)) / 10;
+      m.temperature = (int8_t)(celsius > 127 ? 127 : (celsius < -127 ? -127 : celsius));
+    }
+  }
+  if (P->radio && P->radio_list_ms != 0 &&
+      (int32_t)(now - P->radio_list_ms) < RADIO_LIST_MS) {
+    m.view = ZM_UI_VIEW_STATIONS;
+    ui_stations(&m);
+  } else if (P->decoded && (P->state == ST_PLAYING || P->state == ST_DRAINING)) {
+    if (spectrum_view()) {
+      m.view = ZM_UI_VIEW_SPECTRUM;
+      m.count = VIEW_UI_BANDS;
+      view_ui_bands(m.level, P->paused);
+    } else {
+      m.view = ZM_UI_VIEW_CHANNELS;
+      m.count = P->level_count;
+      memcpy(m.level, P->ui_levels, m.count);
+    }
+  }
+  m.queue_bytes = P->stream_open ? ring_available() : 0;
+  m.faults_decode = (uint16_t)(P->info.errors > 0xFFFF ? 0xFFFF : P->info.errors);
+  m.faults_starve = P->underruns;
+  m.faults_i2s = core->pcm_faults();
+  m.cover_serial = cover_ui_serial();
+  /* Ядро моложе приложения — только поля, что помещаются в его снимок. */
+  const size_t size = model->size < sizeof(m) ? model->size : sizeof(m);
+  const uint16_t own = model->size;
+  memcpy(model, &m, size);
+  model->size = own;
+  return ZM_OK;
+}
+
+int player_ui_model(zm_ui_model_t* model) { return ui_model(model); }
+
+/* --- обложка из сети (online_cover.c) ---------------------------------------------------- */
+
+static void trim(char* text) {
+  size_t n = strlen(text);
+  while (n != 0 && text[n - 1] == ' ') text[--n] = 0;
+  size_t lead = 0;
+  while (text[lead] == ' ') ++lead;
+  if (lead != 0) memmove(text, text + lead, n - lead + 1);
+}
+
+/* Исполнитель и название (CP866) песни, которой ищется обложка: метки потока или песня радио
+ * «исполнитель - название». 0 — искать нечего (модули, MIDI, OPL; нет исполнителя). */
+static int online_song(char* artist, size_t artist_size, char* title, size_t title_size) {
+  artist[0] = 0;
+  title[0] = 0;
+  if (P->radio) {
+    char song[ZM_UI_TEXT * 2];
+    core->mutex_lock(P->radio_lock);
+    text_cp866(P->radio_song, song, sizeof(song));
+    core->mutex_unlock(P->radio_lock);
+    if (song[0] == 0) {
+      char from_decoder[sizeof(P->info.artist) + 3 + sizeof(P->info.title)];
+      radio_decoder_song(from_decoder, sizeof(from_decoder));
+      text_cp866(from_decoder, song, sizeof(song));
+    }
+    char* dash = strstr(song, " - ");
+    if (dash == NULL) {
+      return 0;
+    }
+    *dash = 0;
+    copy_text(artist, artist_size, song);
+    copy_text(title, title_size, dash + 3);
+  } else {
+    if (!P->stream_open && P->format != FMT_MP3) {
+      return 0;
+    }
+    player_tags_t tags;
+    memset(&tags, 0, sizeof(tags));
+    stream_tags(&tags);
+    copy_text(artist, artist_size, tags.artist);
+    copy_text(title, title_size, tags.title);
+  }
+  trim(artist);
+  trim(title);
+  return artist[0] != 0 && title[0] != 0;
+}
+
+static void online_key(char* key, size_t size, const char* artist, const char* title) {
+  snprintf(key, size, "%s\x01%s", artist, title);
+}
+
+/* Поиск одной обложки — разовой задачей: её стек (ONLINE_STACK) внутренней памяти ESP занят,
+ * только пока идёт запрос. В 1.21…1.24 задача жила всё время работы плеера, и вместе с задачами
+ * декодера, помощника и обложек из меток плееру не хватало внутренней памяти (start −2 на плате). */
+static void online_job(void* arg) {
+  (void)arg;
+  char key[sizeof(P->online_last)];
+  online_key(key, sizeof(key), P->online_artist, P->online_title);
+  size_t size = 0;
+  uint8_t* picture = online_cover_fetch(core, P->online_artist, P->online_title, &size, &P->online_quit);
+  if (picture != NULL) {
+    /* Пока искали, мог смениться файл (песня радио) или прийти своя обложка */
+    char again_artist[ZM_UI_TEXT];
+    char again_title[ZM_UI_TEXT];
+    char again[sizeof(P->online_last)];
+    again[0] = 0;
+    if (online_song(again_artist, sizeof(again_artist), again_title, sizeof(again_title))) {
+      online_key(again, sizeof(again), again_artist, again_title);
+    }
+    if (!P->online_quit && strcmp(again, key) == 0 && cover_epoch() == P->online_epoch &&
+        (P->radio || !cover_present()) && cover_image_here(picture, size) && !P->radio) {
+      P->cover_found = 1;                 /* плагин спросит миниатюру (у радио её нет) */
+    }
+    core->free(picture);
+  }
+  P->online_running = 0;
+}
+
+/* Из задачи декодера, не чаще ONLINE_POLL_MS: пора ли искать обложку песни — тогда задача */
+static void online_poll(void) {
+  if (!P->online_net || P->online_running || P->online_quit) {
+    return;
+  }
+  const uint32_t now = core->millis();
+  if (now - P->online_checked < ONLINE_POLL_MS) {
+    return;
+  }
+  P->online_checked = now;
+  if (!P->decoded || (P->state != ST_PLAYING && P->state != ST_DRAINING)) {
+    return;
+  }
+  char artist[ZM_UI_TEXT];
+  char title[ZM_UI_TEXT];
+  if (!online_song(artist, sizeof(artist), title, sizeof(title))) {
+    if (!P->radio && !P->online_said && played_ms() >= ONLINE_AFTER_MS) {
+      P->online_said = 1;
+      core->log("player: online cover: not searched (no artist and title in the tags)");
+    }
+    return;
+  }
+  char key[sizeof(P->online_last)];
+  online_key(key, sizeof(key), artist, title);
+  if (strcmp(key, P->online_last) == 0 || (!P->radio && played_ms() < ONLINE_AFTER_MS)) {
+    return;
+  }
+  copy_text(P->online_last, sizeof(P->online_last), key);
+  if (!P->radio && cover_present()) {
+    core->log("player: online cover: not searched (own cover in the file or folder)");
+    return;                               /* своя обложка есть или в пути */
+  }
+  P->online_epoch = cover_epoch();
+  if (P->radio) {
+    cover_ui_clear();                     /* обложка прежней песни экрану не годится */
+  }
+  copy_text(P->online_artist, sizeof(P->online_artist), artist);
+  copy_text(P->online_title, sizeof(P->online_title), title);
+  P->online_running = 1;
+  if (core->task_start(online_job, NULL, ONLINE_STACK, ONLINE_PRIORITY, 0) != ZM_OK) {
+    P->online_running = 0;                /* памяти нет — без обложки из сети */
+    core->log("player: online cover: no memory for the search task (%u-byte stack)",
+              (unsigned)ONLINE_STACK);
+  }
+}
+
 /* --- жизнь приложения ---------------------------------------------------------------- */
 
 static int start(const zm_core_t* c) {
   core = c;
   P = (player_t*)core->alloc(sizeof(player_t), ZM_MEM_INTERNAL);
   if (P == NULL) {
+    core->log("player: start: no memory for the state (%u bytes)", (unsigned)sizeof(player_t));
     return ZM_NO_MEMORY;
   }
   memset(P, 0, sizeof(*P));
   P->ring = P->ring_small = (uint8_t*)core->alloc(RING_BYTES, ZM_MEM_PSRAM);
   P->ring_size = RING_BYTES;
-  P->frames = (float*)core->alloc(RENDER_FRAMES * 2 * sizeof(float), ZM_MEM_INTERNAL);
+  /* 8 КБ вывода — в PSRAM: внутренней памяти ESP не хватало задачам плеера (1.24) */
+  P->frames = (float*)core->alloc(RENDER_FRAMES * 2 * sizeof(float), ZM_MEM_PSRAM);
   P->lock = core->mutex_create();
   P->wake = core->signal_create();
-  if (P->ring == NULL || P->frames == NULL || P->lock == NULL || P->wake == NULL) {
+  P->ui_lock = core->mutex_create();
+  if (P->ring == NULL || P->frames == NULL || P->lock == NULL || P->wake == NULL ||
+      P->ui_lock == NULL) {
+    core->log("player: start: ring %d, frames %d, lock %d, wake %d, ui_lock %d (0 — not allocated)",
+              P->ring != NULL, P->frames != NULL, P->lock != NULL, P->wake != NULL, P->ui_lock != NULL);
     return ZM_NO_MEMORY;
   }
   host.size = sizeof(host);
@@ -2338,7 +2824,17 @@ static int start(const zm_core_t* c) {
   if (view_begin(core) != ZM_OK) {
     core->log("player: no spectrum (no memory)");
   }
-  return core->task_start(decode_task, NULL, DECODE_STACK, TASK_PRIORITY, 0);
+  /* Декодер — первым: внутренней памяти ESP мало, и задача обложек (6 КБ) раньше него оставляла
+     декодеру (12 КБ) пустую кучу — плеер не стартовал (1.21 на прошивке 0.1.85) */
+  const int r = core->task_start(decode_task, NULL, DECODE_STACK, TASK_PRIORITY, 0);
+  if (r != ZM_OK) {
+    P->task_done = 1;                          /* задачи нет: stop() её не ждёт */
+    core->log("player: start: decode task (%u-byte stack) not started (%d)", (unsigned)DECODE_STACK, r);
+    return r;
+  }
+  /* Обложка из сети: нужны потоки HTTP(S) ядра (ABI minor 2); задача — разовая, по песне */
+  P->online_net = core->size >= offsetof(zm_core_t, net_close) + sizeof(core->net_close);
+  return ZM_OK;
 }
 
 static void stop(void) {
@@ -2354,6 +2850,11 @@ static void stop(void) {
   core->pcm_pause(0);
   core->signal_give(P->wake);
   for (int wait = 0; wait < 200 && !P->task_done; ++wait) {
+    core->delay(10);
+  }
+  /* Обложка из сети: выйти до cover_end (она зовёт cover_image) */
+  P->online_quit = 1;
+  for (int wait = 0; wait < ONLINE_STOP_MS / 10 && P->online_running; ++wait) {
     core->delay(10);
   }
   cover_end();
@@ -2396,13 +2897,16 @@ int main(int argc, char* argv[]) {
   app.abi_major = ZM_APP_ABI_MAJOR;
   app.abi_minor = ZM_APP_ABI_MINOR;
   app.name = "player";
-  app.version = "1.20";
+  app.version = "1.30";
   app.command_first = AUDIO_VIEW;
   app.command_last = AUDIO_TAGS;
   app.start = start;
   app.stop = stop;
   app.command = command;
   app.poll = NULL;
+  /* Экран на Tang рисует сам PLAYER (screen.cpp): экрану прошивки снимка не давать */
+  app.ui_model = NULL;
+  app.ui_cover = NULL;
   *(const zm_app_t**)argv[2] = &app;
   return ZM_APP_ABI_MAJOR;
 }

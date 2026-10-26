@@ -22,6 +22,14 @@
 // вывода. aspect и size защёлкиваются за 4 строки до конца кадра (в гашении, до первых
 // запросов строк нового кадра) — смена не рвёт кадр.
 //
+// КАДР FT812 (ft = 1, M_SEL; только SCALE). Источник — кадр растеризатора src_w×src_h
+// (RGB565; 1024×768 и 640×480 — основные режимы VDAC2) в те же окна вывода; кадр другого
+// размера масштабируется как ближайший из двух (ширина ≤ 640 — как 640×480). 1024×768 в
+// 960×720 — уменьшение (N/D = 16/15): точка и строка источника за точку вывода растут на
+// 1 или 2, строке вывода может понадобиться две новые строки источника — они просятся одним
+// запросом (req_two). Режим и размер защёлкиваются вместе с геометрией; режим уходит
+// в домен SDRAM с запросами (req_ft), поэтому смена M_SEL тоже не рвёт кадр.
+//
 // Домен pixel_clk. Строки берутся из двухстрочного буфера fb_line_ram, который
 // заполняет fb_core. Строка картинки запрашивается за две строки вывода до показа,
 // в начале гашения, — если той строке вывода нужна новая строка источника: каждая
@@ -59,11 +67,16 @@ module fb_scanout #(
     input  wire        blank,        // 1 — выводить чёрное поле (синхроимпульсы идут)
     input  wire        aspect,       // при SCALE: 0 — 4:3, 1 — 16:9 (на всю ширину)
     input  wire [1:0]  size,         // при SCALE: 0 — 100 %, 1 — 95 %, 2 — 90 % (3 — как 0)
+    input  wire        ft,           // при SCALE: выводить кадр FT812
+    input  wire [10:0] src_w,        // его размер (меняется редко): ширина 16…1024
+    input  wire [9:0]  src_h,        //   высота 2…768
 
     // Запрос строки в домен SDRAM
     output reg         req_toggle,
     output reg  [9:0]  req_line,
     output reg         req_first,
+    output reg         req_two,      // сначала строка req_line − 1, потом req_line
+    output reg         req_ft,       // кадр FT812
 
     // Чтение четырёхстрочного буфера (fb_line_ram): {строка[1], слово[8:0]} каждого блока
     output wire [9:0]  lb_ra_e,
@@ -118,21 +131,63 @@ module fb_scanout #(
     reg  [11:0] gx0, gx1, gxs, gy0, gy1;
     reg  [6:0]  gnx, gdx, gny, gdy;
     reg  [16:0] grx, gry;           // 65536 / N, для весов сглаживания
+    reg         gft;                // кадр FT812
+    reg  [9:0]  glast;              // последняя строка источника
 
+    // 65536 / N с округлением — для N из таблицы ниже (константы, без делителя)
     function automatic [16:0] recip(input [6:0] n);
-        recip = (n == 7'd0) ? 17'd0 : (17'd65536 + {11'd0, n[6:1]}) / {10'd0, n};
+        case (n)
+            7'd1: recip = 17'd65536; 7'd2: recip = 17'd32768; 7'd3: recip = 17'd21845;
+            7'd4: recip = 17'd16384; 7'd5: recip = 17'd13107; 7'd8: recip = 17'd8192;
+            7'd9: recip = 17'd7282;  7'd10: recip = 17'd6554; 7'd15: recip = 17'd4369;
+            7'd16: recip = 17'd4096; 7'd20: recip = 17'd3277; 7'd32: recip = 17'd2048;
+            7'd40: recip = 17'd1638; 7'd45: recip = 17'd1456; 7'd64: recip = 17'd1024;
+            default: recip = 17'd0;
+        endcase
     endfunction
 
-    // Геометрия режима масштаба: {x0, x1, y0, y1, nx, dx, ny, dy}
-    function automatic [75:0] geometry(input asp, input [1:0] sz);
+    // Окно вывода по ASPECT/SIZE: {x0, x1, y0, y1}
+    function automatic [47:0] window(input asp, input [1:0] sz);
         case ({asp, sz})
-            3'b0_01: geometry = {12'd184, 12'd1096, 12'd18, 12'd702, 7'd15, 7'd19, 7'd16, 7'd19};
-            3'b0_10: geometry = {12'd208, 12'd1072, 12'd36, 12'd684, 7'd5,  7'd6,  7'd8,  7'd9};
+            3'b0_01: window = {12'd184, 12'd1096, 12'd18, 12'd702};
+            3'b0_10: window = {12'd208, 12'd1072, 12'd36, 12'd684};
             3'b1_00, 3'b1_11:
-                     geometry = {12'd0,   12'd1280, 12'd0,  12'd720, 7'd9,  7'd16, 7'd4,  7'd5};
-            3'b1_01: geometry = {12'd32,  12'd1248, 12'd18, 12'd702, 7'd45, 7'd76, 7'd16, 7'd19};
-            3'b1_10: geometry = {12'd64,  12'd1216, 12'd36, 12'd684, 7'd5,  7'd8,  7'd8,  7'd9};
-            default: geometry = {12'd160, 12'd1120, 12'd0,  12'd720, 7'd3,  7'd4,  7'd4,  7'd5};
+                     window = {12'd0,   12'd1280, 12'd0,  12'd720};
+            3'b1_01: window = {12'd32,  12'd1248, 12'd18, 12'd702};
+            3'b1_10: window = {12'd64,  12'd1216, 12'd36, 12'd684};
+            default: window = {12'd160, 12'd1120, 12'd0,  12'd720};
+        endcase
+    endfunction
+
+    // Шаг по источнику {nx, dx, ny, dy}, несократимые дроби: кадр Evo 720×576 и два режима
+    // FT812 — 1024×768 и 640×480 (src_w ≤ 640 — как 640×480, иначе как 1024×768)
+    function automatic [27:0] fracs(input f, input narrow, input asp, input [1:0] sz);
+        if (!f) case ({asp, sz})
+            3'b0_01: fracs = {7'd15, 7'd19, 7'd16, 7'd19};
+            3'b0_10: fracs = {7'd5,  7'd6,  7'd8,  7'd9};
+            3'b1_00, 3'b1_11:
+                     fracs = {7'd9,  7'd16, 7'd4,  7'd5};
+            3'b1_01: fracs = {7'd45, 7'd76, 7'd16, 7'd19};
+            3'b1_10: fracs = {7'd5,  7'd8,  7'd8,  7'd9};
+            default: fracs = {7'd3,  7'd4,  7'd4,  7'd5};
+        endcase
+        else if (!narrow) case ({asp, sz})
+            3'b0_01: fracs = {7'd64, 7'd57, 7'd64, 7'd57};
+            3'b0_10: fracs = {7'd32, 7'd27, 7'd32, 7'd27};
+            3'b1_00, 3'b1_11:
+                     fracs = {7'd4,  7'd5,  7'd16, 7'd15};
+            3'b1_01: fracs = {7'd16, 7'd19, 7'd64, 7'd57};
+            3'b1_10: fracs = {7'd8,  7'd9,  7'd32, 7'd27};
+            default: fracs = {7'd16, 7'd15, 7'd16, 7'd15};
+        endcase
+        else case ({asp, sz})
+            3'b0_01: fracs = {7'd40, 7'd57, 7'd40, 7'd57};
+            3'b0_10: fracs = {7'd20, 7'd27, 7'd20, 7'd27};
+            3'b1_00, 3'b1_11:
+                     fracs = {7'd1,  7'd2,  7'd2,  7'd3};
+            3'b1_01: fracs = {7'd10, 7'd19, 7'd40, 7'd57};
+            3'b1_10: fracs = {7'd5,  7'd9,  7'd20, 7'd27};
+            default: fracs = {7'd2,  7'd3,  7'd2,  7'd3};
         endcase
     endfunction
 
@@ -149,12 +204,24 @@ module fb_scanout #(
     reg [9:0]  sx;
     reg [6:0]  sx_acc;
 
+    // Шаг счётчика N/D: acc + N, минус D один или два раза (уменьшение — до двух за шаг)
+    function automatic [8:0] dda(input [6:0] acc, input [6:0] n, input [6:0] d);
+        reg [7:0] s;
+        begin
+            s = {1'b0, acc} + {1'b0, n};
+            if (s >= {d, 1'b0})       dda = {2'd2, 7'(s - {d, 1'b0})};
+            else if (s >= {1'b0, d})  dda = {2'd1, 7'(s - {1'b0, d})};
+            else                      dda = {2'd0, 7'(s)};
+        end
+    endfunction
+
     wire [11:0] v_next = (v == V_LAST) ? 12'd0 : v + 12'd1;
-    wire [6:0]  rq_sum = rq_acc + gny;
-    wire [6:0]  sy_sum = sy_acc + gny;
-    wire [6:0]  sx_sum = sx_acc + gnx;
-    wire [75:0] g_new  = geometry(aspect, size);
-    wire [75:0] g_rst  = geometry(1'b0, 2'd0);
+    wire [8:0]  rq_st  = dda(rq_acc, gny, gdy);
+    wire [8:0]  sy_st  = dda(sy_acc, gny, gdy);
+    wire [8:0]  sx_st  = dda(sx_acc, gnx, gdx);
+    wire [47:0] w_new  = window(aspect, size);
+    wire [27:0] f_new  = fracs(ft, src_w <= 11'd640, aspect, size);
+    wire [9:0]  last_new = ft ? src_h - 10'd1 : 10'(V_ACTIVE - 1);
 
     always_ff @(posedge pixel_clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -164,12 +231,17 @@ module fb_scanout #(
             req_toggle <= 1'b0;
             req_line   <= '0;
             req_first  <= 1'b0;
+            req_two    <= 1'b0;
+            req_ft     <= 1'b0;
             rq_s <= '0; rq_acc <= '0; sy <= '0; sy_acc <= '0; sx <= '0; sx_acc <= '0;
             rq_max <= '0; rq_want <= '0; rq_ns <= '0; rq_need <= '0; rq_nacc <= '0;
+            gft <= 1'b0; glast <= 10'(V_ACTIVE - 1);
             if (SCALE) begin
-                {gx0, gx1, gy0, gy1, gnx, gdx, gny, gdy} <= g_rst;
-                gxs <= g_rst[75:64] - 12'd1;
-                grx <= recip(g_rst[27:21]); gry <= recip(g_rst[13:7]);
+                // как window(0, 0) и fracs(кадр Evo, 4:3, 100 %): константы — без логики сброса
+                gx0 <= 12'd160; gx1 <= 12'd1120; gy0 <= 12'd0; gy1 <= 12'd720;
+                gnx <= 7'd3; gdx <= 7'd4; gny <= 7'd4; gdy <= 7'd5;
+                gxs <= 12'd159;
+                grx <= 17'd21845; gry <= 17'd16384;
             end else begin
                 gx0 <= IMG_X0; gx1 <= IMG_X1; gy0 <= IMG_Y0; gy1 <= IMG_Y1;
                 gxs <= (IMG_X == 0) ? H_LAST : IMG_X0 - 12'd1;
@@ -184,14 +256,16 @@ module fb_scanout #(
                 if (v_next == gy0) begin
                     sy <= '0; sy_acc <= '0;
                 end else if (v_next > gy0 && v_next < gy1) begin
-                    if (sy_sum >= gdy) begin sy <= sy + 10'd1; sy_acc <= sy_sum - gdy; end
-                    else sy_acc <= sy_sum;
+                    sy <= sy + 10'(sy_st[8:7]); sy_acc <= sy_st[6:0];
                 end
                 // Геометрия следующего кадра — в гашении, до первых запросов его строк
                 if (SCALE && v == V_LATCH) begin
-                    {gx0, gx1, gy0, gy1, gnx, gdx, gny, gdy} <= g_new;
-                    gxs <= (g_new[75:64] == 12'd0) ? H_LAST : g_new[75:64] - 12'd1;
-                    grx <= recip(g_new[27:21]); gry <= recip(g_new[13:7]);
+                    {gx0, gx1, gy0, gy1} <= w_new;
+                    {gnx, gdx, gny, gdy} <= f_new;
+                    gxs <= (w_new[47:36] == 12'd0) ? H_LAST : w_new[47:36] - 12'd1;
+                    grx <= recip(f_new[27:21]); gry <= recip(f_new[13:7]);
+                    gft <= ft;
+                    glast <= last_new;
                 end
             end else begin
                 h <= h + 12'd1;
@@ -200,10 +274,8 @@ module fb_scanout #(
             // Точка источника: с нуля в начале картинки, дальше шаг N/D за такт
             if (h == gxs) begin
                 sx <= '0; sx_acc <= '0;
-            end else if (sx_sum >= gdx) begin
-                sx <= sx + 10'd1; sx_acc <= sx_sum - gdx;
             end else begin
-                sx_acc <= sx_sum;
+                sx <= sx + 10'(sx_st[8:7]); sx_acc <= sx_st[6:0];
             end
 
             // Кадровый импульс переключается вместе с фронтом строчного, как в CEA-861
@@ -212,27 +284,31 @@ module fb_scanout #(
 
             // Запрос строки картинки для строки вывода v+2 в начале гашения текущей строки.
             // Строке вывода нужны строка источника s и, если она заходит на следующую, s+1;
-            // запрашивается старшая из них, если её ещё нет. Старшая растёт не больше чем
-            // на 1 за строку вывода (строка, кончившаяся ровно на границе, следующую не
-            // задевает), поэтому запрос — не чаще раза за строку.
+            // запрашивается старшая из них, если её ещё нет. При увеличении старшая растёт не
+            // больше чем на 1 за строку вывода (строка, кончившаяся ровно на границе,
+            // следующую не задевает), при уменьшении (N/D < 1,5) — на 1 или 2: тогда одним
+            // запросом две строки (req_two). Запрос — не чаще раза за строку. Первый запрос
+            // кадра — сразу строки 0 и 1: при уменьшении строка 1 нужна уже первой строке вывода.
             // Шаг 1 (за два такта до конца активной части): следующее состояние счётчика строк.
             if (h == OUT_W_C - 12'd2) begin : request_next
                 logic [11:0] want;
                 want = (v + 12'd2 >= V_TOTAL[11:0]) ? v + 12'd2 - V_TOTAL[11:0] : v + 12'd2;
                 rq_want <= want;
-                if (rq_sum >= gdy) begin rq_ns <= rq_s + 10'd1; rq_nacc <= rq_sum - gdy; end
-                else begin rq_ns <= rq_s; rq_nacc <= rq_sum; end
+                rq_ns   <= rq_s + 10'(rq_st[8:7]);
+                rq_nacc <= rq_st[6:0];
             end
             // Шаг 1б (такт до конца): нужна ли строке вывода и следующая строка источника
             if (h == OUT_W_C - 12'd1)
-                rq_need <= ({3'd0, rq_nacc} + {3'd0, gny} > {3'd0, gdy} && rq_ns != V_ACTIVE - 1) ?
+                rq_need <= ({1'b0, rq_nacc} + {1'b0, gny} > {1'b0, gdy} && rq_ns < glast) ?
                            rq_ns + 10'd1 : rq_ns;
             // Шаг 2 (начало гашения): запрос
             if (h == OUT_W_C) begin : request
                 if (rq_want == gy0) begin
-                    rq_s <= '0; rq_acc <= '0; rq_max <= '0;
-                    req_line   <= '0;
+                    rq_s <= '0; rq_acc <= '0; rq_max <= 10'd1;
+                    req_line   <= 10'd1;
                     req_first  <= 1'b1;
+                    req_two    <= 1'b1;
+                    req_ft     <= gft;
                     req_toggle <= ~req_toggle;
                 end else if (rq_want > gy0 && rq_want < gy1) begin
                     rq_s <= rq_ns; rq_acc <= rq_nacc;
@@ -240,6 +316,7 @@ module fb_scanout #(
                         rq_max     <= rq_need;
                         req_line   <= rq_need;
                         req_first  <= 1'b0;
+                        req_two    <= rq_need > rq_max + 10'd1;
                         req_toggle <= ~req_toggle;
                     end
                 end
@@ -259,7 +336,7 @@ module fb_scanout #(
     wire [9:0] sx_r  = sx + 10'd1;
     wire [9:0] e_idx = sx[0] ? sx_r : sx;           // чётная из двух точек
     wire [9:0] o_idx = sx[0] ? sx : sx_r;           // нечётная
-    wire [9:0] sy_b  = (sy == V_ACTIVE - 1) ? sy : sy + 10'd1;
+    wire [9:0] sy_b  = (sy >= glast) ? sy : sy + 10'd1;
     wire [9:0] line_a = sy[0] ? sy_b : sy;          // строка блока A (чётная)
     wire [9:0] line_b = sy[0] ? sy : sy_b;          // строка блока B (нечётная)
     assign lb_ra_e = {line_a[1], e_idx[9:1]};
@@ -271,11 +348,16 @@ module fb_scanout #(
     // Точка вывода занимает [acc, acc+N) в 1/D точки источника; за границу она заходит,
     // если acc + N > D, на (acc + N − D)/N своей ширины.
     // Два шага, чтобы уложиться в такт: доля за границей (acc + N − D, в 1/D) и вес из неё.
+    // При уменьшении точка вывода всегда заходит за границу (acc + N > D); вес — по той её
+    // части, что за последней границей, двухточечное сглаживание.
     function automatic [6:0] over_part(input [6:0] acc, input [6:0] n, input [6:0] d);
         reg [7:0] over;
         begin
             over = {1'b0, acc} + {1'b0, n};
-            over_part = (over <= {1'b0, d}) ? 7'd0 : 7'(over - {1'b0, d});
+            if (over >= {d, 1'b0})          over = over - {d, 1'b0};
+            else if (over > {1'b0, d})      over = over - {1'b0, d};
+            else                            over = 8'd0;
+            over_part = over[6:0];
         end
     endfunction
     function automatic [4:0] weight(input [6:0] part, input [16:0] recip);
@@ -328,7 +410,7 @@ module fb_scanout #(
             err_cnt <= '0; chk_err <= '0; chk_tick <= 1'b0;
         end else begin
             chk_tick <= 1'b0;
-            if (img1 && !pat_skip && pix != pat_exp && err_cnt != 16'hFFFF)
+            if (img1 && !gft && !pat_skip && pix != pat_exp && err_cnt != 16'hFFFF)
                 err_cnt <= err_cnt + 16'd1;
             // Конец последней строки картинки: итог кадра
             if (h == 12'd0 && v == gy1) begin
@@ -339,16 +421,24 @@ module fb_scanout #(
         end
     end
 
-    // Палитра — у каждой из четырёх точек
+    // Палитра — у каждой из четырёх точек; у кадра FT812 — RGB565 с повтором старших разрядов
+    wire [7:0] el_r [0:3], el_g [0:3], el_b [0:3];
+    wire [15:0] p4 [0:3];
+    assign p4[0] = p_tl; assign p4[1] = p_tr; assign p4[2] = p_bl; assign p4[3] = p_br;
     wire [7:0] tl_r, tl_g, tl_b, tr_r, tr_g, tr_b, bl_r, bl_g, bl_b, br_r, br_g, br_b;
-    legacy_palette pal_tl (.pal_sel(p_tl[15]), .r5(p_tl[4:0]), .g5(p_tl[9:5]), .b5(p_tl[14:10]),
-                           .r8(tl_r), .g8(tl_g), .b8(tl_b));
-    legacy_palette pal_tr (.pal_sel(p_tr[15]), .r5(p_tr[4:0]), .g5(p_tr[9:5]), .b5(p_tr[14:10]),
-                           .r8(tr_r), .g8(tr_g), .b8(tr_b));
-    legacy_palette pal_bl (.pal_sel(p_bl[15]), .r5(p_bl[4:0]), .g5(p_bl[9:5]), .b5(p_bl[14:10]),
-                           .r8(bl_r), .g8(bl_g), .b8(bl_b));
-    legacy_palette pal_br (.pal_sel(p_br[15]), .r5(p_br[4:0]), .g5(p_br[9:5]), .b5(p_br[14:10]),
-                           .r8(br_r), .g8(br_g), .b8(br_b));
+    genvar gk;
+    for (gk = 0; gk < 4; gk = gk + 1) begin : g_pal
+        legacy_palette pal (.pal_sel(p4[gk][15]), .r5(p4[gk][4:0]), .g5(p4[gk][9:5]),
+                            .b5(p4[gk][14:10]), .r8(el_r[gk]), .g8(el_g[gk]), .b8(el_b[gk]));
+    end
+    function automatic [23:0] rgb565(input [15:0] q);
+        rgb565 = {q[15:11], q[15:13], q[10:5], q[10:9], q[4:0], q[4:2]};
+    endfunction
+    wire [23:0] f_tl = rgb565(p_tl), f_tr = rgb565(p_tr), f_bl = rgb565(p_bl), f_br = rgb565(p_br);
+    assign {tl_r, tl_g, tl_b} = gft ? f_tl : {el_r[0], el_g[0], el_b[0]};
+    assign {tr_r, tr_g, tr_b} = gft ? f_tr : {el_r[1], el_g[1], el_b[1]};
+    assign {bl_r, bl_g, bl_b} = gft ? f_bl : {el_r[2], el_g[2], el_b[2]};
+    assign {br_r, br_g, br_b} = gft ? f_br : {el_r[3], el_g[3], el_b[3]};
 
     // ------------------------------------------------------------------
     // Ступень 2: цвета четырёх точек

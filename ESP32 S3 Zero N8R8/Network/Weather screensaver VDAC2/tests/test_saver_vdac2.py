@@ -37,11 +37,17 @@ class Harness(BaseHarness):
     Z-контроллер (как в Unreal, zc.cpp): порт #77 — выбор устройства, бит 2 —
     FT812 (бит 4 — ESP, её обмены ведёт общий стенд); порт #57 — обмен: запись отправляет байт, чтение возвращает байт
     прошлого обмена и запускает следующий. vdac2=False — платы нет: чип не
-    отвечает, чтение даёт #FF."""
+    отвечает, чтение даёт #FF. multiboot_frames — VDAC4: FT812 — ядро ПЛИС слота 1,
+    оно грузится через столько кадров после первого выбора FT812; до того отвечает
+    ядро без FT812 (чтение — #00, посылки пропадают)."""
 
     def __init__(self, esp: VirtualEsp, start: datetime.datetime, key_frame: int,
-                 frame_ms: int = FRAME_MS, vdac2: bool = True):
+                 frame_ms: int = FRAME_MS, vdac2: bool = True, multiboot_frames: int | None = None):
         self.chip = ft812emu.FT812() if vdac2 else None
+        self.multiboot = multiboot_frames
+        self.boot_at: int | None = None         # кадр, с которого FT812 есть (multiboot)
+        self.fwd = False                        # посылка идёт в чип
+        self.chip_hosts: list[int] = []         # команды хоста, дошедшие до чипа
         self.cfg = 0
         self.rdbuff = 0xFF
         self.transaction = bytearray()
@@ -81,14 +87,25 @@ class Harness(BaseHarness):
         if on:
             self.selects += 1
             self.transaction = bytearray()
+            if self.multiboot is not None and self.boot_at is None:
+                self.boot_at = self.frames + self.multiboot     # первая посылка — переход
+            self.fwd = self.chip is not None and (self.boot_at is None or self.frames >= self.boot_at)
+            if self.fwd:
+                self.chip.select(True)
         else:
             self.finish_transaction()
-        if self.chip:
-            self.chip.select(on)
+            if self.fwd:
+                t = self.transaction
+                if len(t) == 3 and t[0] & 0xC0 != 0x80 and t[0] & 0xC0 != 0:
+                    self.chip_hosts.append(t[0])
+                self.chip.select(False)
+            self.fwd = False
 
     def xfer(self, value: int) -> int:
         self.transaction.append(value)
-        return self.chip.xfer(value) if self.chip else 0xFF
+        if self.fwd:
+            return self.chip.xfer(value)
+        return 0x00 if self.chip and self.multiboot is not None else 0xFF
 
     def finish_transaction(self) -> None:
         """Посылка в REG_CMDB_WRITE — это команды сопроцессору: собрать поток."""
@@ -299,6 +316,16 @@ class Vdac2Tests(unittest.TestCase):
         h.run()
         self.assertEqual(h.gedpl_pages, [GEDPL_SAFE_PAGE, GEDPL_SAFE_PAGE])
         self.assert_last_frame(h, refscene.SAMPLE_RECORD, 'second_run')
+
+    def test_vdac4_multiboot_waits_for_ft_core(self) -> None:
+        # ядро FT812 грузится через 4 с после первой посылки: заставка ждёт и запускает
+        # чип заново — до него доходят и такты (CLKEXT, CLKSEL), а не только ACTIVE
+        h = self.run_saver(VirtualEsp(record=refscene.SAMPLE_RECORD), key_frame=200 + 300,
+                           multiboot_frames=200)
+        self.assertIn(0x44, h.chip_hosts, 'CLKEXT не дошёл до ядра FT812')
+        self.assertIn(0x61, h.chip_hosts, 'CLKSEL не дошёл до ядра FT812')
+        self.assertEqual(h.mode_history, [0x04], 'экран FT812 включается через GVmod #04')
+        self.assert_last_frame(h, refscene.SAMPLE_RECORD, 'multiboot')
 
     def test_without_vdac2_exits_at_once(self) -> None:
         h = self.run_saver(VirtualEsp(record=refscene.SAMPLE_RECORD), key_frame=5000,

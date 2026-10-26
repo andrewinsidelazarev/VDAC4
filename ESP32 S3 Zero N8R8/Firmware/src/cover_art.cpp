@@ -454,6 +454,10 @@ bool CoverThumb::begin(uint32_t width, uint32_t height) {
   if (width == 0 || height == 0) {
     return false;
   }
+  // Обложка экрана — по возможности: без памяти на неё миниатюра всё равно будет
+  if (picture_ != nullptr && !picture_->begin(width, height)) {
+    picture_ = nullptr;
+  }
   cells_ = static_cast<Cell*>(alloc_(sizeof(Cell) * kSide * kSide));
   if (cells_ == nullptr) {
     return false;
@@ -474,6 +478,9 @@ void CoverThumb::end() {
 
 void CoverThumb::addBlock(uint32_t left, uint32_t top, uint32_t right, uint32_t bottom,
                           const uint8_t* rgb) {
+  if (picture_ != nullptr) {
+    picture_->addBlock(left, top, right, bottom, rgb);
+  }
   if (cells_ == nullptr) {
     return;
   }
@@ -512,6 +519,114 @@ void CoverThumb::addBlock(uint32_t left, uint32_t top, uint32_t right, uint32_t 
       }
     }
   }
+}
+
+// --- обложка для экрана ---------------------------------------------------------
+
+void CoverPicture::cells(uint32_t u, uint32_t& first, uint32_t& last) const {
+  first = u * kSide / side_;
+  last = ((u + 1) * kSide - 1) / side_;
+  if (last >= static_cast<uint32_t>(kSide)) {
+    last = kSide - 1;
+  }
+}
+
+bool CoverPicture::begin(uint32_t width, uint32_t height) {
+  end();
+  if (width == 0 || height == 0) {
+    return false;
+  }
+  side_ = width < height ? width : height;
+  left_ = (width - side_) / 2;
+  top_ = (height - side_) / 2;
+  // Точек на клетку по стороне — не больше 16 (шаг по 15 на клетку и одна на стыке): сумма
+  // 255 · 16 · 16 входит в 16 бит
+  step_ = (side_ + 15U * kSide - 1U) / (15U * kSide);
+  if (step_ == 0) {
+    step_ = 1;
+  }
+  cells_ = static_cast<Cell*>(alloc_(sizeof(Cell) * kSide * kSide));
+  hits_ = static_cast<uint8_t*>(alloc_(kSide));
+  if (cells_ == nullptr || hits_ == nullptr) {
+    end();
+    return false;
+  }
+  memset(cells_, 0, sizeof(Cell) * kSide * kSide);
+  memset(hits_, 0, kSide);
+  for (uint32_t u = 0; u < side_; u += step_) {
+    uint32_t first = 0;
+    uint32_t last = 0;
+    cells(u, first, last);
+    for (uint32_t c = first; c <= last; ++c) {
+      ++hits_[c];
+    }
+  }
+  return true;
+}
+
+void CoverPicture::end() {
+  if (cells_ != nullptr) {
+    release_(cells_);
+  }
+  if (hits_ != nullptr) {
+    release_(hits_);
+  }
+  cells_ = nullptr;
+  hits_ = nullptr;
+}
+
+void CoverPicture::addBlock(uint32_t left, uint32_t top, uint32_t right, uint32_t bottom,
+                            const uint8_t* rgb) {
+  if (cells_ == nullptr) {
+    return;
+  }
+  const uint32_t width = right - left + 1;
+  for (uint32_t y = top; y <= bottom; ++y) {
+    if (y < top_ || y >= top_ + side_ || (y - top_) % step_ != 0) {
+      continue;
+    }
+    uint32_t row0 = 0;
+    uint32_t row1 = 0;
+    cells(y - top_, row0, row1);
+    const uint8_t* pixel = rgb + static_cast<size_t>(y - top) * width * 3;
+    for (uint32_t x = left; x <= right; ++x, pixel += 3) {
+      if (x < left_ || x >= left_ + side_ || (x - left_) % step_ != 0) {
+        continue;
+      }
+      uint32_t column0 = 0;
+      uint32_t column1 = 0;
+      cells(x - left_, column0, column1);
+      for (uint32_t row = row0; row <= row1; ++row) {
+        for (uint32_t column = column0; column <= column1; ++column) {
+          Cell& cell = cells_[row * kSide + column];
+          cell.red = static_cast<uint16_t>(cell.red + pixel[0]);
+          cell.green = static_cast<uint16_t>(cell.green + pixel[1]);
+          cell.blue = static_cast<uint16_t>(cell.blue + pixel[2]);
+        }
+      }
+    }
+  }
+}
+
+bool CoverPicture::finish(uint16_t* output) {
+  if (cells_ == nullptr) {
+    return false;
+  }
+  for (int row = 0; row < kSide; ++row) {
+    for (int column = 0; column < kSide; ++column) {
+      const Cell& cell = cells_[row * kSide + column];
+      uint32_t count = static_cast<uint32_t>(hits_[row]) * hits_[column];
+      if (count == 0) {
+        count = 1;
+      }
+      const uint32_t red = (cell.red + count / 2) / count;
+      const uint32_t green = (cell.green + count / 2) / count;
+      const uint32_t blue = (cell.blue + count / 2) / count;
+      output[row * kSide + column] =
+          static_cast<uint16_t>(((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3));
+    }
+  }
+  return true;
 }
 
 void CoverThumb::finish(uint8_t* output) {

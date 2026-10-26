@@ -18,7 +18,11 @@
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
+#include <new>
+
+#include "zifi/vdisk_service.hpp"
 #include "zifi/app.hpp"
 #include "zifi/apps/audio_app.hpp"
 #include "zifi/apps/info_apps.hpp"
@@ -30,15 +34,19 @@
 #include "zifi/bringup_log.hpp"
 #include "zifi/diagnostic_log.hpp"
 #include "zifi/elf_probe.hpp"
+#include "zifi/flash_fs.hpp"
 #include "zifi/ftp_server.hpp"
 #include "zifi/link_watchdog.hpp"
+#include "zifi/player_overlay.hpp"
 #include "zifi/tang_link.hpp"
+#include "zifi/tang_menu.hpp"
 #include "zifi/tang_update.hpp"
 #include "zifi/net_client.hpp"
 #include "zifi/crash_record.hpp"
 #include "zifi/net_console.hpp"
 #include "zifi/online_updater.hpp"
 #include "zifi/ota_server.hpp"
+#include "zifi/path_table.hpp"
 #include "zifi/protocol.hpp"
 #include "zifi/smb_server.hpp"
 #include "zifi/z80_transport.hpp"
@@ -276,6 +284,8 @@ class Application : private AppHost {
   // Пояс ESP — из time: файла zifi.ini (localtime, время файлов на флешке).
   void applyTimezone();
   void handleSysClock(const PacketView& packet);
+  void handlePathGet(const PacketView& packet);
+  void handlePathSet(const PacketView& packet);
 #if ZIFI_HAS_SPI_LINK
   void handleTangRead(const PacketView& packet);
   void handleTangWrite(const PacketView& packet);
@@ -539,6 +549,8 @@ void Application::begin() {
   startLinkWatchdog(link_, vfsBridge_);
   // LINK к Tang: ждёт питания Tang, выбирает частоту, следит за состоянием Tang
   tang::start();
+  // Экран проигрывателя оверлеем Tang (ABI приложений 1.5): своя задача на ядре 1
+  player_overlay::start();
 #endif
 
   if (xTaskCreatePinnedToCore(networkTaskEntry, "zifi-net",
@@ -1665,6 +1677,13 @@ void Application::handleTangWrite(const PacketView& packet) {
   const size_t count = packet.length >= 3 ? packet.data[2] : 0;
   const uint32_t address = packet.length >= 2 ? (packet.data[0] | (packet.data[1] << 8)) : 0;
   bool ok = count >= 1 && count <= 16 && (address & 3) == 0 && packet.length == 3 + count * 4;
+  // Ядро 1.10+: меню рисует ESP (tang_menu) — нажатие плагина ей, в Tang не пишется
+  if (ok && count == 1 && address == tang::kRegUiKey && tang_menu::active()) {
+    tang_menu::key(packet.data[3]);
+    const uint8_t reply = 1;
+    transport_.send(kRespTangWrite, &reply, 1);
+    return;
+  }
   uint32_t words[16] = {};
   for (size_t i = 0; ok && i < count; ++i) {
     ok = tangSettingRegister(address + i * 4);
@@ -1709,6 +1728,102 @@ void Application::handleSysClock(const PacketView& packet) {
                ok ? "set" : "REFUSED");
   }
   transport_.send(kRespSysClock, &ok, 1);
+}
+
+// path.cfg — папки программ Evo на SD (path_table.hpp). Таблица маленькая (до 64 записей):
+// читается целиком на каждый запрос, пишется через path.tmp и замену — обрыв питания
+// посреди записи оставляет прежний файл.
+namespace {
+
+constexpr char kPathFile[] = "/littlefs/path.cfg";
+constexpr char kPathTemp[] = "/littlefs/path.tmp";
+
+struct PathFile {
+  PathTable table;
+  char text[PathTable::kMaxText];
+};
+
+bool pathLoad(PathFile& file) {
+  file.table.clear();
+  FILE* input = fopen(kPathFile, "rb");
+  if (input == nullptr) {
+    return true;                                // файла ещё нет — таблица пуста
+  }
+  const size_t got = fread(file.text, 1, sizeof(file.text), input);
+  fclose(input);
+  file.table.parse(file.text, got);
+  return true;
+}
+
+bool pathSave(PathFile& file) {
+  const size_t length = file.table.format(file.text, sizeof(file.text));
+  if (length == 0) {
+    return false;
+  }
+  FILE* output = fopen(kPathTemp, "wb");
+  if (output == nullptr) {
+    return false;
+  }
+  const bool written = fwrite(file.text, 1, length, output) == length;
+  const bool closed = fclose(output) == 0;
+  if (!written || !closed) {
+    unlink(kPathTemp);
+    return false;
+  }
+  return rename(kPathTemp, kPathFile) == 0;
+}
+
+// [серийный LE32]...[имя, 0] с имени по смещению at: false — имя не годится.
+bool pathName(const PacketView& packet, size_t at, char name[13]) {
+  if (packet.length <= at) {
+    return false;
+  }
+  const char* text = reinterpret_cast<const char*>(packet.data + at);
+  return PathTable::normalizeName(text, strnlen(text, packet.length - at), name);
+}
+
+}  // namespace
+
+void Application::handlePathGet(const PacketView& packet) {
+  uint8_t reply[5] = {};
+  char name[13];
+  if (packet.length >= 6 && pathName(packet, 4, name)) {
+    const uint32_t serial = readLe32(packet.data);
+    uint32_t cluster = 0;
+    PathFile* file = new (std::nothrow) PathFile;
+    const bool mounted = file != nullptr && flashFsMount(false);
+    if (mounted) {
+      pathLoad(*file);
+      flashFsUnmount();
+      if (file->table.find(name, serial, cluster)) {
+        reply[0] = 1;
+        writeLe32(reply + 1, cluster);
+      }
+    }
+    delete file;
+    bringupLog("zifi-path", "get %s %08X: %s %08X", name, static_cast<unsigned>(serial),
+               !mounted ? "NO FS" : reply[0] ? "found" : "none", static_cast<unsigned>(cluster));
+  }
+  transport_.send(kRespPathGet, reply, sizeof(reply));
+}
+
+void Application::handlePathSet(const PacketView& packet) {
+  uint8_t ok = 0;
+  char name[13];
+  if (packet.length >= 10 && pathName(packet, 8, name)) {
+    const uint32_t serial = readLe32(packet.data);
+    const uint32_t cluster = readLe32(packet.data + 4);
+    PathFile* file = new (std::nothrow) PathFile;
+    if (file != nullptr && flashFsMount(false)) {
+      pathLoad(*file);
+      ok = file->table.set(name, serial, cluster) && pathSave(*file) ? 1 : 0;
+      flashFsUnmount();
+    }
+    delete file;
+    bringupLog("zifi-path", "set %s %08X = %08X: %s", name, static_cast<unsigned>(serial),
+               static_cast<unsigned>(cluster), ok ? "written" : "FAILED");
+  }
+  transport_.send(kRespPathSet, &ok, 1);
 }
 
 void Application::handleReset() {
@@ -1790,9 +1905,22 @@ void Application::handle(const PacketView& packet) {
     case kSysClock:
       handleSysClock(packet);
       break;
+    case kPathGet:
+      handlePathGet(packet);
+      break;
+    case kPathSet:
+      handlePathSet(packet);
+      break;
 #if ZIFI_HAS_SPI_LINK
     case kTangRead:
       handleTangRead(packet);
+      break;
+    case kVdiskInfo:
+    case kVdiskRead:
+    case kVdiskReset:
+    case kVdiskWrite:
+    case kVdiskMode:
+      vdisk_service::handle(packet, transport_);
       break;
     case kTangWrite:
       handleTangWrite(packet);

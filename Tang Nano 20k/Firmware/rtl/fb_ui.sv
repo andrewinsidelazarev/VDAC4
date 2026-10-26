@@ -1,59 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Кнопки Tang Nano 20K, настройки и калибровка выборки SDRAM. Домен пиксельного клока.
+// Настройки и калибровка выборки SDRAM. Домен пиксельного клока.
 //
-// КНОПКИ S1 (FPGA88) и S2 (FPGA87). Активный уровень заранее не закладывается: через
-// IDLE_MS после сброса текущий уровень каждой кнопки принимается за «не нажата».
-// Поэтому прошивка не зависит от того, к какому питанию тянут кнопки на модуле, и ни одна
-// кнопка не сбрасывает ПЛИС. Дребезг подавляется: уровень принимается, если он держится
-// DEBOUNCE_MS подряд.
+// Меню рисует ESP (оверлей, fb_ovl) и ведёт его плагин WC с клавиатуры Evo; кнопки Tang
+// (S1, S2) меню не нужны и прошивкой не читаются.
 //
-//   S1 коротко  — следующий пункт меню (если меню скрыто — показать его);
-//   S1 долго    — скрыть / показать меню (LONG1_MS);
-//   S2 коротко  — значение пункта +1 (если меню скрыто — показать его);
-//   S2 долго    — значение −1, дальше −1 каждые REPEAT_MS, пока кнопка нажата.
-// Меню скрывается само через HIDE_MS без нажатий, если идёт картинка Evo.
-//
-// НАЖАТИЯ ОТ ESP (LINK, регистр UI_KEY; плагин WC управляет этим же меню с клавиатуры
-// Evo): ext_key 1 — следующий пункт (как S1 коротко), 2 — предыдущий, 3 — значение +1
-// (S2 коротко), 4 — значение −1 (S2 долго), 5 — показать меню, 6 — скрыть.
-//
-// ПУНКТЫ МЕНЮ (cursor):
-//   0 MUX PHASE   — с какой фазы мультиплексора начинается строка (0/1);
-//   1 MUX DELAY   — задержка выборки мультиплексора, 1…4 такта 56 МГц;
-//   2 MUX CLOCK   — фаза клока приёма 0…15 (1/16 периода 56 МГц, ts_pll_capture):
-//                   сдвигает момент выборки относительно смены пикселя Evo;
-//   3/4 H/V ADJUST — поправка окна захвата, −64…+63; своя для каждого растра (mode
-//                   raster_detect, 0…7): при смене растра действует его поправка;
-//   5 AUTO ALIGN  — автоподстройка окна по границам картинки;
-//   6 SD READ     — точка выборки чтения SDRAM 0…3 (sdram_burst);
-//   7 SD CALIBRATE — запустить калибровку заново;
-//   8 ASPECT      — 4:3 (пропорции сохраняются) / 16:9 (растянуть на всю ширину);
-//   9 SIZE        — высота картинки: 100 / 95 / 90 % кадра (для телевизоров, обрезающих
-//                   края; fb_scanout, SCALE);
-//  10 SOURCE      — AUTO (таблица, пока нет Evo) / EVO / TEST. Последним: после включения
-//                   курсор стоит на первом пункте, и нажатия S2 не переключают источник.
+// НАСТРОЙКИ (меняет ESP по LINK — регистры CTRL, ADJUST, ADJ_TAB):
+//   MUX PHASE   — с какой фазы мультиплексора начинается строка (0/1);
+//   MUX DELAY   — задержка выборки мультиплексора, 1…4 такта 56 МГц;
+//   MUX CLOCK   — фаза клока приёма 0…15 (1/16 периода 56 МГц, ts_pll_capture);
+//   H/V ADJUST  — поправка окна захвата, −64…+63; своя для каждого растра (mode
+//                 raster_detect, 0…7): при смене растра действует его поправка;
+//   AUTO ALIGN  — автоподстройка окна по границам картинки;
+//   SD READ     — точка выборки чтения SDRAM 0…3 (sdram_burst), калибровка заново — CTRL[9];
+//   ASPECT      — 4:3 / 16:9; SIZE — 100 / 95 / 90 % высоты (fb_scanout, SCALE);
+//   FRAME BLEND — выводить среднее двух последних кадров Evo (fb_core, AVG): мерцание демо
+//                 (кадры A/B через один) становится ровным цветом;
+//   SOURCE      — AUTO (таблица, пока нет Evo) / EVO / TEST.
 // После сброса действуют DEF_*, через ~2 мс их заменяют настройки из flash Tang (fb_flash,
-// ext_load_*), если они там есть: MUX PHASE/DELAY/CLOCK, AUTO ALIGN, ASPECT, SIZE и поправки
-// всех растров.
+// ext_load_*), если они там есть: MUX PHASE/DELAY/CLOCK, AUTO ALIGN, ASPECT, SIZE, FRAME BLEND
+// и поправки всех растров.
 // Источник и SD READ не сохраняются: источник после включения всегда DEF_SRC, SD READ
 // калибруется заново. Записывает настройки во flash ESP (по LINK).
 //
-// КАЛИБРОВКА SD READ (после сброса, если CALIBRATE=1, и по пункту 7). На время калибровки
+// КАЛИБРОВКА SD READ (после сброса, если CALIBRATE=1, и по CTRL[9]). На время калибровки
 // источник — испытательная таблица. Когда опубликованы два кадра таблицы, для каждой точки
 // выборки 0…3 выжидаются два кадра и берутся ошибки сверки двух следующих (fb_scanout).
 // Точка годится, если ошибок нет. Из годных выбирается середина: при двух соседних —
 // та, что ближе к 1–2. Если годных нет или таблица не появилась за CAL_TIMEOUT_MS —
-// остаётся DEF_RD, в меню FAIL.
+// остаётся DEF_RD и cal_fail = 1 (STATUS).
 //
 module fb_ui #(
     parameter int TICK           = 27_000,   // тактов на 1 мс
-    parameter int IDLE_MS        = 20,
-    parameter int DEBOUNCE_MS    = 10,
-    parameter int LONG1_MS       = 700,
-    parameter int LONG2_MS       = 500,
-    parameter int REPEAT_MS      = 150,
-    parameter int HIDE_MS        = 20_000,
     parameter int CAL_TIMEOUT_MS = 3_000,
     parameter logic [1:0] DEF_SRC   = 2'd0,  // 0 AUTO, 1 EVO, 2 TEST
     parameter bit         DEF_PHASE = 1'b1,
@@ -63,33 +41,30 @@ module fb_ui #(
     parameter bit         DEF_ALIGN = 1'b1,
     parameter bit         DEF_ASPECT = 1'b0, // 0 — 4:3, 1 — 16:9
     parameter logic [1:0] DEF_SIZE  = 2'd0,  // 0 — 100 %, 1 — 95 %, 2 — 90 %
-    parameter bit         CALIBRATE = 1'b1,
-    parameter bit         OSD_START = 1'b1
+    parameter bit         DEF_AVG   = 1'b0,  // FRAME BLEND
+    parameter bit         CALIBRATE = 1'b1
 ) (
     input  wire              clk,
     input  wire              rst_n,
-    input  wire [1:0]        btn,            // сырые уровни S1, S2
 
     // Состояние
     input  wire              chk_tick,       // конец активной части выходного кадра
     input  wire [15:0]       chk_err,        // ошибки сверки таблицы за этот кадр
     input  wire              pattern_on,     // SDRAM сейчас получает таблицу
     input  wire [15:0]       frames_written,
-    input  wire              picture_ok,     // показывается картинка Evo
 
     // Запись настроек от ESP по LINK (регистры CTRL и ADJUST, см. ts_fb_core)
     input  wire              ext_ctrl_we,
-    input  wire [16:0]       ext_ctrl,       // {size[1:0], aspect, фаза клока[3:0], калибровка, меню, rd[1:0], align, delay[1:0], phase, src[1:0]}
+    input  wire              ext_src_auto,   // сброс Evo (CORERST к FT812): источник TEST → AUTO
+    input  wire [17:0]       ext_ctrl,       // {avg, size[1:0], aspect, фаза клока[3:0], калибровка, меню, rd[1:0], align, delay[1:0], phase, src[1:0]}
     input  wire              ext_adj_we,     // поправка текущего растра
     input  wire signed [7:0] ext_h_adj,
     input  wire signed [7:0] ext_v_adj,
     input  wire              ext_tab_we,     // поправка растра ext_tab_idx
     input  wire [2:0]        ext_tab_idx,
     input  wire [15:0]       ext_tab_data,   // {V, H}
-    input  wire              ext_key_we,     // нажатие от ESP (UI_KEY)
-    input  wire [2:0]        ext_key,
     input  wire              ext_load_stb,   // настройки из flash
-    input  wire [10:0]       ext_load_cfg,   // {size[1:0], aspect, align, phase, delay[1:0], clock[3:0]}
+    input  wire [11:0]       ext_load_cfg,   // {avg, size[1:0], aspect, align, phase, delay[1:0], clock[3:0]}
     input  wire [127:0]      ext_load_adj,   // растр m — [m*16 +: 16] = {V, H}
     input  wire [2:0]        mode,           // растр сейчас (raster_detect)
 
@@ -105,11 +80,10 @@ module fb_ui #(
     output reg               cfg_align,
     output reg               cfg_aspect,     // 0 — 4:3, 1 — 16:9
     output reg  [1:0]        cfg_size,       // 0 — 100 %, 1 — 95 %, 2 — 90 %
+    output reg               cfg_avg,        // FRAME BLEND
     output reg  [1:0]        cfg_rd,
 
-    // Меню
-    output reg  [3:0]        cursor,
-    output reg               osd_on,
+    // Калибровка
     output reg               cal_busy,
     output reg  [1:0]        cal_point,
     output reg  [3:0]        cal_ok,
@@ -118,8 +92,6 @@ module fb_ui #(
 );
     localparam [16:0] TICK_LAST = TICK - 1;
     localparam [1:0]  SRC_TEST  = 2'd2;
-    localparam [3:0]  MENU_SD_READ = 4'd6;
-    localparam [3:0]  MENU_LAST    = 4'd10;
 
     assign cfg_src = cal_busy ? SRC_TEST : set_src;
 
@@ -137,74 +109,9 @@ module fb_ui #(
     end
 
     // ------------------------------------------------------------------
-    // Кнопки: синхронизация, уровень покоя, дребезг, длительность нажатия
+    // Настройки: от ESP (LINK) и из flash
     // ------------------------------------------------------------------
-    reg [1:0]  b_s1, b_s2 /* synthesis syn_srlstyle = "registers" */;
-    reg [1:0]  b_idle;
-    reg        idle_known;
-    reg [15:0] idle_cnt;
-    reg [1:0]  b_raw, b_stable;
-    reg [7:0]  deb [0:1];
-    reg [15:0] held [0:1];
-    reg [15:0] rep;
-    reg s1_short, s1_long, s2_inc, s2_dec;
-
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            b_s1 <= '0; b_s2 <= '0; b_idle <= '0; idle_known <= 1'b0; idle_cnt <= '0;
-            b_raw <= '0; b_stable <= '0;
-            deb[0] <= '0; deb[1] <= '0; held[0] <= '0; held[1] <= '0; rep <= '0;
-            s1_short <= 1'b0; s1_long <= 1'b0; s2_inc <= 1'b0; s2_dec <= 1'b0;
-        end else begin
-            b_s1 <= btn;
-            b_s2 <= b_s1;
-            s1_short <= 1'b0; s1_long <= 1'b0; s2_inc <= 1'b0; s2_dec <= 1'b0;
-            if (!idle_known) begin
-                if (ms) idle_cnt <= idle_cnt + 16'd1;
-                if (idle_cnt == IDLE_MS[15:0]) begin
-                    b_idle     <= b_s2;
-                    idle_known <= 1'b1;
-                end
-            end else begin
-                b_raw <= b_s2 ^ b_idle;                 // 1 — нажата
-                if (ms) begin : per_ms
-                    integer i;
-                    for (i = 0; i < 2; i = i + 1) begin
-                        if (b_raw[i] == b_stable[i]) deb[i] <= '0;
-                        else if (deb[i] == DEBOUNCE_MS[7:0] - 8'd1) begin
-                            deb[i]      <= '0;
-                            b_stable[i] <= b_raw[i];
-                            if (b_raw[i]) held[i] <= '0;
-                            else begin
-                                // отпускание: короткое нажатие
-                                if (i == 0 && held[0] < LONG1_MS[15:0]) s1_short <= 1'b1;
-                                if (i == 1 && held[1] < LONG2_MS[15:0]) s2_inc   <= 1'b1;
-                            end
-                        end else deb[i] <= deb[i] + 8'd1;
-                        if (b_stable[i] && held[i] != 16'hFFFF) held[i] <= held[i] + 16'd1;
-                    end
-                    if (b_stable[0] && held[0] == LONG1_MS[15:0] - 16'd1) s1_long <= 1'b1;
-                    if (b_stable[1]) begin
-                        if (held[1] == LONG2_MS[15:0] - 16'd1) begin
-                            s2_dec <= 1'b1;
-                            rep    <= '0;
-                        end else if (held[1] >= LONG2_MS[15:0]) begin
-                            if (rep == REPEAT_MS[15:0] - 16'd1) begin
-                                s2_dec <= 1'b1;
-                                rep    <= '0;
-                            end else rep <= rep + 16'd1;
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    // ------------------------------------------------------------------
-    // Меню и настройки
-    // ------------------------------------------------------------------
-    reg [15:0] hide_cnt;
-    reg        cal_start;
+    reg cal_start;
 
     // Поправки окна по растрам
     reg signed [7:0] tab_h [0:7];
@@ -216,19 +123,6 @@ module fb_ui #(
         assign adj_tab[gm*16 +: 16] = {tab_v[gm], tab_h[gm]};
     end endgenerate
 
-    // События меню: кнопки Tang и нажатия от ESP
-    wire k_next = s1_short || (ext_key_we && ext_key == 3'd1);
-    wire k_prev = ext_key_we && ext_key == 3'd2;
-    wire k_inc  = s2_inc   || (ext_key_we && ext_key == 3'd3);
-    wire k_dec  = s2_dec   || (ext_key_we && ext_key == 3'd4);
-    wire k_show = ext_key_we && ext_key == 3'd5;
-    wire k_hide = ext_key_we && ext_key == 3'd6;
-    wire k_any  = s1_short || s1_long || s2_inc || s2_dec || ext_key_we;
-
-    function automatic [1:0] wrap3(input [1:0] v, input up);
-        wrap3 = up ? ((v == 2'd2) ? 2'd0 : v + 2'd1) : ((v == 2'd0) ? 2'd2 : v - 2'd1);
-    endfunction
-
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             set_src   <= DEF_SRC;
@@ -239,50 +133,10 @@ module fb_ui #(
             cfg_align <= DEF_ALIGN;
             cfg_aspect <= DEF_ASPECT;
             cfg_size  <= DEF_SIZE;
-            cursor    <= '0;
-            osd_on    <= OSD_START;
-            hide_cnt  <= '0;
+            cfg_avg   <= DEF_AVG;
             cal_start <= CALIBRATE;
         end else begin
             cal_start <= 1'b0;
-            if (k_any) hide_cnt <= '0;
-            else if (!osd_on || !picture_ok || cal_busy) hide_cnt <= '0;
-            else if (ms) begin
-                if (hide_cnt == HIDE_MS[15:0] - 16'd1) osd_on <= 1'b0;
-                else hide_cnt <= hide_cnt + 16'd1;
-            end
-
-            if (k_show) begin
-                osd_on <= 1'b1;
-            end else if (k_hide) begin
-                osd_on <= 1'b0;
-            end else if (!osd_on) begin
-                if (k_next || k_prev || s1_long || k_inc || (ext_key_we && k_dec)) osd_on <= 1'b1;
-            end else if (s1_long) begin
-                osd_on <= 1'b0;
-            end else if (k_next) begin
-                cursor <= (cursor == MENU_LAST) ? 4'd0 : cursor + 4'd1;
-            end else if (k_prev) begin
-                cursor <= (cursor == 4'd0) ? MENU_LAST : cursor - 4'd1;
-            end else if (k_inc || k_dec) begin
-                case (cursor)
-                    4'd0: cfg_phase <= ~cfg_phase;
-                    4'd1: cfg_delay <= k_inc ? cfg_delay + 2'd1 : cfg_delay - 2'd1;
-                    4'd2: cfg_clock <= k_inc ? cfg_clock + 4'd1 : cfg_clock - 4'd1;
-                    4'd3: if (k_inc ? cfg_h_adj != 8'sd63 : cfg_h_adj != -8'sd64)
-                              tab_h[mode] <= k_inc ? cfg_h_adj + 8'sd1 : cfg_h_adj - 8'sd1;
-                    4'd4: if (k_inc ? cfg_v_adj != 8'sd63 : cfg_v_adj != -8'sd64)
-                              tab_v[mode] <= k_inc ? cfg_v_adj + 8'sd1 : cfg_v_adj - 8'sd1;
-                    4'd5: cfg_align <= ~cfg_align;
-                    4'd6: ;                              // SD READ — в блоке калибровки
-                    4'd7: cal_start <= 1'b1;
-                    4'd8: cfg_aspect <= ~cfg_aspect;
-                    4'd9: cfg_size <= wrap3(cfg_size, k_inc);
-                    default: set_src <= wrap3(set_src, k_inc);
-                endcase
-            end
-
-            // Запись от ESP — после кнопок, то есть важнее их
             if (ext_ctrl_we) begin
                 set_src   <= (ext_ctrl[1:0] == 2'd3) ? 2'd0 : ext_ctrl[1:0];
                 cfg_phase <= ext_ctrl[2];
@@ -291,9 +145,13 @@ module fb_ui #(
                 cfg_align <= ext_ctrl[5];
                 cfg_aspect <= ext_ctrl[14];
                 cfg_size   <= (ext_ctrl[16:15] == 2'd3) ? 2'd0 : ext_ctrl[16:15];
-                osd_on    <= ext_ctrl[8];
+                cfg_avg    <= ext_ctrl[17];
                 cal_start <= ext_ctrl[9];
             end
+            // Сброс Evo — выход из испытательной таблицы к картинке TS-Config (Tang при сбросе
+            // больше не перезагружается, а источник не хранится и после загрузки — AUTO)
+            if (ext_src_auto && set_src == 2'd2)
+                set_src <= 2'd0;
             if (ext_adj_we) begin
                 tab_h[mode] <= ext_h_adj;
                 tab_v[mode] <= ext_v_adj;
@@ -310,6 +168,7 @@ module fb_ui #(
                 cfg_align <= ext_load_cfg[7];
                 cfg_aspect <= ext_load_cfg[8];
                 cfg_size   <= (ext_load_cfg[10:9] == 2'd3) ? 2'd0 : ext_load_cfg[10:9];
+                cfg_avg    <= ext_load_cfg[11];
                 for (int m = 0; m < 8; m = m + 1) begin
                     tab_h[m] <= ext_load_adj[m*16 +: 8];
                     tab_v[m] <= ext_load_adj[m*16 + 8 +: 8];
@@ -346,9 +205,6 @@ module fb_ui #(
             cal_done <= 1'b0; cal_fail <= 1'b0; cfg_rd <= DEF_RD;
             cal_ms <= '0; fw0 <= '0; fw0_set <= 1'b0; frames <= '0; bad <= 1'b0;
         end else begin
-            if (cst == C_IDLE && osd_on && cursor == MENU_SD_READ && (k_inc || k_dec) &&
-                !k_show && !k_hide)
-                cfg_rd <= k_inc ? cfg_rd + 2'd1 : cfg_rd - 2'd1;
             if (cst == C_IDLE && ext_ctrl_we && !ext_ctrl[9])
                 cfg_rd <= ext_ctrl[7:6];
 

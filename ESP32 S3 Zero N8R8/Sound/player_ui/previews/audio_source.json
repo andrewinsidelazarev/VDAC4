@@ -1,0 +1,20 @@
+{
+  "source": "E:\\zx\\Music\\MIDI\\MIDI-Full-Archive v2026.10.1\\MIDI-Full-Archive v2026.10.1\\MIDI-RuEn\\MIDI-Collection\\100%sure.polyphone.midi\\melodia.wav",
+  "sample_rate_hz": 8000,
+  "seconds": 4,
+  "frames": 100,
+  "fps": 25,
+  "synthetic": false,
+  "available_excerpt_seconds": 2.812375,
+  "declared_frames": 208000,
+  "looped_excerpt": true,
+  "fft": 2048,
+  "window": "Hann",
+  "bands": 64,
+  "range_hz": [
+    40,
+    20000
+  ],
+  "scale": "0..255 = -72..0 dBFS; 32 display bars = max of adjacent pair",
+  "note": "Полосы выше частоты Найквиста (4000 Hz) пустые. Короткий фрагмент зациклен. Аудио не копируется."
+}

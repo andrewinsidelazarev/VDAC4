@@ -10,8 +10,10 @@
 #include <esp_private/esp_gpio_reserve.h>
 #include <esp_private/gpio.h>
 #include <esp_private/periph_ctrl.h>
+#include <hal/gpio_ll.h>
 #include <hal/spi_hal.h>
 #include <hal/spi_ll.h>
+#include <soc/gpio_struct.h>
 #include <soc/spi_periph.h>
 
 namespace zifi {
@@ -161,6 +163,9 @@ bool transfer(uint8_t command, uint32_t address, uint32_t* words, size_t count, 
   bool done = false;
   while (!(done = spi_hal_usr_is_done(&g_hal))) {
     if (esp_cpu_get_cycle_count() - started > kTimeoutCycles) {
+      // Задачу могли прервать между проверками дольше срока (другая задача, запись во flash
+      // ESP с остановкой кэша) — обмен тогда давно закончен: решает последняя проверка
+      done = spi_hal_usr_is_done(&g_hal);
       break;
     }
   }
@@ -177,6 +182,100 @@ bool transfer(uint8_t command, uint32_t address, uint32_t* words, size_t count, 
     for (size_t i = 0; i < count; ++i) {
       words[i] = __builtin_bswap32(g_rx[i]);
     }
+  }
+  return true;
+}
+
+bool writeRepeat(uint8_t command, uint32_t address, const uint32_t* words, size_t count) {
+  if (!g_ready || count == 0) {
+    return false;
+  }
+  spi_hal_trans_config_t trans = {};
+  trans.cmd = command;
+  trans.cmd_bits = 8;
+  trans.addr = address;
+  trans.addr_bits = 32;
+  trans.line_mode.cmd_lines = 1;
+  trans.line_mode.addr_lines = 4;
+  trans.line_mode.data_lines = 4;
+  trans.tx_bitlen = 32;
+  trans.send_buffer = reinterpret_cast<uint8_t*>(g_tx);
+  spi_hal_setup_trans(&g_hal, &g_dev, &trans);
+  spi_hal_enable_data_line(g_hal.hw, true, false);
+  spi_dev_t* hw = g_hal.hw;
+  const gpio_num_t cs = static_cast<gpio_num_t>(g_pins.cs);
+  for (size_t i = 0; i < count; ++i) {
+    // Команда, адрес и длины — в регистрах с прошлой транзакции; слово — в буфер W0
+    gpio_ll_set_level(&GPIO, cs, 0);
+    hw->data_buf[0] = __builtin_bswap32(words[i]);
+    spi_ll_apply_config(hw);
+    spi_ll_user_start(hw);
+    const uint32_t started = esp_cpu_get_cycle_count();
+    bool done = false;
+    while (!(done = spi_ll_usr_is_done(hw))) {
+      if (esp_cpu_get_cycle_count() - started > kTimeoutCycles) {
+        done = spi_ll_usr_is_done(hw);   // как в transfer(): решает последняя проверка
+        break;
+      }
+    }
+    spi_ll_clear_int_stat(hw);
+    gpio_ll_set_level(&GPIO, cs, 1);
+    if (!done) {
+      ESP_LOGE(kTag, "transaction did not finish");
+      return false;
+    }
+  }
+  return true;
+}
+
+bool writeBurst(uint8_t command, uint32_t address, const uint32_t* words, size_t count) {
+  if (!g_ready || count == 0) {
+    return false;
+  }
+  size_t bits = (count < kMaxWords ? count : kMaxWords) * 32;
+  spi_hal_trans_config_t trans = {};
+  trans.cmd = command;
+  trans.cmd_bits = 8;
+  trans.addr = address;
+  trans.addr_bits = 32;
+  trans.line_mode.cmd_lines = 1;
+  trans.line_mode.addr_lines = 4;
+  trans.line_mode.data_lines = 4;
+  trans.tx_bitlen = static_cast<int>(bits);
+  trans.send_buffer = reinterpret_cast<uint8_t*>(g_tx);
+  spi_hal_setup_trans(&g_hal, &g_dev, &trans);
+  spi_hal_enable_data_line(g_hal.hw, true, false);
+  spi_dev_t* hw = g_hal.hw;
+  const gpio_num_t cs = static_cast<gpio_num_t>(g_pins.cs);
+  for (size_t at = 0; at < count;) {
+    // Команда и адрес — в регистрах с прошлой транзакции; слова — в буфер W0…W15, длина
+    // меняется только у последней, неполной транзакции
+    const size_t n = count - at < kMaxWords ? count - at : kMaxWords;
+    if (n * 32 != bits) {
+      bits = n * 32;
+      spi_ll_set_mosi_bitlen(hw, bits);
+    }
+    gpio_ll_set_level(&GPIO, cs, 0);
+    for (size_t i = 0; i < n; ++i) {
+      hw->data_buf[i] = __builtin_bswap32(words[at + i]);
+    }
+    spi_ll_apply_config(hw);
+    spi_ll_user_start(hw);
+    const uint32_t started = esp_cpu_get_cycle_count();
+    bool done = false;
+    while (!(done = spi_ll_usr_is_done(hw))) {
+      if (esp_cpu_get_cycle_count() - started > kTimeoutCycles) {
+        done = spi_ll_usr_is_done(hw);   // как в transfer(): решает последняя проверка
+        break;
+      }
+    }
+    spi_ll_clear_int_stat(hw);
+    gpio_ll_set_level(&GPIO, cs, 1);
+    if (!done) {
+      ESP_LOGE(kTag, "transaction did not finish");
+      return false;
+    }
+    at += n;
   }
   return true;
 }

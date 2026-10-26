@@ -11,6 +11,9 @@
 //   данные по IO0…IO3 словами по 32 бита (старший байт вперёд), адрес слова +4 за слово.
 // Команды: 0x01 — запись регистров, 0x02 — чтение регистров. Остальные игнорируются.
 // Адрес — байтовый, младшие два бита не учитываются; регистров 256 (адреса 0…0x3FC).
+// Запись — по номеру слова до 18 бит (адреса до 0xFFFFF): регистры — номера 0…255, окно
+// оверлеев (fb_ovl) — 0x80000…0xFFFFF; чтение — номер слова до 12 бит (адреса до 0x3FFC): регистры
+// и окна, которые читаются из BSRAM по фронту SCK (с 1.30 — RX моста к microSD, 0x2000…).
 //
 // ДОМЕНЫ. Сдвиговые регистры тактируются самим LINK_SCK (вывод GCLKT_1) и
 // сбрасываются по CS. Записанное слово переходит в домен пикселей переключателем:
@@ -34,9 +37,9 @@ module fb_link #(
     input  wire        clk,
     input  wire        rst_n,
     output reg         wr_stb,         // такт: записано слово wr_data по адресу wr_addr
-    output reg  [7:0]  wr_addr,        // номер 32-битного регистра
+    output reg  [17:0] wr_addr,        // номер 32-битного слова (регистр — 0…255)
     output reg  [31:0] wr_data,
-    output wire [7:0]  rd_addr,        // какой регистр выдать следующим (домен SCK)
+    output wire [11:0] rd_addr,        // какое слово выдать следующим (домен SCK)
     input  wire [31:0] rd_data         // его значение (комбинационно от rd_addr)
 );
     localparam [7:0] CMD_WRITE = 8'h01, CMD_READ = 8'h02;
@@ -66,19 +69,19 @@ module fb_link #(
     // Слово записи. Готовое слово и его адрес держатся до конца следующего слова;
     // CS их не сбрасывает — домен пикселей может забрать последнее слово уже после CS.
     reg [31:0] wsr      = '0;
-    reg [7:0]  waddr    = '0;    // номер регистра текущего слова записи
+    reg [17:0] waddr    = '0;    // номер слова текущей записи
     reg        w_tog    = 1'b0;
-    reg [7:0]  w_addr_q = '0;
+    reg [17:0] w_addr_q = '0;
     reg [31:0] w_data_q = '0;
     always @(posedge sck) begin
         if (!cs_n && cmd == CMD_WRITE && cyc >= ADDR_END) begin
             wsr <= {wsr[27:0], io_in};
-            if (cyc == ADDR_END) waddr <= addr_sr[9:2];
+            if (cyc == ADDR_END) waddr <= addr_sr[19:2];
             if (wnib == 3'd7) begin
                 w_data_q <= {wsr[27:0], io_in};
                 w_addr_q <= waddr;
                 w_tog    <= ~w_tog;
-                waddr    <= waddr + 8'd1;
+                waddr    <= waddr + 18'd1;
             end
         end
     end
@@ -86,7 +89,7 @@ module fb_link #(
     // ------------------------------------------------------------------
     // Выдача по спаду SCK
     // ------------------------------------------------------------------
-    reg [7:0]  raddr = '0;   // номер регистра следующего выдаваемого слова
+    reg [11:0] raddr = '0;   // номер слова, выдаваемого следующим
     reg [31:0] rsr   = '0;
     reg [2:0]  rnib  = '0;
     initial begin io_oe = 1'b0; io_out = '0; end
@@ -96,14 +99,14 @@ module fb_link #(
         if (cs_n) begin
             io_oe <= 1'b0; io_out <= '0; raddr <= '0; rsr <= '0; rnib <= '0;
         end else if (cmd == CMD_READ) begin
-            if (cyc == ADDR_END) raddr <= addr_sr[9:2];
+            if (cyc == ADDR_END) raddr <= addr_sr[13:2];
             if (cyc >= RD_START) begin
                 io_oe <= 1'b1;
                 if (rnib == 3'd0) begin
                     // Новое слово: значение выставлено ещё при смене raddr
                     io_out <= rd_data[31:28];
                     rsr    <= {rd_data[27:0], 4'h0};
-                    raddr  <= raddr + 8'd1;
+                    raddr  <= raddr + 12'd1;
                 end else begin
                     io_out <= rsr[31:28];
                     rsr    <= {rsr[27:0], 4'h0};

@@ -102,13 +102,23 @@ Page1Depth:     db 0                    ; сколько вызовов Page1_Ca
 ; Переходники API Wild Commander. Номер функции передаётся в A и выполняется
 ; общим входом Wc_Api. Для функций, где вызывающий код уже использует A как
 ; параметр, значение временно переносится в альтернативный AF через EX AF,AF'.
+; Окна и текст — только при окне на Evo: экран Tang показан — их нет (screen.asm).
 WC_PRWOW:
+        ld a,(UiHidden)
+        or a
+        ret nz
         ld a,FN_PRWOW
         jr Wc_Api
 WC_RRESB:
+        ld a,(UiHidden)
+        or a
+        ret nz
         ld a,FN_RRESB
         jr Wc_Api
 WC_TXTPR:
+        ld a,(UiHidden)
+        or a
+        ret nz
         ld a,FN_TXTPR
         jr Wc_Api
 WC_GEDPL:
@@ -141,19 +151,21 @@ mainEnd:
         ; За концом кода в той же странице (с карты не грузится):
         ; #B000..#B3FF — окно FMADDR (CRAM и SFILE TS-Conf): описатели спрайта
         ;   обложки (cover.asm) пишутся в SFILE с #B200 и ложатся и в ОЗУ, поэтому
-        ;   там — только временная строка окна (UiLine, ui.asm);
+        ;   там — только временное: строка окна (UiLine, ui.asm) и за ней тело AUDIO_STATUS
+        ;   (UiBlock: собирается перед самой отправкой);
         ; #B400..#B5FF — сектор потока 1 (обложка, cover.asm);
         ; #B600..#B9FF — блок файла: два сектора — тело одного кадра AUDIO_DATA.
         ;   С чётного адреса: оттуда его прямо, без копии, забирает DMA (Proto_Send).
 SpriteFile      equ #B200
 UiLine          equ SpriteFile
 UI_LINE_SIZE    equ 200
+UiBlock         equ UiLine+UI_LINE_SIZE
 S1Buffer        equ #B400
 Mp3Block        equ #B600
 Mp3ReadBuffer   equ #D000                ; свободная часть страницы 1, только данные
         ASSERT Mp3ReadBuffer + MP3_READ_SIZE <= #10000
         ASSERT mainEnd <= SpriteFile, "plugin code runs into the FMADDR window"
-        ASSERT UiLine + UI_LINE_SIZE <= S1Buffer
+        ASSERT UiBlock + UI_BLOCK_SIZE <= S1Buffer
         ASSERT S1Buffer + 512 <= Mp3Block
         ASSERT Mp3Block + MP3_BLOCK_SIZE <= #C000
         ENT
@@ -166,6 +178,7 @@ page1Start:
         INCLUDE "esp_modules.asm"
         INCLUDE "track.asm"
         INCLUDE "fast_media.asm"
+        INCLUDE "screen.asm"
         ENDMODULE
 page1End:
         ASSERT page1End <= Mp3ReadBuffer, "page 1 code overlaps SD read buffer"

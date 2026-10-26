@@ -1,27 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Контроллер встроенной SDRAM GW2AR-18 (64 Мбит, 32 бит: 4 банка × 2048 строк × 256 слов)
-// с пакетами по 8 слов (32 байта).
+// с пакетами по 8 слов (32 байта); запрос — до 8 пакетов подряд в одной строке (64 слова).
 //
 // Зачем свой, а не third_party/sdram/sdram.v: тот побайтовый и без пакетов — 5 тактов
 // на слово, около 50 МБ/с на 66 МГц. Кадровому буферу 576p50 нужно ~82 МБ/с
 // (запись 48,83 кадра/с + чтение 50 кадров/с по 720×576×2 байта), 1024×768 — больше.
-// Пакет из 8 слов с автопредзарядом занимает ~14 тактов, это ~2,3 байта/такт.
+// Пакет из 8 слов с автопредзарядом занимает ~14 тактов, это ~2,3 байта/такт; запрос из
+// 8 пакетов подряд (команды READ/WRITE через 8 тактов без закрытия строки) — ~72 такта,
+// ~3,6 байта/такт: так читается и пишется кадр 1024×768.
 //
 // Адрес — номер 32-битного слова: {строка[10:0], банк[1:0], столбец[7:0]}.
-// Пакет всегда выровнен на 8 слов (addr[2:0] игнорируются) и не пересекает строку.
+// Пакет всегда выровнен на 8 слов (addr[2:0] игнорируются); запрос из req_len + 1 пакетов
+// не должен пересекать строку (256 слов) — за этим следит клиент.
 //
 // Интерфейс клиента:
-//   req/we/addr/req_tag держатся до ack. op_tag повторяет метку принятого запроса
+//   req/we/addr/req_len/req_tag держатся до ack. op_tag повторяет метку принятого запроса
 //   на всё время операции — по ней арбитр раздаёт ack, wr_take и rd_valid.
-//   req/we/addr держатся до ack. После ack для записи контроллер 8 тактов подряд
-//   выставляет wr_take=1 и номер слова wr_idx — клиент в тот же такт отдаёт wdata
-//   (комбинационно из своего буфера). Для чтения приходят 8 импульсов rd_valid
-//   с rd_idx и rd_data. Следующий запрос можно подавать сразу после ack.
+//   После ack для записи контроллер 8·(req_len + 1) тактов подряд выставляет wr_take=1 и
+//   номер слова в запросе wr_idx — клиент в тот же такт отдаёт wdata и wmask
+//   (комбинационно из своего буфера; wmask — какие байты слова писать, через DQM). Для
+//   чтения приходят 8·(req_len + 1) импульсов rd_valid подряд с rd_idx и rd_data. Следующий
+//   запрос можно подавать сразу после ack.
 //
-// Упрощения первой версии: одна операция за раз (банки не чередуются), каждая строка
-// закрывается автопредзарядом. Этого хватает на 576p50 с запасом; для 1024×768 позже
-// добавится чередование банков.
+// Упрощения: одна операция за раз (банки не чередуются), строка закрывается автопредзарядом
+// последнего пакета запроса.
 //
 // Клок микросхемы — инверсия клока логики (верхний модуль): команды и данные записи
 // меняются на фронте логики и устойчивы на фронте микросхемы через полтакта.
@@ -34,9 +37,11 @@
 // Поэтому точка выборки слова 0 выбирается из четырёх с шагом в полтакта:
 //   0 — фронт E2 (29,6 нс)   1 — спад E2,5 (37,0 нс)   2 — фронт E3 (44,4 нс)   3 — спад E3,5 (51,8 нс)
 // Слово i берётся на i тактов позже. По умолчанию 1; рабочую точку находит калибровка
-// (fb_ui) по испытательной таблице, её можно сменить вручную в экранном меню.
+// (fb_ui) по испытательной таблице, её можно сменить вручную в экранном меню. При CL=3 (ядро
+// FT812: контроллер на 123,75 МГц, CL=2 там паспортом не обещан) все точки — на такт позже.
 //
 module sdram_burst #(
+    parameter int TAGW      = 1,       // ширина метки клиента
     parameter int CLK_KHZ   = 67_500,
     parameter int CL        = 2,       // CAS latency, записывается в mode register
     parameter int T_RCD     = 2,       // ACTIVE → READ/WRITE
@@ -54,14 +59,16 @@ module sdram_burst #(
     input  wire        req,
     input  wire        we,
     input  wire [20:0] addr,
-    input  wire        req_tag,      // метка клиента; возвращается в op_tag на всё время операции
+    input  wire [2:0]  req_len,      // пакетов в запросе − 1 (0…7)
+    input  wire [TAGW-1:0] req_tag,  // метка клиента; возвращается в op_tag на всё время операции
     output reg         ack,
-    output reg         op_tag,
+    output reg  [TAGW-1:0] op_tag,
     output reg         wr_take,
-    output reg  [2:0]  wr_idx,
+    output reg  [5:0]  wr_idx,       // слово в запросе
     input  wire [31:0] wdata,
+    input  wire [3:0]  wmask,
     output reg         rd_valid,
-    output reg  [2:0]  rd_idx,
+    output reg  [5:0]  rd_idx,       // слово в запросе
     output reg  [31:0] rd_data,
     output wire        init_done,
 
@@ -80,15 +87,20 @@ module sdram_burst #(
     localparam int INIT_CYCLES = INIT_US * CLK_KHZ / 1000;
     localparam int REFI_CYCLES = REFI_NS * CLK_KHZ / 1_000_000 - 8;  // запас на занятость
     localparam [15:0] INIT_WAIT_C = INIT_CYCLES;
-    localparam [15:0] RCD_C       = T_RCD - 1;
-    localparam [15:0] RP_C        = T_RP;
-    localparam [15:0] RFC_C       = T_RFC;
-    localparam [15:0] RD_WAIT_C   = CL + 8 + T_RP;
-    localparam [15:0] WR_WAIT_C   = T_WR + T_RP;
+    // Короткие ожидания — 4-битным cnt: на 123,75 МГц (ядро FT812) 16-битное сравнение с нулём
+    // не укладывалось в такт вместе с выбором команды
+    localparam [3:0]  RCD_C       = T_RCD - 1;
+    localparam [3:0]  RP_C        = T_RP;
+    localparam [3:0]  RFC_C       = T_RFC;
+    localparam [3:0]  RD_WAIT_C   = CL + 8 + T_RP;
+    localparam [3:0]  WR_WAIT_C   = T_WR + T_RP;
     localparam [11:0] REFI_C      = REFI_CYCLES;
 
     initial begin
         if (T_RCD < 2) $error("sdram_burst: T_RCD должен быть не меньше 2 тактов");
+        if (CL < 2 || CL > 3) $error("sdram_burst: CL — 2 или 3");
+        if (T_RCD > 16 || T_RFC > 15 || CL + 8 + T_RP > 15 || T_WR + T_RP > 15)
+            $error("sdram_burst: ожидание длиннее 15 тактов — cnt 4-битный");
     end
 
     // Команды {RAS, CAS, WE}
@@ -101,13 +113,18 @@ module sdram_burst #(
     } state_t;
     state_t state;
 
-    reg [15:0] cnt;                // универсальный счётчик ожидания
+    reg [15:0] init_cnt;           // пауза после включения
+    reg [3:0]  cnt;                // короткие ожидания
+    reg        st_wr;              // state == S_WRITE — отдельным триггером: от него sdram_dq_oe
+                                   // у выводов (дешифратор состояния туда не успевал на 123,75 МГц)
     reg [3:0]  init_refs;
     reg [11:0] refi_cnt;
     reg        refresh_due;
     reg        cur_we;
     reg [20:0] cur_addr;
-    reg [2:0]  burst_pos;
+    reg [2:0]  cur_len;            // пакетов в запросе − 1
+    reg [2:0]  rd_k;               // пакет следующей команды READ
+    reg [5:0]  burst_pos;          // слово записи в запросе
     reg        done_init;
     assign init_done = done_init;
 
@@ -117,7 +134,9 @@ module sdram_burst #(
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state        <= S_INIT_WAIT;
+            init_cnt     <= '0;
             cnt          <= '0;
+            st_wr        <= 1'b0;
             init_refs    <= '0;
             refi_cnt     <= '0;
             refresh_due  <= 1'b0;
@@ -134,14 +153,18 @@ module sdram_burst #(
             sdram_dq_oe  <= 1'b0;
             cur_we       <= 1'b0;
             cur_addr     <= '0;
+            cur_len      <= '0;
+            rd_k         <= '0;
             burst_pos    <= '0;
-            op_tag       <= 1'b0;
+            op_tag       <= '0;
         end else begin
             ack        <= 1'b0;
             wr_take    <= 1'b0;
             sdram_cs_n <= 1'b0;
             {sdram_ras_n, sdram_cas_n, sdram_we_n} <= CMD_NOP;
-            sdram_dq_oe <= 1'b0;
+            // Данные записи — каждый такт (на выводы идут только при dq_oe); dq_oe — такт S_WRITE
+            sdram_dq_out <= wdata;
+            sdram_dq_oe  <= st_wr;
 
             // Счётчик регенерации идёт всегда после инициализации
             if (done_init) begin
@@ -157,10 +180,9 @@ module sdram_burst #(
             // ---------------- инициализация ----------------
             S_INIT_WAIT: begin
                 sdram_dqm <= 4'hF;
-                if (cnt == INIT_WAIT_C) begin
-                    cnt   <= '0;
+                if (init_cnt == INIT_WAIT_C) begin
                     state <= S_INIT_PRE;
-                end else cnt <= cnt + 16'd1;
+                end else init_cnt <= init_cnt + 16'd1;
             end
             S_INIT_PRE: begin
                 {sdram_ras_n, sdram_cas_n, sdram_we_n} <= CMD_PRE;
@@ -169,7 +191,7 @@ module sdram_burst #(
                 state <= S_INIT_REF;
             end
             S_INIT_REF: begin
-                if (cnt != 0) cnt <= cnt - 16'd1;
+                if (cnt != 0) cnt <= cnt - 4'd1;
                 else if (init_refs == 4'd8) begin
                     state <= S_INIT_MRS;
                 end else begin
@@ -185,7 +207,7 @@ module sdram_burst #(
                 sdram_a  <= 11'd0;
                 sdram_a[2:0] <= 3'b011;
                 sdram_a[6:4] <= CL[2:0];
-                cnt      <= 16'd3;
+                cnt      <= 4'd3;
                 state    <= S_WAIT;
                 done_init <= 1'b1;
             end
@@ -202,6 +224,7 @@ module sdram_burst #(
                     ack      <= 1'b1;
                     cur_we   <= we;
                     cur_addr <= addr;
+                    cur_len  <= req_len;
                     op_tag   <= req_tag;
                     {sdram_ras_n, sdram_cas_n, sdram_we_n} <= CMD_ACT;
                     sdram_ba <= addr[9:8];
@@ -213,41 +236,70 @@ module sdram_burst #(
             S_ACT: begin
                 // ACTIVE и READ/WRITE на выводах разделены ровно T_RCD тактами.
                 // Для записи слово 0 запрашивается на такт раньше команды WRITE.
-                if (cur_we && cnt == 16'd1) begin
+                if (cur_we && cnt == 4'd1) begin
                     wr_take   <= 1'b1;
-                    wr_idx    <= 3'd0;
-                    burst_pos <= 3'd0;
+                    wr_idx    <= 6'd0;
+                    burst_pos <= 6'd0;
                     state     <= S_WRITE;
-                end else if (!cur_we && cnt == 16'd0) begin
+                    st_wr     <= 1'b1;
+                end else if (!cur_we && cnt == 4'd0) begin
+                    // A10=1 — автопредзаряд, только у последнего пакета запроса
                     {sdram_ras_n, sdram_cas_n, sdram_we_n} <= CMD_RD;
                     sdram_ba <= cur_addr[9:8];
-                    sdram_a  <= {1'b1, 2'b00, cur_addr[7:3], 3'b000};  // A10=1 — автопредзаряд
-                    cnt      <= RD_WAIT_C;
-                    state    <= S_WAIT;
+                    sdram_a  <= {cur_len == 3'd0, 2'b00, cur_addr[7:3], 3'b000};
+                    if (cur_len == 3'd0) begin
+                        cnt   <= RD_WAIT_C;
+                        state <= S_WAIT;
+                    end else begin
+                        rd_k  <= 3'd1;
+                        cnt   <= 4'd7;             // следующий READ — через 8 тактов
+                        state <= S_READ;
+                    end
                 end else begin
-                    cnt <= cnt - 16'd1;
+                    cnt <= cnt - 4'd1;
+                end
+            end
+            S_READ: begin
+                // Пакеты запроса без закрытия строки: READ каждые 8 тактов, данные подряд
+                if (cnt == 4'd0) begin
+                    {sdram_ras_n, sdram_cas_n, sdram_we_n} <= CMD_RD;
+                    sdram_ba <= cur_addr[9:8];
+                    sdram_a  <= {rd_k == cur_len, 2'b00, 5'(cur_addr[7:3] + 5'(rd_k)), 3'b000};
+                    if (rd_k == cur_len) begin
+                        cnt   <= RD_WAIT_C;
+                        state <= S_WAIT;
+                    end else begin
+                        rd_k <= rd_k + 3'd1;
+                        cnt  <= 4'd7;
+                    end
+                end else begin
+                    cnt <= cnt - 4'd1;
                 end
             end
             S_WRITE: begin
                 // wr_take был выставлен тактом раньше: wdata сейчас — слово burst_pos
-                sdram_dq_out <= wdata;
-                sdram_dq_oe  <= 1'b1;
-                if (burst_pos == 3'd0) begin
+                // (sdram_dq_out и sdram_dq_oe — выше, каждый такт)
+                sdram_dqm    <= ~wmask;          // DQM записи действует в такт данных
+                if (burst_pos[2:0] == 3'd0) begin
+                    // WRITE каждого пакета; автопредзаряд — у последнего
                     {sdram_ras_n, sdram_cas_n, sdram_we_n} <= CMD_WR;
                     sdram_ba <= cur_addr[9:8];
-                    sdram_a  <= {1'b1, 2'b00, cur_addr[7:3], 3'b000};
+                    sdram_a  <= {burst_pos[5:3] == cur_len, 2'b00,
+                                 5'(cur_addr[7:3] + 5'(burst_pos[5:3])), 3'b000};
                 end
-                if (burst_pos == 3'd7) begin
+                if (burst_pos == {cur_len, 3'd7}) begin
                     cnt   <= WR_WAIT_C;
                     state <= S_WAIT;
+                    st_wr <= 1'b0;
+                    // DQM снова 0 — в S_IDLE; до этого тактов с данными нет
                 end else begin
-                    burst_pos <= burst_pos + 3'd1;
+                    burst_pos <= burst_pos + 6'd1;
                     wr_take   <= 1'b1;
-                    wr_idx    <= burst_pos + 3'd1;
+                    wr_idx    <= burst_pos + 6'd1;
                 end
             end
             S_WAIT: begin
-                if (cnt != 0) cnt <= cnt - 16'd1;
+                if (cnt != 0) cnt <= cnt - 4'd1;
                 else state <= S_IDLE;
             end
             default: state <= S_IDLE;
@@ -260,7 +312,8 @@ module sdram_burst #(
     // защёлкнутый полтакта раньше этого фронта. Отсюда для rd_phase:
     //   0: E2 = условие rd_pipe[1], DQ;      1: E2,5 = rd_pipe[2], dq_neg;
     //   2: E3 = rd_pipe[2], DQ;              3: E3,5 = rd_pipe[3], dq_neg.
-    wire rd_issue = (state == S_ACT) && (cnt == 16'd0) && !cur_we;
+    wire rd_issue = ((state == S_ACT) && (cnt == 4'd0) && !cur_we) ||
+                    ((state == S_READ) && (cnt == 4'd0));
     wire [31:0] dq_neg;
 `ifdef SIMULATION
     reg [31:0] dq_neg_q;
@@ -275,16 +328,17 @@ module sdram_burst #(
     end
 `endif
 
+    localparam int CB = CL - 2;        // сдвиг точек выборки от CL=2 (CL — 2 или 3)
     reg  [1:0] rd_ph;                  // фаза держится на время пакета
     reg        rd_now;                 // сейчас выборка одного из 8 слов пакета
     always_comb begin
         case (rd_ph)
-            2'd0:       rd_now = |rd_pipe[8:1];
-            2'd1, 2'd2: rd_now = |rd_pipe[9:2];
-            default:    rd_now = |rd_pipe[10:3];
+            2'd0:       rd_now = |rd_pipe[8+CB:1+CB];
+            2'd1, 2'd2: rd_now = |rd_pipe[9+CB:2+CB];
+            default:    rd_now = |rd_pipe[10+CB:3+CB];
         endcase
     end
-    reg [2:0] rd_cnt;
+    reg [5:0] rd_cnt;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_pipe  <= '0;
@@ -302,7 +356,7 @@ module sdram_burst #(
                 rd_valid <= 1'b1;
                 rd_data  <= rd_ph[0] ? dq_neg : sdram_dq_in;
                 rd_idx   <= rd_cnt;
-                rd_cnt   <= rd_cnt + 3'd1;
+                rd_cnt   <= rd_cnt + 6'd1;
             end else begin
                 rd_cnt <= '0;
             end

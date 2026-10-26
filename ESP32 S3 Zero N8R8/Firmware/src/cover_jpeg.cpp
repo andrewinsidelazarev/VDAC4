@@ -165,7 +165,10 @@ int decodeSoftware(const uint8_t* jpeg, size_t size, CoverThumb& thumb, CoverDec
 int decodeCoverJpeg(const uint8_t* jpeg, size_t size, CoverThumb& thumb,
                     CoverDecodeInfo& info, const volatile bool* cancel, void (*yield)()) {
   if (cancel != nullptr && *cancel) return 201;
+  // Пул TJpgDec — во внутренней памяти (быстрее), а нет её — в PSRAM: ПЗУ читает её через кэш, как
+  // любой код. Внутренней при работающем PLAYER бывает 7 КБ с куском 3,7 КБ — обложка не сводилась.
   void* pool = heap_caps_malloc(kPoolBytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (pool == nullptr) pool = heap_caps_malloc(kPoolBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (pool == nullptr) {
     return 1;
   }
@@ -180,8 +183,10 @@ int decodeCoverJpeg(const uint8_t* jpeg, size_t size, CoverThumb& thumb,
   info.width = decoder.width;
   info.height = decoder.height;
   const uint32_t shorter = info.width < info.height ? info.width : info.height;
+  // Сторона, меньше которой уменьшать нельзя: миниатюры (64) или обложки экрана (256)
+  const uint32_t side = thumb.decodeSide();
   uint8_t scale = 0;
-  while (scale < 3 && (shorter >> (scale + 1)) >= static_cast<uint32_t>(CoverThumb::kSide)) {
+  while (scale < 3 && (shorter >> (scale + 1)) >= side) {
     ++scale;
   }
   info.scale = scale;

@@ -3,12 +3,15 @@
 // Поведенческая модель SDR SDRAM 64 Мбит × 32 (как встроенная в GW2AR-18):
 // 4 банка × 2048 строк × 256 столбцов. Хранит данные и проверяет протокол:
 // mode register (BL=8, CL), tRCD, tRP, tRC, tRAS, tWR, tRFC, интервал регенерации,
-// доступ только к открытой строке, конфликт шины данных.
+// доступ только к открытой строке, конфликт шины данных. Пакеты одной строки могут идти
+// подряд (READ/WRITE через 8 тактов без предзаряда), закрывает строку автопредзаряд.
 //
 // Модель тактируется клоком микросхемы — как на плате, инверсией клока логики.
 // Данные чтения — по паспорту: слово выставляется через T_AC после фронта CL−1 от READ
-// и держится до T_OH после следующего фронта; между ними на шине 'x. Поэтому неверная
-// точка выборки контроллера (rd_phase) даёт 'x или соседнее слово и ловится тестом.
+// и держится до T_OH после следующего фронта; между ними (и вне пакетов) на шине случайное
+// слово — переход, как на плате. Не 'x: сверку кадра в RTL (fb_scanout, калибровка SD READ)
+// 'x не валит, и негодная точка выглядела бы годной. Поэтому неверная точка выборки
+// контроллера (rd_phase) даёт мусор или соседнее слово и ловится и тестом, и калибровкой.
 //
 module sdram_model #(
     parameter real TCK_NS  = 14.815,
@@ -51,11 +54,16 @@ module sdram_model #(
     reg        mode_set = 1'b0;
     integer    mode_cl = 0;
 
-    // Очередь пакета: одна операция за раз (контроллер их не перекрывает)
-    reg        rd_active = 1'b0, wr_active = 1'b0;
+    // Пакет записи — один за раз; пакеты чтения — конвейером: READ каждые 8 тактов в одной строке
+    // (у CL 3 следующий READ приходит, пока выдаются два последних слова прежнего), слова идут
+    // подряд. Очередь чтений — до двух пакетов: адрес и номер фронта первого слова.
+    reg        wr_active = 1'b0;
     integer    burst_i = 0;
     reg [20:0] burst_base;
-    integer    rd_wait = 0;
+    integer    ecnt = 0;
+    reg [20:0] rq_base [0:1];
+    integer    rq_t0 [0:1];
+    integer    rq_n = 0;
 
     task automatic fail(input string msg);
         begin
@@ -75,6 +83,12 @@ module sdram_model #(
         dq_to_ctrl = 'x;
     end
 
+    // DQM при записи: байт с единицей в маске не пишется (действует в такт данных)
+    function automatic [31:0] masked(input [31:0] old, input [31:0] d, input [3:0] m);
+        for (int b = 0; b < 4; b++)
+            masked[8*b +: 8] = m[b] ? old[8*b +: 8] : d[8*b +: 8];
+    endfunction
+
     wire [2:0] cmd = {ras_n, cas_n, we_n};
     localparam [2:0] NOP = 3'b111, ACT = 3'b011, RD = 3'b101, WR = 3'b100,
                      PRE = 3'b010, REF = 3'b001, MRS = 3'b000;
@@ -86,25 +100,24 @@ module sdram_model #(
         // ---- продолжающийся пакет записи: слова 1..7 ----
         if (wr_active) begin
             if (!dq_oe) fail("запись: контроллер не ведёт DQ во время пакета");
-            mem[burst_base + burst_i] = dq_from_ctrl;
+            mem[burst_base + burst_i] = masked(mem[burst_base + burst_i], dq_from_ctrl, dqm);
             burst_i = burst_i + 1;
             if (burst_i == 8) wr_active = 1'b0;
         end
 
-        // ---- продолжающийся пакет чтения ----
-        if (rd_active) begin
+        // ---- пакеты чтения: слово, чей фронт настал ----
+        ecnt = ecnt + 1;
+        if (rq_n != 0 && ecnt >= rq_t0[0]) begin
             if (dq_oe) fail("конфликт шины: контроллер ведёт DQ во время чтения");
-            if (rd_wait > 0) begin
-                rd_wait = rd_wait - 1;
-            end
-            if (rd_wait == 0) begin
-                dq_to_ctrl <= #(T_OH) 'x;
-                dq_to_ctrl <= #(T_AC) mem[burst_base + burst_i];
-                burst_i = burst_i + 1;
-                if (burst_i == 8) rd_active = 1'b0;
+            dq_to_ctrl <= #(T_OH) $urandom;
+            dq_to_ctrl <= #(T_AC) mem[rq_base[0] + 21'(ecnt - rq_t0[0])];
+            if (ecnt - rq_t0[0] == 7) begin
+                rq_base[0] = rq_base[1];
+                rq_t0[0]   = rq_t0[1];
+                rq_n       = rq_n - 1;
             end
         end else if (!wr_active) begin
-            dq_to_ctrl <= #(T_OH) 'x;
+            dq_to_ctrl <= #(T_OH) $urandom;
         end
 
         if (!cs_n) case (cmd)
@@ -132,13 +145,12 @@ module sdram_model #(
             if (!bank_open[ba] || now >= t_pre[ba]) fail("READ/WRITE в закрытый банк");
             if (now - t_act[ba] < T_RCD - 0.01) fail("нарушен tRCD");
             if (a[2:0] != 3'b000) fail("пакет не выровнен на 8 слов");
-            if (rd_active || wr_active) fail("новый пакет поверх незаконченного");
+            if (wr_active || (cmd == WR && rq_n != 0)) fail("новый пакет поверх незаконченного");
             burst_base = {bank_row[ba], ba, a[7:0]};
             burst_i = 0;
             if (cmd == WR) begin
                 if (!dq_oe) fail("WRITE без данных на DQ");
-                if (dqm != 4'h0) fail("WRITE с маской (не ожидается)");
-                mem[burst_base] = dq_from_ctrl;
+                mem[burst_base] = masked(mem[burst_base], dq_from_ctrl, dqm);
                 burst_i = 1;
                 wr_active = 1'b1;
                 n_wr = n_wr + 1;
@@ -149,8 +161,14 @@ module sdram_model #(
                     bank_open[ba] = 1'b0;
                 end
             end else begin
-                rd_active = 1'b1;
-                rd_wait   = CL - 1;
+                // первое слово — через CL − 1 фронтов; пакеты не перекрываются
+                if (rq_n == 2) fail("очередь чтений переполнена");
+                else begin
+                    if (rq_n == 1 && ecnt + CL - 1 < rq_t0[0] + 8) fail("пакеты чтения перекрываются");
+                    rq_base[rq_n] = burst_base;
+                    rq_t0[rq_n]   = ecnt + CL - 1;
+                    rq_n = rq_n + 1;
+                end
                 n_rd = n_rd + 1;
                 if (a[10]) begin
                     t_pre[ba] = now + 8.0 * TCK_NS;
@@ -158,7 +176,8 @@ module sdram_model #(
                     bank_open[ba] = 1'b0;
                 end
             end
-            if (!a[10]) fail("ожидался автопредзаряд (A10=1)");
+            // без A10 строка остаётся открытой для следующего пакета запроса; незакрытую
+            // строку поймают ACTIVE и REFRESH в открытый банк
         end
         PRE: begin
             if (a[10]) begin

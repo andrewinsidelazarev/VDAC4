@@ -21,6 +21,7 @@ module fb_pll_xtal #(
     input  wire reset,
     output wire clk_serial,   // 135 / 371,25 МГц
     output wire clk_mem,      // 67,5 / 61,875 МГц
+    output wire clk_sd,       // CLKOUT ÷ 3: 45 / 123,75 МГц — 2 × clk_mem (SDRAM ядра FT812)
     output wire lock
 );
     localparam int IDIV_SEL  = HD ? 3  : 0;     // IDIV − 1
@@ -29,10 +30,10 @@ module fb_pll_xtal #(
     localparam int SDIV      = HD ? 6  : 2;
 `ifndef SIMULATION
     wire gnd = 1'b0;
-    wire unused_p, unused_d3;
+    wire unused_p;
     rPLL pll (
         .CLKOUT(clk_serial), .LOCK(lock), .CLKOUTP(unused_p),
-        .CLKOUTD(clk_mem), .CLKOUTD3(unused_d3),
+        .CLKOUTD(clk_mem), .CLKOUTD3(clk_sd),
         .RESET(reset), .RESET_P(gnd), .CLKIN(clkin), .CLKFB(gnd),
         .FBDSEL(6'b0), .IDSEL(6'b0), .ODSEL(6'b0), .PSDA(4'b0),
         .DUTYDA(4'b0), .FDLY(4'b0)
@@ -56,8 +57,8 @@ module fb_pll_xtal #(
     defparam pll.DEVICE = "GW2AR-18C";
 `else
     localparam real MULT = (FBDIV_SEL + 1.0) / (IDIV_SEL + 1.0);
-    reg s = 1'b0, m = 1'b0;
-    integer half = 0;
+    reg s = 1'b0, m = 1'b0, d3 = 1'b0;
+    integer half = 0, h3 = 0;
     realtime last_edge = 0, period = 0;
     always @(posedge clkin) begin
         if (last_edge != 0) period = $realtime - last_edge;
@@ -69,10 +70,13 @@ module fb_pll_xtal #(
             #(period / (2.0 * MULT)) s = ~s;
             half = half + 1;
             if (half == SDIV) begin half = 0; m = ~m; end
+            h3 = h3 + 1;
+            if (h3 == 3) begin h3 = 0; d3 = ~d3; end
         end
     end
     assign clk_serial = s;
     assign clk_mem = m;
+    assign clk_sd = d3;
     assign lock = (period != 0);
 `endif
 endmodule

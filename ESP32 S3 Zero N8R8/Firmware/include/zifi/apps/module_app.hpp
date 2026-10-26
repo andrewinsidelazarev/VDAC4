@@ -43,6 +43,11 @@ class ModuleApp : public App {
   bool keepsWifiAwake() const override;
   // Кристалл ESP, десятые доли °C (раз в секунду); INT16_MIN — датчика нет.
   int16_t temperatureTenths() const;
+  // Экран приложения оверлеем Tang (player_overlay, ABI 1.5): снимок и обложка у запущенного
+  // приложения, из задачи экрана. ZM_BUSY — приложение сейчас запускается или выгружается,
+  // ZM_NOT_FOUND — приложения нет или экрана у него нет.
+  static int uiModel(zm_ui_model_t* model);
+  static int uiCover(uint16_t* pixels, uint16_t side);
 
  private:
   static constexpr size_t kMaxTasks = 8;
@@ -50,6 +55,7 @@ class ModuleApp : public App {
   static constexpr size_t kMaxModules = 4;
   static constexpr size_t kMaxResources = 4;
   static constexpr size_t kMaxStreams = 2;
+  static constexpr size_t kMaxSockets = 5;
 
   struct TaskSlot {
     TaskHandle_t handle;
@@ -107,6 +113,49 @@ class ModuleApp : public App {
   static const char* coreNetHeader(void* stream, const char* name);
   static int coreNetRead(void* stream, void* data, uint32_t count, uint32_t timeoutMs);
   static void coreNetClose(void* stream);
+  // FT812 эмулятора Tang (ABI minor 3): ESP — хост, ft_host.hpp
+  static int coreFtOpen(uint32_t timeoutMs);
+  static int coreFtWrite(uint32_t address, const uint32_t* words, uint32_t count);
+  static int coreFtRead(uint32_t address, uint32_t* value);
+  static int coreFtHostCmd(uint8_t command, uint8_t parameter);
+  static void coreFtClose();
+  bool ftOpened_ = false;
+  // ABI 1.4: ядра ПЛИС из кэша BL616, LINK, сокеты
+  static int coreCoreLoad(const char* name, uint32_t* version);
+  static int coreCoreBack(uint32_t timeoutMs);
+  // Загрузка ядра — в своей задаче прошивки (coreLoaderTask): приложение лишь ждёт её. Выгрузка
+  // приложения посреди загрузки снимает только ждущую задачу приложения, а загрузка кончается
+  // как должна — с файлами, замком карты и LINK — и сама возвращает слот 0 (разбор Codex, № 11).
+  static void coreLoaderTask(void*);
+  struct CoreJob {
+    char name[16];
+    uint32_t version;
+    int result;
+    volatile bool running;
+    volatile bool abandoned;             // приложение выгружено, пока ядро грузилось
+  };
+  // статические: приложение одно, а Application (ядро 1) держит бюджет статической RAM
+  static CoreJob coreJob_;
+  static SemaphoreHandle_t coreJobGo_;
+  static SemaphoreHandle_t coreJobDone_;
+  static TaskHandle_t coreLoader_;
+  static int coreLinkRead(uint32_t address, uint32_t* words, uint32_t count);
+  static int coreLinkWrite(uint32_t address, const uint32_t* words, uint32_t count);
+  static int coreSockOpen(int udp, const char* host, uint16_t port, uint32_t timeoutMs);
+  static int coreSockSend(int sock, const void* data, uint32_t count);
+  static int coreSockRecv(int sock, void* data, uint32_t count, uint32_t timeoutMs);
+  static void coreSockClose(int sock);
+  static int coreNetResolve(const char* host, char ip[16]);
+  static int coreWifiInfo(char ssid[33], char ip[16], char mac[18]);
+  static int coreUiAvailable();
+  static void coreAppDone();
+  static int coreSdList(const char*, const char*, uint32_t, zm_sd_entry_t*, uint32_t,
+                        uint32_t*, int*, const volatile int*);
+  static int coreSdRead(const char*, uint8_t**, size_t*, size_t, const volatile int*);
+  static int coreSdWrite(const char*, const uint8_t*, size_t, const volatile int*);
+  bool coreLoaded_ = false;               // приложение загрузило ядро из кэша: при выгрузке — слот 0
+  int sockets_[kMaxSockets] = {-1, -1, -1, -1, -1};
+  portMUX_TYPE sockLock_ = portMUX_INITIALIZER_UNLOCKED;
 
   void replyQuery(uint8_t state);
   void handleQuery(const PacketView& packet);
@@ -120,6 +169,12 @@ class ModuleApp : public App {
   // Только что принятый ресурс — на флешку (если она есть и ресурс кэшируется).
   void copyResourceToDrive(const Resource& resource);
   void handleStart(const PacketView& packet);
+  // Ядра ПЛИС (плагин VDAC4 Cores): список /CORES/ на SD Tang и слой ESP ядра
+  void handleCoreList();
+  void handleCoreApp(const PacketView& packet);
+  // Приложение из прошивки, без ELF (общий слой ядра): как startApp
+  int startBuiltin(const zm_app_t* app, const char* name);
+  void replyApp(uint8_t response, int result, const char* fallbackText);
   int loadElf(const char* name, void* arg1, void* arg2, void** elfOut, int* entryResult);
   void unloadElf(void* elf);
   int startApp(const char* name);
@@ -148,8 +203,10 @@ class ModuleApp : public App {
   const zm_app_t* app_ = nullptr;
   char appName_[13] = {};
   bool appStale_ = false;                 // с запуска в кэш лёг новый модуль: перезапустить
+  bool appStarted_ = false;               // start() приложения прошёл (под appLock_)
   SemaphoreHandle_t appLock_ = nullptr;   // выгрузка против poll на сетевом ядре
   bool inCommand_ = false;
+  bool appDone_ = false;                  // приложение в command позвало app_done: выгрузить
 
   // Что приложение завело: освобождается при выгрузке.
   portMUX_TYPE allocLock_ = portMUX_INITIALIZER_UNLOCKED;

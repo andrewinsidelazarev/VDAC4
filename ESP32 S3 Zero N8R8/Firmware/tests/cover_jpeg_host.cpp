@@ -48,6 +48,8 @@ int wmain(int argc, wchar_t** argv) {
   if (argc > 3) cancelYield = _wtoi(argv[3]);
   if (argc > 4) failAllocation = _wtoi(argv[4]);
   if (argc > 5) prepareResult = _wtoi(argv[5]);
+  // argv[6] — файл обложки экрана (CoverPicture 256×256 RGB565): сводится вместе с миниатюрой
+  const wchar_t* picturePath = argc > 6 ? argv[6] : nullptr;
   FILE* file = _wfopen(argv[1], L"rb"); if (!file) return 3;
   fseek(file, 0, SEEK_END); size_t size = ftell(file); rewind(file);
   std::vector<uint8_t> data(size); fread(data.data(), 1, size, file); fclose(file);
@@ -55,18 +57,29 @@ int wmain(int argc, wchar_t** argv) {
   uint8_t out[zifi::CoverThumb::kBytes] = {};
   auto start = std::chrono::steady_clock::now();
   int result;
+  int pictureDone = 0;
+  static uint16_t picture[zifi::CoverPicture::kSide * zifi::CoverPicture::kSide];
   {
     zifi::CoverThumb thumb(allocate, heap_caps_free);
+    zifi::CoverPicture big(allocate, heap_caps_free);
+    if (picturePath != nullptr) thumb.attach(&big);
     result = zifi::decodeCoverJpeg(data.data(), data.size(), thumb, info, &cancelled, yield);
     if (result == 0) thumb.finish(out);
+    if (result == 0 && picturePath != nullptr) pictureDone = big.finish(picture) ? 1 : 0;
+  }
+  if (picturePath != nullptr) {
+    FILE* p = _wfopen(picturePath, L"wb");
+    if (!p) return 6;
+    fwrite(picture, sizeof(uint16_t), zifi::CoverPicture::kSide * zifi::CoverPicture::kSide, p);
+    fclose(p);
   }
   auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-start).count();
   file = _wfopen(argv[2], L"wb"); if (!file) return 4;
   fwrite(out, 1, sizeof(out), file); fclose(file);
-  printf("{\"result\":%d,\"width\":%u,\"height\":%u,\"scale\":%u,\"allocations\":%u,"
+  printf("{\"result\":%d,\"picture\":%d,\"width\":%u,\"height\":%u,\"scale\":%u,\"allocations\":%u,"
          "\"peak_bytes\":%zu,\"live_bytes\":%zu,\"yields\":%u,\"cancelled\":%s,"
          "\"prepare\":%u,\"rom_decode\":%u,\"microseconds\":%lld}\n",
-         result, info.width, info.height, info.scale, allocations, peakBytes, liveBytes,
+         result, pictureDone, info.width, info.height, info.scale, allocations, peakBytes, liveBytes,
          yields, cancelled ? "true" : "false", prepareCalls, decodeCalls, (long long)us);
   return liveBytes ? 5 : 0;
 }

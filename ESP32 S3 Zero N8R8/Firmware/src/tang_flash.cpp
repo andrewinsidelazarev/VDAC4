@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <LittleFS.h>
 #include <esp_cpu.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -18,6 +19,11 @@ namespace {
 
 constexpr char kTag[] = "zifi-tang";
 constexpr uint32_t kMinCore = 0x0101;           // VERSION[15:0]: мост к flash с 1.1
+// Ядро FT812 (личность 02) с 1.31 — без моста: ASPECT и SIZE ему пишет ESP (pushSettings)
+constexpr uint32_t kFtNoBridge = 0x011F;
+// Последние настройки, которые ESP видела в TS-Config, — на случай её запуска, когда Tang
+// уже в FT812 (моста нет, а сектор настроек ESP прочитать негде)
+constexpr char kSettingsFile[] = "/tang_set.bin";
 constexpr size_t kChunk = 64;                   // буфер моста
 
 // Команды flash (XT25F64B; общие для SPI-flash)
@@ -51,6 +57,9 @@ uint32_t g_saves = 0;
 // Изменение, увиденное прошлым опросом: пишется, если повторилось
 bool g_havePending = false;
 uint32_t g_pending[8] = {};
+// Последние настройки ядра TS-Config, какими их видел опрос (ещё не записанные — тоже)
+bool g_haveSeen = false;
+uint32_t g_seen[8] = {};
 
 // ------------------------------------------------------------------
 // Мост
@@ -188,8 +197,10 @@ bool programPage(uint32_t address, const uint8_t* data, size_t length) {
 // ------------------------------------------------------------------
 void buildRecord(uint32_t ctrl, const uint32_t* table, uint32_t* record) {
   record[0] = kMagic;
-  // CTRL: 2 PHASE, [4:3] DELAY, 5 ALIGN, [13:10] CLOCK, 14 ASPECT, [16:15] SIZE (ядро 1.2)
-  record[1] = (((ctrl >> 15) & 3) << 17) | (((ctrl >> 14) & 1) << 16) | (kFormat << 8) |
+  // CTRL: 2 PHASE, [4:3] DELAY, 5 ALIGN, [13:10] CLOCK, 14 ASPECT, [16:15] SIZE (ядро 1.2),
+  // 17 FRAME BLEND (1.32) → слово 1: 19 FRAME BLEND, [18:17] SIZE, 16 ASPECT, [15:8] формат, …
+  record[1] = (((ctrl >> 17) & 1) << 19) | (((ctrl >> 15) & 3) << 17) | (((ctrl >> 14) & 1) << 16) |
+              (kFormat << 8) |
               (((ctrl >> 5) & 1) << 7) | (((ctrl >> 2) & 1) << 6) | (((ctrl >> 3) & 3) << 4) |
               ((ctrl >> 10) & 0xF);
   for (int k = 0; k < 4; ++k) {
@@ -279,6 +290,51 @@ bool currentRecord(uint32_t* record) {
   return true;
 }
 
+// Копия настроек в LittleFS ESP (ячейка как во flash Tang)
+void rememberRecord(const uint32_t* record) {
+  File file = LittleFS.open(kSettingsFile, "w");
+  if (file) {
+    file.write(reinterpret_cast<const uint8_t*>(record), 8 * sizeof(uint32_t));
+    file.close();
+  }
+}
+
+bool recallRecord(uint32_t* record) {
+  File file = LittleFS.open(kSettingsFile, "r");
+  if (!file) {
+    return false;
+  }
+  const bool ok = file.read(reinterpret_cast<uint8_t*>(record), 8 * sizeof(uint32_t)) == 8 * sizeof(uint32_t);
+  file.close();
+  return ok && recordValid(record);
+}
+
+// CTRL из ячейки: источник AUTO, калибровка SD READ не запускается (CTRL[9] = 0)
+uint32_t ctrlFromRecord(const uint32_t* record) {
+  const uint32_t r = record[1];
+  return (((r >> 19) & 1) << 17) | (((r >> 17) & 3) << 15) | (((r >> 16) & 1) << 14) | ((r & 0xF) << 10) |
+         (((r >> 7) & 1) << 5) | (((r >> 4) & 3) << 3) | (((r >> 6) & 1) << 2);
+}
+
+// Ядро FT812 без моста: ASPECT и SIZE — те, что были в TS-Config (остальное ему не нужно)
+void pushSettings() {
+  uint32_t record[8];
+  const char* from = "TS-Config";
+  if (g_haveSeen) {
+    memcpy(record, g_seen, sizeof(record));
+  } else if (recallRecord(record)) {
+    from = "the ESP copy";
+  } else {
+    bringupLog(kTag, "Tang settings: FT812 core has no flash bridge and no settings are known yet: defaults");
+    return;
+  }
+  const uint32_t ctrl = ctrlFromRecord(record);
+  const bool ok = tang::write(tang::kRegCtrl, &ctrl, 1);
+  bringupLog(kTag, "Tang settings: FT812 core (no flash bridge) gets aspect %s, size %s from %s: %s",
+             ((record[1] >> 16) & 1) ? "16:9" : "4:3", sizeName((record[1] >> 17) & 3), from,
+             ok ? "written" : "FAILED");
+}
+
 bool saveRecord(const uint32_t* record) {
   tang::LinkGuard guard;
   if (g_freeSlot >= kSettingsSlots) {
@@ -304,6 +360,7 @@ bool saveRecord(const uint32_t* record) {
   g_haveSaved = true;
   g_savedSlot = static_cast<int>(slot);
   ++g_saves;
+  rememberRecord(record);
   return true;
 }
 
@@ -362,8 +419,27 @@ bool program(uint32_t address, const uint8_t* data, size_t length) {
   return true;
 }
 
+bool slotHasBitstream(uint32_t address) {
+  static const uint8_t kIdcode[] = {0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1B};
+  uint8_t head[64] = {};
+  if (!read(address, head, sizeof(head))) {
+    return false;
+  }
+  bool sync = false;
+  bool idcode = false;
+  for (size_t i = 0; i + sizeof(kIdcode) <= sizeof(head); ++i) {
+    sync = sync || (head[i] == 0xA5 && head[i + 1] == 0xC3);
+    idcode = idcode || memcmp(head + i, kIdcode, sizeof(kIdcode)) == 0;
+  }
+  return sync && idcode;
+}
+
 void begin(uint32_t coreVersion) {
   g_available = false;
+  if ((coreVersion >> 24) == 0x02 && (coreVersion & 0xFFFF) >= kFtNoBridge) {
+    pushSettings();
+    return;
+  }
   if ((coreVersion & 0xFFFF) < kMinCore) {
     bringupLog(kTag, "Tang settings: core %u.%u has no flash bridge, settings are not saved",
                static_cast<unsigned>((coreVersion >> 8) & 0xFF),
@@ -417,6 +493,14 @@ void begin(uint32_t coreVersion) {
     currentRecord(g_saved);
     g_haveSaved = true;
   }
+  if ((coreVersion >> 24) == 0x01) {
+    memcpy(g_seen, g_saved, sizeof(g_seen));
+    g_haveSeen = true;
+    uint32_t copy[8];
+    if (!recallRecord(copy) || memcmp(copy, g_saved, sizeof(copy)) != 0) {
+      rememberRecord(g_saved);
+    }
+  }
   bringupLog(kTag,
              "Tang settings: flash JEDEC %06X, core loaded %s (slot %u), last saved slot %d, "
              "free slot %u of %u",
@@ -433,6 +517,10 @@ void poll() {
   if (!currentRecord(record)) {
     g_havePending = false;
     return;
+  }
+  if ((g_coreVersion >> 24) == 0x01) {
+    memcpy(g_seen, record, sizeof(g_seen));
+    g_haveSeen = true;
   }
   if (memcmp(record, g_saved, sizeof(record)) == 0) {
     g_havePending = false;

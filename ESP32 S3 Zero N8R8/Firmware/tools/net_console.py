@@ -7,7 +7,7 @@
 пройдёт --seconds (0 — до Ctrl+C). --command посылает команду консоли (help,
 mem, ver, log, tang) сразу после подключения. Всё, кроме «tang wr», только читает;
 «tang wr АДРЕС ЗНАЧЕНИЕ» (hex) пишет регистр Tang по LINK — например,
-«tang wr 40 …» меняет CTRL (источник, MUX, SD READ), как кнопки Tang.
+«tang wr 40 …» меняет CTRL (источник, MUX, SD READ), как меню настроек Tang.
 """
 import argparse
 import socket

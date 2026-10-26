@@ -1,0 +1,26 @@
+{
+  "source": "E:\\zx\\Next Tang\\distro\\sn-complete-24.11\\machines\\next\\enNextMf.rom",
+  "base_sha256": "0ee4ba5f830c146b878a316ebabff893e12d6c2ceda85f90883ae67647c0698e",
+  "candidate_sha256": "017aa25dd3e33316517c8854b8ddf49e75b7bfab0cb9cf4e8cb501f427033a97",
+  "changes": [
+    {
+      "offset": "0x2c6",
+      "old": "3a503f",
+      "new": "cdd51f",
+      "purpose": "nmi_enter_stub"
+    },
+    {
+      "offset": "0x402",
+      "old": "32503f",
+      "new": "cde41f",
+      "purpose": "nmi_store_stub"
+    },
+    {
+      "offset": "0x1fd5",
+      "old": "00000000000000000000000000000000000000000000000000000000000000",
+      "new": "d53a503fd7e410f57a32503ff1d1c9e521503fcb762802f640d7091177e1c9",
+      "purpose": "NMI stubs"
+    }
+  ],
+  "hardware_tested": false
+}

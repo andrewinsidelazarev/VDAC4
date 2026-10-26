@@ -108,6 +108,46 @@ class CoverParser {
 // прочее — «?». Конечные пробелы отрезаются.
 void decodeId3Text(const uint8_t* body, size_t length, char* out, size_t size);
 
+// Обложка для экрана проигрывателя оверлеем Tang (ABI приложений 1.5): квадрат из середины
+// картинки, сведённый к kSide×kSide точек RGB565 (усреднение по площади). Сумм в клетке
+// хватает 16 бит: число точек клетки — произведение чисел по строке и по столбцу (они не
+// зависят друг от друга), а картинку больше 15 точек на клетку по стороне берёт с шагом.
+// Работает вместе с миниатюрой: CoverThumb::attach.
+class CoverPicture {
+ public:
+  static constexpr int kSide = 256;
+
+  CoverPicture(CoverParser::Alloc alloc, CoverParser::Release release)
+      : alloc_(alloc), release_(release) {}
+  ~CoverPicture() { end(); }
+  CoverPicture(const CoverPicture&) = delete;
+  CoverPicture& operator=(const CoverPicture&) = delete;
+
+  bool begin(uint32_t width, uint32_t height);
+  void addBlock(uint32_t left, uint32_t top, uint32_t right, uint32_t bottom,
+                const uint8_t* rgb);
+  // kSide × kSide точек RGB565, строками сверху вниз; false — begin не прошёл.
+  bool finish(uint16_t* output);
+  void end();
+
+ private:
+  struct Cell {
+    uint16_t red, green, blue;
+  };
+  // Клетки, которые накрывает точка u стороны квадрата (как у миниатюры: и при картинке
+  // меньше kSide пустых клеток нет).
+  void cells(uint32_t u, uint32_t& first, uint32_t& last) const;
+
+  CoverParser::Alloc alloc_;
+  CoverParser::Release release_;
+  Cell* cells_ = nullptr;
+  uint8_t* hits_ = nullptr;    // точек на клетку по стороне (строки и столбцы одинаковы)
+  uint32_t side_ = 0;
+  uint32_t left_ = 0;
+  uint32_t top_ = 0;
+  uint32_t step_ = 1;          // берётся каждая step-я точка по стороне
+};
+
 class CoverThumb {
  public:
   static constexpr int kSide = 64;
@@ -133,6 +173,12 @@ class CoverThumb {
   // вниз, по две точки в байте (левая — в старшей тетраде).
   void finish(uint8_t* output);
   void end();
+  // Обложка для экрана: те же точки — и в неё (до begin). Декодер тогда уменьшает картинку
+  // не меньше, чем до её стороны (decodeSide).
+  void attach(CoverPicture* picture) { picture_ = picture; }
+  uint32_t decodeSide() const {
+    return picture_ != nullptr ? static_cast<uint32_t>(CoverPicture::kSide) : kSide;
+  }
 
  private:
   struct Cell {
@@ -145,6 +191,7 @@ class CoverThumb {
   uint32_t side_ = 0;          // сторона квадрата в точках картинки
   uint32_t left_ = 0;
   uint32_t top_ = 0;
+  CoverPicture* picture_ = nullptr;
 };
 
 // JPEG → CoverThumb: baseline через TJpgDec из ПЗУ; progressive — jpgd,

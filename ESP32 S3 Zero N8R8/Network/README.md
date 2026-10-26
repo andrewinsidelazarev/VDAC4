@@ -60,6 +60,8 @@
 | [`Video Settings/build/vdac4/VDAC4VID.WMF`](Video%20Settings/build/vdac4/VDAC4VID.WMF) | `/WC` | настройки видеотракта Tang: экранное меню Tang с клавиатуры Evo ([README](Video%20Settings/README.md)) |
 | [`Weather screensaver/build/vdac4/VDAC4WTH.WMF`](Weather%20screensaver/build/vdac4/VDAC4WTH.WMF) | `/WC` | заставка: часы, календарь, погода |
 | [`Weather screensaver VDAC2/build/vdac4/VDAC4WT2.WMF`](Weather%20screensaver%20VDAC2/build/vdac4/VDAC4WT2.WMF) | `/WC` | та же заставка в 1024×768 на FT812 |
+| [`ESP App SPG/build/BOING.SPG`](ESP%20App%20SPG/build/BOING.SPG) | любая папка | дема «прыгающий шарик» на FT812: грузит `BOING.ELF` в ESP и запускает, ESP — хост FT812 ([README](ESP%20App%20SPG/README.md)) |
+| [`ESP App SPG/build/DEMO3D.SPG`](ESP%20App%20SPG/build/DEMO3D.SPG) | любая папка | 3D-дема: тор и кубы считает сопроцессор BL616 (прошивка BL616 3), ESP — хост FT812 ([README](../../../demo/demo3d/README.md)) |
 | [`tools/esp_info_vdac4.sna`](tools/esp_info_vdac4.sna) | `/zifi/tools` | проверка связи с ESP и сведения о прошивке, без Wi-Fi |
 | [`tools/update_vdac4.sna`](tools/update_vdac4.sna) | `/zifi/tools` | открывает порт обновления прошивки по сети |
 | [`tools/dma_probe_vdac4.sna`](tools/dma_probe_vdac4.sna) | `/zifi/tools` | обмен с ESP через DMA TS-Config в обе стороны |
@@ -92,6 +94,8 @@ city:Kyiv
 & ".\Weather screensaver VDAC2\build.bat" vdac4
 & ".\tools\build_esp_info.bat"   # esp_info, update, dma_probe, audio_test
 & ".\ZiFi SPG\build.bat"         # нужен FAT32-Driver-ZX-Evolution (FAT32_DRIVER_DIR)
+& "..\..\..\demo\boing\build.bat"    # BOING.ELF и BOING.SPG (demo\boing\_SD; SPG — и в ESP App SPG\build)
+& "..\..\..\demo\demo3d\build.bat"   # DEMO3D.ELF и DEMO3D.SPG (demo\demo3d\_SD; SPG — и в ESP App SPG\build)
 ```
 
 Всё вместе с прошивкой собирает `..\Firmware\build_vdac4.bat`.

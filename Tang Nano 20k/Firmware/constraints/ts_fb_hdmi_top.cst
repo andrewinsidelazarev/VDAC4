@@ -44,10 +44,40 @@ IO_LOC  "m_sel" 73;
 IO_PORT "m_sel" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
 
 // ---------------------------------------------------------------------------
-// Обратные линии: в этой прошивке держатся неактивными
+// FT812: SPI хоста Evo (общая шина Z-контроллера; FT_CS_N — порт #77 бит 2)
 // ---------------------------------------------------------------------------
+// SCK — не глобальный клоковый вывод: приёмник ft_spi тактируется им через общую трассировку
+IO_LOC  "ft_sck" 20;
+IO_PORT "ft_sck" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+IO_LOC  "ft_cs_n" 17;
+IO_PORT "ft_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "ft_mosi" 19;
+IO_PORT "ft_mosi" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+// MISO: U6 берёт его только при выбранном FT812, без выбора — 0 (на Tang это DIN WS2812)
+IO_LOC  "ft_miso" 79;
+IO_PORT "ft_miso" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
 IO_LOC  "ft_int_n" 74;
 IO_PORT "ft_int_n" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+
+// ---------------------------------------------------------------------------
+// Сопроцессор FT812 на BL616 модуля (Tang Nano 20K rev 3923, как у NextNano/MiSTle):
+// BL616 — ведущий SPI. На rev 3921 MISO и MOSI — другие выводы BL616 (GPIO2, GPIO3).
+// ---------------------------------------------------------------------------
+// SCK — не глобальный клоковый вывод: cp_spi тактируется им через общую трассировку
+IO_LOC  "cp_sck" 13;
+IO_PORT "cp_sck" IO_TYPE=LVCMOS33 PULL_MODE=DOWN;
+IO_LOC  "cp_cs_n" 86;
+IO_PORT "cp_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "cp_mosi" 76;
+IO_PORT "cp_mosi" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+IO_LOC  "cp_miso" 75;
+IO_PORT "cp_miso" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+IO_LOC  "cp_irq_n" 69;
+IO_PORT "cp_irq_n" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
+
+// ---------------------------------------------------------------------------
+// LINK_IRQ_N: в этой прошивке не ведётся
+// ---------------------------------------------------------------------------
 IO_LOC  "link_irq_n" 85;
 IO_PORT "link_irq_n" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=NONE;
 
@@ -80,6 +110,19 @@ IO_LOC  "flash_miso" 62;
 IO_PORT "flash_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
 // ---------------------------------------------------------------------------
+// microSD Tang (режим SPI): мост для ESP (fb_sdspi, ядро 1.30, только TS-Config). DAT1/DAT2
+// слота (85, 80) на VDAC4 — link_irq_n и pclk_in; в режиме SPI карта их не ведёт
+// ---------------------------------------------------------------------------
+IO_LOC  "sd_cs_n" 81;
+IO_PORT "sd_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "sd_mosi" 82;
+IO_PORT "sd_mosi" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=8;
+IO_LOC  "sd_sck" 83;
+IO_PORT "sd_sck" IO_TYPE=LVCMOS33 PULL_MODE=NONE DRIVE=8;
+IO_LOC  "sd_miso" 84;
+IO_PORT "sd_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// ---------------------------------------------------------------------------
 // Бортовое: кнопки S1/S2 экранного меню и запрет усилителя звука
 // Активный уровень кнопок определяет прошивка (уровень после включения = «не нажата»),
 // поэтому подтяжки ПЛИС нет: кнопки модуля имеют свои резисторы.
@@ -88,6 +131,10 @@ IO_LOC  "btn[0]" 88;
 IO_PORT "btn[0]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
 IO_LOC  "btn[1]" 87;
 IO_PORT "btn[1]" IO_TYPE=LVCMOS33 PULL_MODE=NONE;
+// RECONFIG_N (на плате — только TP1): ядро тянет к 0 для multiboot (регистр BOOT),
+// в покое — Z и подтяжка, как у вывода конфигурации
+IO_LOC  "reconfig_n" 9;
+IO_PORT "reconfig_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 IO_LOC  "pa_en" 51;
 IO_PORT "pa_en" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=DOWN;
 
