@@ -16,7 +16,9 @@ module nes2hdmi_vdac4 (
     // VDAC4: окно меню (nes_osd), текст и управление — от ESP через LINK (домен clk)
     input osd_wr, input [8:0] osd_addr, input [31:0] osd_data,
     input osd_show, input [5:0] osd_sel,
+    input [29:0] osd_band, input [29:0] osd_rule, input [31:0] osd_bar,   // 0.10: оформление меню
     input aspect_restore, input aspect_value, output aspect_requested,
+    input [1:0] picture_size,  // VDAC4 0.9: 0 — 100 %, 1 — 95 %, 2 — 90 % (nes_video_scale)
 
     // overlay interface
     input overlay,
@@ -149,16 +151,18 @@ wire active;
 wire [7:0] xx, yy;
 nes_video_scale scale(.clk_nes(clk), .clk_pixel(clk_pixel), .resetn(resetn), .f6(f6),
     .restore(aspect_restore), .restore_wide(aspect_value), .requested(aspect_requested),
+    .size(picture_size),
     .cx(cx), .cy(cy), .address(mem_portB_addr), .active(active), .xx(xx), .yy(yy), .wide());
 assign overlay_x = xx;
 assign overlay_y = yy;
 
 // VDAC4: окно меню — в пикселях 1280×720, сигналы относятся к текущему пикселю cx
-wire help_box, help_hl, help_text;
+wire help_box, help_hl, help_band, help_text;
 wire [23:0] help_rgb;
 nes_osd osd(.clk(clk), .wr(osd_wr), .wr_addr(osd_addr), .wr_data(osd_data),
-    .show(osd_show), .sel(osd_sel), .clk_pixel(clk_pixel), .cx(cx), .cy(cy),
-    .box(help_box), .hl(help_hl), .text(help_text), .text_rgb(help_rgb));
+    .show(osd_show), .sel(osd_sel), .band_rows(osd_band), .rule_rows(osd_rule), .bar_cfg(osd_bar),
+    .clk_pixel(clk_pixel), .cx(cx), .cy(cy),
+    .box(help_box), .hl(help_hl), .band(help_band), .text(help_text), .text_rgb(help_rgb));
 
 // calc rgb value to hdmi
 reg [23:0] NES_PALETTE [0:63];
@@ -171,8 +175,10 @@ always @(posedge clk_pixel) begin
             rgb <= help_rgb;
         else if (help_hl)       // подсвеченная строка меню
             rgb <= 24'h2C4C9C;
-        else if (help_box)      // фон меню: картинка в четверть яркости с синим оттенком
-            rgb <= {2'b0, nes_rgb[23:18], 2'b0, nes_rgb[15:10], 2'b0, nes_rgb[7:2]} + 24'h000030;
+        else if (help_band)     // 0.10: подложка строки меню (шапка, строка состояния)
+            rgb <= 24'h1E3266;
+        else if (help_box)      // фон меню (0.10): картинка в 1/8 яркости поверх тёмно-синего — ровный фон
+            rgb <= {3'b0, nes_rgb[23:19], 3'b0, nes_rgb[15:11], 3'b0, nes_rgb[7:3]} + 24'h080C28;
         else
             rgb <= nes_rgb;
     end else

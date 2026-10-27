@@ -18,6 +18,12 @@
 // c8: W {адрес слова шины снимка[9:0]}; R {16'h5353, 6'b0, адрес}.
 // cc: R слово по адресу c8; W слово (только на паузе), затем адрес c8 +1.
 // 6c: мост SDRAM на паузе (см. nes_save_bridge): 5c — полный адрес, пакеты 60/64/5000.
+// VDAC4 0.9 — размер картинки (против вылета за край на старых HDMI-приёмниках):
+// 84: W {16'h535A, 14'b0, size[1:0]} — 0: 100 %, 1: 95 %, 2: 90 % (как SIZE TS-Config);
+//     без метки 535A запись не действует; R {16'h535A, 14'b0, size}. Сброс игры его не меняет.
+// VDAC4 0.10 — оформление окна меню (nes_osd), W/R:
+// d0: строки на подложке [29:0]; d4: строки с разделителем [29:0];
+// d8: полоса хода {вкл[31], строка[30:26], столбец[25:20], столбцов[19:14], 4'b0, заполнено пикселей[9:0]}.
 module nes_link(
     input wire sck, cs_n, input wire [3:0] io_in,
     output wire [3:0] io_out, output wire io_oe,
@@ -25,8 +31,10 @@ module nes_link(
     output reg [127:0] keyboard, output reg [7:0] joystick0,
     input wire [15:0] sample, output reg boot_req,
     input wire aspect_requested, output reg aspect_restore, output reg aspect_value,
+    output reg [1:0] picture_size,
     output wire osd_wr, output wire [8:0] osd_addr, output wire [31:0] osd_data,
     output reg osd_show, output reg [5:0] osd_sel,
+    output reg [29:0] osd_band, output reg [29:0] osd_rule, output reg [31:0] osd_bar,
     output reg pause, input wire paused,
     output wire sd_cs_n, sd_sck, sd_mosi, input wire sd_miso,
     output reg loading, output reg [7:0] rom_data, output reg rom_valid,
@@ -101,8 +109,8 @@ module nes_link(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             keyboard<=0; joystick0<=0; scratch<=0; boot_req<=0;
-            aspect_restore<=0; aspect_value<=0;
-            osd_show<=0; osd_sel<=6'd63; pause<=0;
+            aspect_restore<=0; aspect_value<=0; picture_size<=0;
+            osd_show<=0; osd_sel<=6'd63; pause<=0; osd_band<=0; osd_rule<=0; osd_bar<=0;
             loading<=0; rom_valid<=0; rom_data<=0; pos<=0; count<=0; pace<=0;
             packet_busy<=0; protocol_error<=0; packet_seq<=0; received<=0; crc<=32'hffffffff;
         end else begin
@@ -144,8 +152,13 @@ module nes_link(
                 18'h20: if (wr_data[31:1]==31'h20a98000) begin
                     aspect_value<=wr_data[0]; aspect_restore<=1;
                 end
+                // Размер картинки (0.9): из SIZE слота 0 или из .cfg — пишет NES.ELF.
+                18'h21: if (wr_data[31:16]==16'h535a) picture_size<=wr_data[1:0];
                 18'h30: begin osd_show<=wr_data[0]; osd_sel<=wr_data[13:8]; end
                 18'h31: pause<=wr_data[0];
+                18'h34: osd_band<=wr_data[29:0];
+                18'h35: osd_rule<=wr_data[29:0];
+                18'h36: osd_bar<=wr_data;
                 18'h3c: if (wr_data==32'h424f4f54) boot_req<=1;
                 default: ;
             endcase
@@ -183,9 +196,12 @@ module nes_link(
         else if (rd_addr>=13'h0800 && rd_addr<13'h0a00) rd_data=sd_rx_q;
         else case(rd_addr)
             13'h00: rd_data=32'h56444334;
-            13'h01: rd_data=32'h04010008;
+            13'h01: rd_data=32'h0401000a;
             13'h30: rd_data={16'h4f53,2'b0,osd_sel,6'b0,paused,osd_show};
             13'h31: rd_data={31'b0,paused};
+            13'h34: rd_data={2'b0,osd_band};
+            13'h35: rd_data={2'b0,osd_rule};
+            13'h36: rd_data=osd_bar;
             13'h32: rd_data={16'h5353,6'b0,ss_addr};
             13'h33: rd_data=ss_q;
             13'h40: rd_data=sd_ctrl_rd;
@@ -202,6 +218,7 @@ module nes_link(
             13'h14: rd_data=~crc;
             13'h15: rd_data={31'b0,protocol_error};
             13'h20: rd_data={16'h4153,7'b0,aspect_requested,7'b1111111,~aspect_requested};
+            13'h21: rd_data={16'h535a,14'b0,picture_size};
             default: ;
         endcase
     end

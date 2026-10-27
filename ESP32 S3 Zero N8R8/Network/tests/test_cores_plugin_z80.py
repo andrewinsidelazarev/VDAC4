@@ -157,6 +157,28 @@ class CoresEsp:
         return frame(0xEE, b"unsupported")
 
 
+NES_CORE = 0x04010008                    # VERSION ядра NES 0.8 (личность 04)
+NES_BROWSER_AND_IMAGE = {0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A}   # браузер SD Tang плагина, образ, CAPS
+
+
+class NesMenuEsp(CoresEsp):
+    """Слой NES.ELF 0.7: START без образа — ядро с меню F1 (картридж выбирают в самом ядре); refuse —
+    слой до 0.7 такой START отвергает. #7B — учёт сохранений Evo после старта (Nes_SaveTrack): нет."""
+
+    def __init__(self, refuse: bool = False, **kwargs) -> None:
+        super().__init__(cores=(("NES", 907418, True), ("NEXT", 907418, True)), version=NES_CORE, **kwargs)
+        self.refuse = refuse
+
+    def __call__(self, command: int, payload: bytes) -> bytes:
+        if self.app is not None and command == 0x7B:
+            self.commands.append(command)
+            return frame(0xFB, b"\1" + bytes(9))
+        if self.app is not None and command == CMD_START and self.refuse:
+            self.commands.append(command)
+            return frame(0xF0, b"\0")
+        return super().__call__(command, payload)
+
+
 class CoresHarness(spi.SpiHarness):
     """Плагин целиком: клавиши WC — по кадрам, очередь PS/2 Gluk и порты Kempston."""
 
@@ -321,7 +343,7 @@ class CoresPluginTest(unittest.TestCase):
 
     def test_header_names_the_plugin(self) -> None:
         data = CORES_WMF.read_bytes()
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.12")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.13")
         self.assertEqual(data[34], 1, "одна страница")
         self.assertEqual(len(data) % 512, 0, "файл — целыми секторами")
 
@@ -434,6 +456,34 @@ class CoresPluginTest(unittest.TestCase):
         h = self.sd_session(esp)
         self.assertEqual((esp.times, esp.sd_on), ([], []), "у слоя NES #74…#79 — свои команды")
         self.assertNotIn((1, 0, 0), h.streams)
+
+    def test_nes_from_menu_starts_without_browser(self) -> None:
+        # 0.13: NES из меню — сразу START без образа; картридж выбирают в меню F1 ядра (NES.ELF 0.7)
+        esp = NesMenuEsp()
+        h = self.sd_session(esp)
+        self.assertEqual((esp.app_core, esp.core), ("NES", "NES"))
+        start = esp.commands.index(CMD_START)
+        self.assertEqual(esp.commands[start - 1], CMD_CORE_APP, "между CORE_APP и START — ничего")
+        self.assertFalse(set(esp.commands) & NES_BROWSER_AND_IMAGE, "ни браузера SD Tang, ни образа, ни TIME")
+        self.assertEqual(esp.sd_on, [])
+        self.assertTrue(esp.inputs, "ядро работает — INPUT шёл")
+        self.assertEqual(b"".join(p[4:] for p in esp.inputs), F12)
+        self.assertNotIn("NES cartridges", h.text(), "окна браузера плагина нет")
+        self.assertEqual(esp.state, 3)
+        self.assertIsNone(esp.app, "APP_STOP после выхода")
+
+    def test_nes_from_menu_old_layer_explains_update(self) -> None:
+        esp = NesMenuEsp(refuse=True)
+        self.fatal(esp, "ERROR: update CORES/NES.ELF to 0.7+")
+        self.assertEqual(esp.inputs, [])
+        self.assertIn(CMD_APP_STOP, esp.commands)
+
+    def test_refused_start_of_other_core_keeps_its_text(self) -> None:
+        # отказ START у не-NES — прежний текст (подсказка про NES.ELF только для NES из меню)
+        esp = NesMenuEsp(refuse=True)
+        self.fatal(esp, "ERROR: the ESP layer did not start", keys={4: FN_DOWN, 6: FN_ENTER})
+        self.assertEqual(esp.app_core, "NEXT")
+        self.assertIn(CMD_START, esp.commands)
 
     def test_menu_down_selects_second_core(self) -> None:
         h = CoresHarness()

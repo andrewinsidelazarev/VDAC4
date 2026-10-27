@@ -271,4 +271,3 @@ NxErrField:     ds UI_STATUS_WIDTH-5,' '
 
 UiCoresTitle: db "FPGA cores from the Tang SD, /CORES",0
 NesEvoTitle: db "NES cartridge from the Evo SD",0
-NesTangTitle: db "NES cartridges on the Tang SD",0

@@ -27,7 +27,6 @@ mainStart:
         INCLUDE "evo_menu.asm"
         INCLUDE "evo_sd.asm"                     ; карта Evo — SD1 ZX Next
         INCLUDE "nes_save.asm"
-        INCLUDE "nes_browser.asm"
         INCLUDE "proto.asm"
         INCLUDE "zifi_link.asm"
 

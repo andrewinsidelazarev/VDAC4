@@ -6,6 +6,8 @@
 ;      (ИМЯ.ELF); меню: ↑/↓, Enter — выбрать, Esc — назад в WC;
 ;   3. CORE_APP (#2D) [имя, 0]: ESP ставит ИМЯ.ELF с SD Tang в кэш модулей и запускает его (нет
 ;      своего — общий слой прошивки «CORE»);
+;      NES из меню (0.13) — START сразу, без образа: картридж выбирают в меню F1 ядра (NES.ELF 0.7+
+;      открывает его на старте и не закрывает до выбора .nes); своего браузера SD Tang в плагине нет.
 ;   4. START (#70) [имя, 0]: слой грузит ядро из кэша BL616 (с SD Tang — сначала в кэш). Плагин
 ;      ждёт по STATUS (#72), пока ядро не заработает, — до 60 с. Esc с этого шага не выход:
 ;      картинка ядра бывает на HDMI раньше, чем плагин увидит «работает», а Esc нужен ядру
@@ -91,6 +93,7 @@ PLUGIN:
         ld (SdOn),a
         ld (SdWrote),a
         ld (SdBurst),a
+        ld (NesMenu),a
         call Proto_ResetRx
         ld a,1
         call WC_INT_PL                   ; WC не перерисовывает своё под окном
@@ -153,8 +156,11 @@ PLUGIN:
         inc de
         inc hl
         djnz .is_nes
-        call Nes_Tang
-        jr .prepared
+        ; NES из меню (0.13): картридж выбирают в меню F1 самого ядра — NES.ELF 0.7+ открывает его на
+        ; старте и не закрывает до выбора .nes. START — сразу, без образа и без своего браузера.
+        ld a,1
+        ld (NesMenu),a
+        jr .start_core
 .evo_file:
         call Nes_File
 .prepared:
@@ -170,7 +176,17 @@ PLUGIN:
         ld hl,UiHintLoad
         call Ui_Hint
         call Nx_StartCore
-        jp c,.fatal_exit                 ; ошибка — с текстом
+        jr nc,.core_runs
+        ; START без образа отверг старый NES.ELF (до 0.7) — сказать, что обновить
+        ld a,(NesMenu)
+        or a
+        jp z,.fatal_exit                 ; ошибка — с текстом
+        ld a,(NxStartNo)
+        or a
+        jp z,.fatal_exit
+        ld hl,NesErrMenu
+        jp .fatal_exit
+.core_runs:
         call Nes_SaveTrack
         call Ui_Close                    ; дальше — картинка ядра на HDMI
         call Nx_VideoOff
@@ -381,6 +397,8 @@ Cr_StartApp:
 ; START и ожидание работающего ядра. Выход: CF=0 — работает; CF=1, HL — текст ошибки.
 ; Esc не проверяется (см. шаг 4 в начале файла).
 Nx_StartCore:
+        xor a
+        ld (NxStartNo),a
         call Cr_NameLen
         ld hl,CrName
         ld a,CMD_NX_START
@@ -392,8 +410,12 @@ Nx_StartCore:
         ret c
         ld a,(ProtoBuf)
         or a
+        jr nz,.accepted
+        inc a
+        ld (NxStartNo),a                 ; слой ответил «нет» (не молчание)
         scf
-        ret z
+        ret
+.accepted:
         ld hl,LOAD_FRAMES
         ld (NxTimer),hl
         ld a,POLL_EVERY
@@ -814,6 +836,7 @@ MenuSel:        db 0
 MenuTop:        db 0
 NxTimer:        dw 0
 NxDivider:      db 0
+NxStartNo:      db 0                    ; 1 — слой ответил на START «нет»
 NxWant:         db 0
 NxExitKey:      db 0
 NxAppStarted:   db 0

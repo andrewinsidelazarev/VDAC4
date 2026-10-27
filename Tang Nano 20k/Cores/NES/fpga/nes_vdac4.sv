@@ -81,9 +81,12 @@ wire osd_wr, osd_show, nes_pause, nes_paused;
 wire [8:0] osd_addr;
 wire [31:0] osd_data;
 wire [5:0] osd_sel;
+wire [29:0] osd_band, osd_rule;                 // 0.10: оформление окна меню (LINK d0, d4, d8)
+wire [31:0] osd_bar;
 wire [3:0] link_out;
 wire link_oe, boot_req, evo_reset;
 wire aspect_requested, aspect_restore, aspect_value;
+wire [1:0] picture_size;                        // 0.9: размер картинки 100 / 95 / 90 % (LINK 84)
 assign link_io=link_oe ? link_out : 4'bzzzz;
 next_evo_reset evo(.clk(clk), .m_sel(m_sel), .req(evo_reset));
 next_cp cp(.sck(cp_sck), .cs_n(cp_cs_n), .mosi(cp_mosi), .miso(cp_miso),
@@ -112,7 +115,9 @@ nes_link link(.sck(link_sck), .cs_n(link_cs_n), .io_in(link_io),
     .io_out(link_out), .io_oe(link_oe), .clk(clk), .rst_n(sys_resetn),
     .keyboard(keys), .joystick0(joystick0), .sample(sample), .boot_req(boot_req),
     .aspect_requested(aspect_requested), .aspect_restore(aspect_restore), .aspect_value(aspect_value),
+    .picture_size(picture_size),
     .osd_wr(osd_wr), .osd_addr(osd_addr), .osd_data(osd_data), .osd_show(osd_show), .osd_sel(osd_sel),
+    .osd_band(osd_band), .osd_rule(osd_rule), .osd_bar(osd_bar),
     .pause(nes_pause), .paused(nes_paused),
     .sd_cs_n(SD_CS), .sd_sck(SD_SCK), .sd_mosi(SD_MOSI), .sd_miso(SD_MISO),
     .loading(loading), .rom_data(loader_do), .rom_valid(loader_do_valid),
@@ -251,7 +256,9 @@ GameLoader loader(.clk(clk), .reset(!sys_resetn || loader_reset), .downloading(l
 nes2hdmi_vdac4 hdmi(.clk(clk), .resetn(sys_resetn), .color(color), .cycle(cycle), .scanline(scanline),
     .sample(sample >> 1), .f6(keys[64]), .overlay(1'b0),   // пропорции — F7 (HID 0x40)
     .osd_wr(osd_wr), .osd_addr(osd_addr), .osd_data(osd_data), .osd_show(osd_show), .osd_sel(osd_sel), .overlay_x(), .overlay_y(), .overlay_color(15'b0),
+    .osd_band(osd_band), .osd_rule(osd_rule), .osd_bar(osd_bar),
     .aspect_requested(aspect_requested), .aspect_restore(aspect_restore), .aspect_value(aspect_value),
+    .picture_size(picture_size),
     .clk_pixel(hclk), .clk_5x_pixel(hclk5), .tmds_clk_n(O_tmds_clk_n), .tmds_clk_p(O_tmds_clk_p),
     .tmds_d_n(O_tmds_data_n), .tmds_d_p(O_tmds_data_p));
 endmodule

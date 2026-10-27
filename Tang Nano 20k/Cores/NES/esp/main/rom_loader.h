@@ -21,6 +21,9 @@ static int rom_status(uint32_t *s)
     return 0;
 }
 
+/* меню F1 (0.9): ход передачи — каждые 16 пакетов (4 КБ) и в конце; NULL — не нужен */
+static void (*load_progress)(size_t done, size_t total);
+
 static int load_cartridge(const uint8_t *p, size_t size)
 {
     if (rom_check(p, size)) return 0;
@@ -55,6 +58,7 @@ static int load_cartridge(const uint8_t *p, size_t size)
         if (accepted != seq || (s & 2) || (s & 8) ||
             link_rd(0x4c, &received) != ZM_OK || received != offset + n) return 0;
         offset += n;
+        if (load_progress && ((seq & 15) == 0 || offset == size)) load_progress(offset, size);
     }
     uint32_t crc = 0, count = 0, err = 1;
     if (!running || exit_req || !rom_status(&s) || (s & 14) != 4 ||

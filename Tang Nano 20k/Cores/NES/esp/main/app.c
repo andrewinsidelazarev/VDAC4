@@ -11,7 +11,7 @@
 #include "ps2_hid.h"
 #include "zm_app.h"
 
-#define APP_VERSION "0.6"
+#define APP_VERSION "0.9"
 
 /* регистры LINK ядра Next (next_link.sv) */
 #define R_STATUS     0x08u
@@ -66,6 +66,10 @@ static int32_t mouse_dx, mouse_dy;
 static uint32_t input_ms;
 /* game_menu.h: образ с карты Evo из меню — 0x77…0x79 принимаются и во время игры */
 static volatile int evo_rom_wait;
+/* START без картриджа (0.7: NES из меню ядер плагина) — ядро стартует сразу с меню F1, игра — из него */
+static int menu_start;
+/* game_menu.h: идёт загрузка из меню F1 — ошибка остаётся в меню, сеанс ядра живёт */
+static volatile int menu_loading;
 
 static void wr32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 
@@ -104,7 +108,8 @@ static void fail(const char *text)
     strncpy(error_text, text, sizeof error_text - 1);
     error_text[sizeof error_text - 1] = 0;
     core->log("nes: %s", text);
-    state = 255;
+    if (!menu_loading)
+        state = 255;
 }
 
 static int menu_key(uint16_t ev);   /* game_menu.h: меню F1 съедает клавиши */
@@ -158,6 +163,9 @@ static void input_step(ps2_hid_t *kb, uint8_t *joy_sent, uint8_t *btn_sent)
 }
 
 /* ---- звук: кольцо отсчётов (LINK 0x2000…) → pcm_write ---- */
+#include "audio_level.h"
+static nes_audio_t nes_audio;     /* отсчёт без знака → без постоянной составляющей (0.8) */
+
 typedef struct {
     uint32_t rp, last_ms;
     uint32_t lags;                /* сколько раз догоняли (кольцо давно не читали или почти полно) */
@@ -193,10 +201,7 @@ static uint32_t audio_step(audio_pos_t *a)
             n = AUDIO_CELLS - a->rp;
         if (live_read(W_AUDIO + 4 * a->rp, words, n) != ZM_OK)
             break;
-        for (uint32_t i = 0; i < n; i++) {
-            frames[2 * i] = (float)(int16_t)(words[i] >> 16) * (1.0f / 32768.0f);
-            frames[2 * i + 1] = (float)(int16_t)words[i] * (1.0f / 32768.0f);
-        }
+        nes_audio_convert(&nes_audio, words, n, frames);
         /* pcm_write ждёт места и может принять не всё: дописать остаток */
         uint32_t done = 0;
         while (done < n && running && session_live) {
@@ -228,6 +233,7 @@ static void audio_session(void)
         return;
     }
     core->log("nes: audio %u Hz", (unsigned)fmt.rate);
+    nes_audio_reset(&nes_audio, (float)fmt.rate);
     audio_pos_t a = {0, core->millis(), 0};
     if (live_read(R_AUDIO_WP, &v, 1) == ZM_OK)
         a.rp = gray_dec(v & 0x7FF);
@@ -274,12 +280,15 @@ static void nes_cfg_schedule(void);
 static int load_core(void)
 {
     key_pending_at = key_pending_n = 0;
-    menu_open = 0;
-    if (rom_from_sd && (!rom_read_sd() || !save_prepare(rom_data,rom_size,1))) return 0;
-    if (!save_prepared || !save_restored) { fail("Battery save has not been restored"); return 0; }
+    menu_open = menu_force = 0;
+    if (!menu_start) {
+        if (rom_from_sd && (!rom_read_sd() || !save_prepare(rom_data,rom_size,1))) return 0;
+        if (!save_prepared || !save_restored) { fail("Battery save has not been restored"); return 0; }
+    }
     if (!running || exit_req) return 0;
-    if (!rom_ready || !rom_data) { fail("Choose a .nes cartridge first"); return 0; }
+    if (!menu_start && (!rom_ready || !rom_data)) { fail("Choose a .nes cartridge first"); return 0; }
     if (!nes_cfg_prepare()) return 0;
+    slot0_size_read();                              /* SIZE слота 0 — пока он ещё на LINK */
     core->log("nes: loading core %s", core_name);
     const int r = core->core_load(core_name, &core_version);
     if (r == ZM_NOT_FOUND) {
@@ -295,16 +304,23 @@ static int load_core(void)
         core->core_back(10000);
         return 0;
     }
+    if (menu_start && core_version < 0x04010007u) {
+        fail("start from the menu needs NES core 0.7+ (F1 menu)"); core->core_back(10000); return 0;
+    }
     if (!nes_cfg_apply()) {
         fail("Cannot apply core .cfg to NES"); core->core_back(10000); return 0;
     }
-    if (!load_cartridge(rom_data, rom_size)) {
-        fail("cartridge transfer failed (length, CRC or parser)");
-        core->core_back(10000);
-        return 0;
+    if (menu_start) {
+        game_crc = 0;                               /* игры в ядре нет: F5/F6 откажут */
+    } else {
+        if (!load_cartridge(rom_data, rom_size)) {
+            fail("cartridge transfer failed (length, CRC or parser)");
+            core->core_back(10000);
+            return 0;
+        }
+        snap_game(rom_data, rom_size);
+        rom_discard(); /* После CRC FPGA копия в PSRAM больше не нужна. */
     }
-    snap_game(rom_data, rom_size);
-    rom_discard(); /* После CRC FPGA копия в PSRAM больше не нужна. */
     uint32_t v = 0;
     if (link_rd(R_CLK_KHZ, &v) == ZM_OK && v > 1000 && v < 200000)
         clk_khz = v;
@@ -321,7 +337,9 @@ static int load_core(void)
     session_live = 1;
     core->mutex_unlock(link_lock);
     state = 2;
-    core->log("nes: core runs, VERSION %08X", (unsigned)core_version);
+    core->log("nes: core runs, VERSION %08X%s", (unsigned)core_version, menu_start ? ", game from the F1 menu" : "");
+    if (menu_start)
+        menu_show_forced();                         /* машина на паузе, меню — до выбора .nes */
     return 1;
 }
 
@@ -330,8 +348,10 @@ static void leave_core(void)
 {
     /* 0.5: F12 не сохраняет — battery RAM не снимается и .sav не пишется (сохранения — F5/F6) */
     save_discard();
-    menu_open = 0;
+    menu_open = menu_force = 0;
+    menu_items_free();    /* 0.9: список папки меню — до следующего F1 не нужен */
     game_crc = 0;
+    rom_from_sd = 0;      /* 0.7: выбор карты Tang — на один сеанс; следующий START без образа — снова меню */
     end_session();
     state=5;
     if (!save_returned) nes_cfg_capture();
@@ -403,9 +423,15 @@ static int command(uint8_t cmd, const uint8_t *p, uint16_t n)
         /* новый сеанс — и после выхода или ошибки прежнего (приложение остаётся загруженным,
            например после сброса Evo) */
         const int idle = state == 0 || state == 3 || state == 255;
-        if (idle && (rom_ready || rom_from_sd) && n <= 16 && (n == 0 || p[n - 1] == 0)) {
+        if (idle && n <= 16 && (n == 0 || p[n - 1] == 0)) {
             if (n > 1)
                 memcpy(core_name, p, n);
+            /* 0.7: картриджа нет (NES из меню ядер плагина) — ядро с меню F1, игра — из него */
+            menu_start = !(rom_ready || rom_from_sd);
+            if (menu_start) {
+                rom_discard();
+                save_discard();
+            }
             error_text[0] = 0;
             exit_req = 0;
             ok = 1;
@@ -519,7 +545,7 @@ static void stop(void)
        загрузка ядра идёт в задаче прошивки и выгрузку не держит */
     for (unsigned i = 0; i < 2000 && !(worker_done && audio_done); i++)
         core->delay(10);
-    if (worker_done) { rom_discard(); save_discard(); }
+    if (worker_done) { rom_discard(); save_discard(); menu_items_free(); }
 }
 
 #ifndef NES_APP_HOST_TEST

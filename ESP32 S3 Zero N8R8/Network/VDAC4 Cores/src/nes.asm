@@ -212,6 +212,7 @@ Nes_Crc16:
         ret
 
 NesCall:        db 3
+NesMenu:        db 0                    ; 1 — NES из меню: START без образа, игра — из меню F1 ядра
 NesNamePtr:     dw 0
 NesSize:        ds 4
 NesLeft:        ds 4
@@ -227,3 +228,4 @@ NesCancelled:   db "Cartridge loading cancelled",0
 NesErrRead:     db "ERROR: could not read cartridge file",0
 NesErrTransfer: db "ERROR: cartridge transfer failed",0
 NesErrVersion:  db "ERROR: update CORES/NES.ELF to 0.2+",0
+NesErrMenu:     db "ERROR: update CORES/NES.ELF to 0.7+",0

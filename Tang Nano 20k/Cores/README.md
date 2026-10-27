@@ -8,7 +8,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 | **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.32 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
 | **FT812** — видеоускоритель для программ Evo | flash Tang, слот 1 | 1.29 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
-| **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.8, слой ESP 0.6 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
+| **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.9 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
 
 `.BIN` — само ядро. `.ELF` — его слой на ESP: клавиатура и мышь Evo, звук на ЦАП ESP, сохранения на
 карты, выход в WC. Исходники TS-Config и FT812 — в [`../Firmware`](../Firmware), Next и NES — здесь,
@@ -19,9 +19,9 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 - Прошивка ESP **vdac4-0.1.100**: мост к карте Tang, кэш ядер, запуск слоёв `.ELF`.
 - Прошивка BL616 модуля Tang **24** — [`../BL616`](../BL616): её кэш ядер грузит ядро с карты в ПЛИС,
   а по F12 возвращает TS-Config.
-- Плагин Wild Commander **VDAC4 Cores** 0.12 —
+- Плагин Wild Commander **VDAC4 Cores** 0.13 —
   [`ESP32 S3 Zero N8R8/Network/VDAC4 Cores`](../../ESP32%20S3%20Zero%20N8R8/Network/VDAC4%20Cores): меню ядер,
-  часы Evo для Next, сектора карты Evo для Next.
+  часы Evo для Next, сектора карты Evo для Next, NES из меню — сразу в меню F1 ядра.
 - Для Next — NextZXOS на той же карте Tang (дистрибутив `sn-complete-24.11`) и правленые ROM
   (ниже, шаг 3).
 
@@ -69,10 +69,11 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 | NES | |
 |---|---|
 | Стрелки, X / Z, Пробел / Enter | крестовина, A / B, Select / Start |
-| F1 | меню выбора картриджа с карт Tang и Evo |
+| F1 | меню выбора картриджа с карт Tang и Evo; при запуске NES из меню ядер оно открыто сразу и не закрывается, пока не выбран `.nes` |
 | F4 | сброс |
 | F5 / F6 | снимок игры / загрузка снимка (`.sst` рядом с картриджем) |
 | F7 | пропорции 4:3 / 16:9 |
+| F8 (в меню F1) | размер картинки: AUTO (как SIZE в TS-Config) → 100 → 95 → 90 % |
 | F12 | выход в WC; сохранения battery — в `.sav` рядом с картриджем |
 
 Джойстик Kempston работает в обоих ядрах. Мышь Kempston работает в Next.

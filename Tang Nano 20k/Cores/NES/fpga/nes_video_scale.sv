@@ -1,8 +1,14 @@
 // GPL-3.0-or-later. Геометрия NES для 720p: 4:3 (960x720) либо 16:9 (1280x720).
 // Как в NESTang, видны центральные 256x224 пикселя исходного кадра.
+// VDAC4 0.9: размер картинки size — 0: 100 %, 1: 95 %, 2: 90 % (как SIZE в TS-Config, слот 0) — против
+// вылета за край на старых HDMI-приёмниках. Окно картинки — по центру кадра 1280x720, вокруг чёрное:
+//   высота 720 / 684 / 648 (сверху 0 / 18 / 36), ширина 4:3 — 960 / 912 / 864 (слева 160 / 184 / 208),
+//   16:9 — 1280 / 1216 / 1152 (слева 0 / 32 / 64).
+// Пропорции и размер меняются с начала кадра. При 100 % — побитно прежняя геометрия.
 module nes_video_scale (
     input clk_nes, input clk_pixel, input resetn, input f6,
     input restore, input restore_wide,
+    input [1:0] size,                       // домен clk_nes, меняется редко
     input [10:0] cx, input [9:0] cy,
     output [15:0] address, output active, output [7:0] xx, output [7:0] yy,
     output reg wide = 0, output reg requested = 0
@@ -17,27 +23,42 @@ module nes_video_scale (
         end
     end
     reg [1:0] mode_sync = 0;
+    reg [1:0] size_s0 = 0, size_s1 = 0, size_r = 0;   // 3 — как 0 (100 %)
     always @(posedge clk_pixel) begin
         mode_sync <= {mode_sync[0], requested};
-        if (!resetn) begin mode_sync <= 0; wide <= 0; end
-        else if (cx == 0 && cy == 720) wide <= mode_sync[1];
+        size_s0 <= size;
+        size_s1 <= size_s0;
+        if (!resetn) begin mode_sync <= 0; wide <= 0; size_r <= 0; end
+        else if (cx == 0 && cy == 720) begin
+            wide <= mode_sync[1];
+            size_r <= size_s1 == 2'd3 ? 2'd0 : size_s1;
+        end
     end
+    // окно картинки: края и размеры для пропорций и размера этого кадра (константы, без сумматоров)
+    wire s95 = size_r == 2'd1, s90 = size_r == 2'd2;
+    wire [9:0] height = s95 ? 10'd684 : s90 ? 10'd648 : 10'd720;
+    wire [9:0] top_edge = s95 ? 10'd18 : s90 ? 10'd36 : 10'd0;
+    wire [9:0] bottom_edge = s95 ? 10'd702 : s90 ? 10'd684 : 10'd720;
+    wire [10:0] width = wide ? (s95 ? 11'd1216 : s90 ? 11'd1152 : 11'd1280)
+                             : (s95 ? 11'd912 : s90 ? 11'd864 : 11'd960);
+    wire [10:0] left_edge = wide ? (s95 ? 11'd32 : s90 ? 11'd64 : 11'd0)
+                                 : (s95 ? 11'd184 : s90 ? 11'd208 : 11'd160);
+    wire [10:0] right_edge = wide ? (s95 ? 11'd1248 : s90 ? 11'd1216 : 11'd1280)
+                                  : (s95 ? 11'd1096 : s90 ? 11'd1072 : 11'd1120);
     // BRAM читает за такт, RGB ещё регистрируется. Готовим адрес следующего
     // пикселя; active относится к текущему — данные BRAM приходят именно для него.
     wire [10:0] nx = cx == 1649 ? 11'd0 : cx + 1'b1;
     wire [9:0] ny = cx == 1649 ? (cy == 749 ? 10'd0 : cy + 1'b1) : cy;
-    wire [10:0] left_edge = wide ? 11'd0 : 11'd160;
-    wire [10:0] right_edge = wide ? 11'd1280 : 11'd1120;
-    wire next_active = nx >= left_edge && nx < right_edge && ny < 720;
+    wire next_x_in = nx >= left_edge && nx < right_edge;
+    wire next_active = next_x_in && ny >= top_edge && ny < bottom_edge;
     reg [7:0] x_index = 0, y_index = 0;
     reg [10:0] x_remainder = 0;
     reg [9:0] y_remainder = 0;
-    wire [10:0] width = wide ? 11'd1280 : 11'd960;
     wire [11:0] x_sum = {1'b0, x_remainder} + 12'd256;
     wire [10:0] y_sum = {1'b0, y_remainder} + 11'd224;
-    // Индекс — координата следующего чтения BRAM. Строка подготавливается
-    // в blanking; для full width первый пиксель читается при cx=1649.
-    wire step_x = wide ? (cx == 1649 || cx < 1279) : (cx >= 159 && cx < 1119);
+    // Индекс — координата следующего чтения BRAM: шаг, когда следующий пиксель — в окне. Строка
+    // подготавливается в blanking; при левом крае 0 первый пиксель читается при cx=1649.
+    wire step_x = next_x_in;
     always @(posedge clk_pixel) begin
         if (!resetn) begin
             x_index <= 0; y_index <= 0; x_remainder <= 0; y_remainder <= 0;
@@ -51,9 +72,9 @@ module nes_video_scale (
             end
             if (cx == 1648) begin
                 if (cy == 749) begin y_index <= 0; y_remainder <= 0; end
-                else if (cy < 720) begin
-                    if (y_sum >= 720) begin
-                        y_remainder <= y_sum - 11'd720;
+                else if (cy >= top_edge && cy < bottom_edge) begin
+                    if (y_sum >= {1'b0, height}) begin
+                        y_remainder <= y_sum - {1'b0, height};
                         y_index <= y_index + 1'b1;
                     end else y_remainder <= y_sum[9:0];
                 end
@@ -63,5 +84,5 @@ module nes_video_scale (
     assign xx = next_active ? x_index : 8'd0;
     assign yy = next_active ? y_index : 8'd0;
     assign address = {yy + 8'd8, xx};
-    assign active = cx >= left_edge && cx < right_edge && cy < 720;
+    assign active = cx >= left_edge && cx < right_edge && cy >= top_edge && cy < bottom_edge;
 endmodule
