@@ -55,7 +55,14 @@ static int nlog;
 static int back_result = ZM_OK, back_calls, state_at_back = -1, live_at_back = -1;
 static int pcm_accept = 16;
 static uint32_t pcm_frames, pcm_calls;
-static uint8_t replies[64];
+static uint8_t replies[1100];
+static uint8_t reply_code;
+static uint16_t reply_len;
+/* SD1 ядра 0.39+: регистры запроса и окно сектора (next_link.sv) */
+static uint32_t sd1_req_reg, sd1_lba_reg, sd1_ctl = 2, sd1_done = 0xFFFFFFFFu;
+static uint32_t sd1_from_next[128], sd1_for_next[128];
+static int sd1_tear;                       /* столько ближайших чтений SD1_REQ — «рваные» */
+static int sd1_window_writes;
 static int audio_feed;                     /* каждое чтение AUDIO_WP — ещё 16 отсчётов */
 static int pace_delays, pace_steps, pace_max;   /* сон в сеансе звука: сколько, шагов между ними */
 
@@ -81,6 +88,12 @@ static int f_read(uint32_t a, uint32_t *w, uint32_t n)
             w[i] = 586;
         else if (a == R_CLK_KHZ)
             w[i] = 28125;
+        else if (a == R_SD1)
+            w[i] = sd1_tear > 0 ? (sd1_tear--, sd1_req_reg ^ 0x80000000u) : sd1_req_reg;
+        else if (a == R_SD1_LBA)
+            w[i] = sd1_lba_reg;
+        else if (a >= W_SD1 && a < W_SD1 + 512)
+            w[i] = sd1_from_next[(a - W_SD1) / 4];
         else if (a >= W_AUDIO)
             w[i] = (a - W_AUDIO) / 4;            /* отсчёт — номер ячейки */
         else if (a >= W_UART)
@@ -115,12 +128,33 @@ static int f_write(uint32_t a, const uint32_t *w, uint32_t n)
             }
         } else if (a == R_UART_DIV) {
             reg_div = w[i];
+        } else if (a == R_SD1_CTL) {
+            sd1_ctl = w[i];
+        } else if (a == R_SD1) {
+            sd1_done = w[i];                      /* ядро: свой номер — запрос снят */
+            if ((w[i] & 0xFF) == (sd1_req_reg & 0xFF))
+                sd1_req_reg &= ~0xC0000000u;
+        } else if (a >= W_SD1 && a < W_SD1 + 512) {
+            sd1_for_next[(a - W_SD1) / 4] = w[i];
+            sd1_window_writes++;
         }
     }
     return ZM_OK;
 }
 
-static void f_log(const char *format, ...) { (void)format; }
+static char log_text[4096];       /* журнал приложения — для проверок (строки подряд) */
+static void f_log(const char *format, ...)
+{
+    const size_t used = strlen(log_text);
+    va_list args;
+    va_start(args, format);
+    vsnprintf(log_text + used, sizeof log_text - used, format, args);
+    va_end(args);
+    if (strlen(log_text) + 1 < sizeof log_text)
+        strcat(log_text, "\n");
+    else
+        log_text[0] = 0;
+}
 static uint32_t f_millis(void) { return now_ms; }
 static void f_delay(uint32_t ms)
 {
@@ -137,7 +171,8 @@ static void f_mutex(void *m) { (void)m; }
 static void f_signal(void *s) { (void)s; }
 static int f_reply(uint8_t r, const void *d, uint16_t n)
 {
-    (void)r;
+    reply_code = r;
+    reply_len = n;
     memcpy(replies, d, n < sizeof replies ? n : sizeof replies);
     return ZM_OK;
 }
@@ -345,6 +380,163 @@ static void test_audio(void)
           "сеанс звука: %d чтений указателя между снами (не больше 2), снов %d", pace_max, pace_delays);
 }
 
+/* часы: TIME от плагина -> LINK RTC_TIME / RTC_DATE в BCD (ядро 0.38+), день недели — по дате */
+static void test_rtc(void)
+{
+    const uint8_t t[6] = {56, 34, 12, 27, 10, 26};   /* 2026-10-27 12:34:56, вторник */
+    core_version = 0x03010026;
+    nlog = 0;
+    rtc_pending = 0;
+    command(0x74, t, 6);
+    CHECK(rtc_pending, "TIME принят");
+    rtc_pending = 0;
+    rtc_apply();
+    CHECK(nlog == 2 && wlog[0].a == R_RTC_TIME && wlog[0].v == 0x03123456u && wlog[1].a == R_RTC_DATE &&
+          wlog[1].v == 0x261027u, "LINK: %u записей, %08X %08X", (unsigned)nlog, nlog > 0 ? (unsigned)wlog[0].v : 0u,
+          nlog > 1 ? (unsigned)wlog[1].v : 0u);
+    const uint8_t bad_t[6] = {0, 0, 0, 1, 13, 26};
+    command(0x74, bad_t, 6);
+    CHECK(!rtc_pending, "месяц 13 не принят");
+    nlog = 0;
+    core_version = 0x03010025;
+    rtc_apply();
+    CHECK(nlog == 0, "ядро без часов — LINK не трогать");
+    CHECK(weekday(2028, 2, 29) == 3 && weekday(2000, 1, 1) == 7 && weekday(2026, 10, 27) == 3, "день недели");
+    core_version = 0x03010011;
+}
+
+/* SD1 — карта Evo (ядро 0.39+): SD_ON → SD1_CTL; запрос ядра — в ответе INPUT; SD_DONE чтения — сектор
+   в окно, затем итог; запись — сектор из окна кусками SD_PART; чужой номер, «рваное» SD1_REQ,
+   брошенный запрос, отказ записи LINK, старое ядро, новый START */
+static void test_sd(void)
+{
+    static const uint8_t in4[4] = {0, 0xFF, 0, 0};
+    uint8_t on = 1, done[6 + 512];
+    state = 2;
+    session_live = 1;
+    sd1_req_reg = 0x20000000u;
+    sd1_ctl = 2;
+
+    core_version = 0x03010026;
+    command(0x75, &on, 1);
+    CHECK(reply_code == 0xF5 && replies[0] == 0 && sd1_ctl == 2, "ядро без SD1: SD_ON не принят");
+    input(in4, 4);
+    CHECK(reply_len == 1, "ядро без SD1: в INPUT нет запросов");
+
+    core_version = 0x03010027;
+    command(0x75, &on, 1);
+    CHECK(reply_code == 0xF5 && replies[0] == 1 && sd1_ctl == 1, "SD_ON: SD1_CTL = %u", (unsigned)sd1_ctl);
+    input(in4, 4);
+    CHECK(reply_len == 1 && replies[0] == 1, "нет запроса — ответ INPUT прежний [1]");
+
+    /* чтение */
+    sd1_req_reg = 0xA0000011u;
+    sd1_lba_reg = 0x00012345u;
+    input(in4, 4);
+    CHECK(reply_len == 7 && replies[1] == SD_READ && replies[2] == 0x11 && replies[3] == 0x45 && replies[4] == 0x23 &&
+          replies[5] == 0x01 && replies[6] == 0, "запрос чтения в INPUT: len %u op %u tag %02X", reply_len, replies[1],
+          replies[2]);
+    input(in4, 4);
+    CHECK(reply_len == 7 && replies[2] == 0x11, "без SD_DONE запрос — ещё раз");
+    memset(done, 0, sizeof done);
+    done[0] = 0x10;
+    wr32(done + 2, 0x12345);
+    command(0x76, done, sizeof done);
+    CHECK(reply_code == 0xF6 && replies[0] == 0 && sd1_done == 0xFFFFFFFFu, "чужой номер SD_DONE не принят");
+    done[0] = 0x11;
+    for (int i = 0; i < 512; i++)
+        done[6 + i] = (uint8_t)(i * 7 + 3);
+    sd1_window_writes = 0;
+    command(0x76, done, sizeof done);
+    CHECK(reply_code == 0xF6 && replies[0] == 1 && sd1_done == 0x111u, "итог чтения: %08X", (unsigned)sd1_done);
+    CHECK(sd1_window_writes == 128 && sd1_for_next[0] == 0x18110A03u && sd1_for_next[127] == rd32(done + 6 + 508),
+          "сектор — в окно 0x4000: %d слов, первое %08X", sd1_window_writes, (unsigned)sd1_for_next[0]);
+    input(in4, 4);
+    CHECK(reply_len == 1, "после итога запроса нет");
+
+    /* «рваное» SD1_REQ — пропуск до следующего INPUT */
+    sd1_req_reg = 0xA0000012u;
+    sd1_lba_reg = 0x777;
+    sd1_tear = 1;
+    input(in4, 4);
+    CHECK(reply_len == 1, "рваное SD1_REQ — запроса в этом ответе нет");
+
+    /* запись: сектор из окна, куски по 128 байтов */
+    sd1_req_reg = 0xE0000012u;
+    for (int i = 0; i < 128; i++)
+        sd1_from_next[i] = 0xA5000000u + (uint32_t)i * 0x010203u;
+    input(in4, 4);
+    CHECK(reply_len == 7 && replies[1] == SD_WRITE && replies[2] == 0x12 && rd32(replies + 3) == 0x777, "запрос записи");
+    int pieces = 1;
+    for (uint8_t k = 0; k < 4; k++) {
+        const uint8_t ask[2] = {0x12, k};
+        command(0x77, ask, 2);
+        pieces &= reply_code == 0xF7 && reply_len == 130 && replies[0] == 0x12 && replies[1] == k &&
+                  memcmp(replies + 2, (const uint8_t *)sd1_from_next + k * 128, 128) == 0;
+    }
+    CHECK(pieces, "SD_PART: четыре куска сектора записи");
+    const uint8_t wrong[2] = {0x13, 0};
+    command(0x77, wrong, 2);
+    CHECK(reply_len == 2 && replies[0] == 0xFF, "SD_PART чужого номера — FF");
+    uint8_t wdone[6] = {0x12, 0};
+    wr32(wdone + 2, 0x777);
+    command(0x76, wdone, 6);
+    CHECK(replies[0] == 1 && sd1_done == 0x112u, "итог записи %08X", (unsigned)sd1_done);
+
+    /* отказ плагина при чтении: итог без бита «вышел» */
+    sd1_req_reg = 0xA0000013u;
+    sd1_lba_reg = 0x55;
+    input(in4, 4);
+    uint8_t fail[6] = {0x13, 2};
+    wr32(fail + 2, 0x55);
+    command(0x76, fail, 6);
+    CHECK(sd1_done == 0x013u && sd_errors == 1, "отказ: итог %08X, ошибок %u", (unsigned)sd1_done, (unsigned)sd_errors);
+
+    /* брошенный запрос: ядро дало новый номер, прежний — снят */
+    sd1_req_reg = 0xA0000014u;
+    sd1_lba_reg = 0x60;
+    input(in4, 4);
+    sd1_req_reg = 0xA0000015u;
+    sd1_lba_reg = 0x61;
+    input(in4, 4);
+    CHECK(reply_len == 7 && replies[2] == 0x15 && rd32(replies + 3) == 0x61 && sd_dropped == 1,
+          "новый номер вместо брошенного: tag %02X, брошено %u", replies[2], (unsigned)sd_dropped);
+
+    /* запись LINK не вышла: итога нет, следующий INPUT предлагает тот же запрос */
+    done[0] = 0x15;
+    wr32(done + 2, 0x61);
+    sd1_done = 0xFFFFFFFFu;
+    fail_writes = 1;
+    command(0x76, done, sizeof done);
+    CHECK(sd1_done == 0xFFFFFFFFu, "сектор в окно не лёг — итога ядру нет");
+    input(in4, 4);
+    CHECK(reply_len == 7 && replies[2] == 0x15, "тот же запрос — снова плагину");
+    command(0x76, done, sizeof done);
+    CHECK(sd1_done == 0x115u, "повтор: итог %08X", (unsigned)sd1_done);
+
+    /* журнал SD1: рабочий поток выводит записи command — номер блока, итог, байты сектора */
+    log_text[0] = 0;
+    sd_log_drain();
+    CHECK(strstr(log_text, "sd1 R #17 lba 74565,") && strstr(log_text, "ok | 000 030a1118"),
+          "журнал: чтение и байты сектора");
+    CHECK(strstr(log_text, "sd1 W #18 lba 1911,") && strstr(log_text, "ok | 000 000000a5"), "журнал: запись");
+    CHECK(strstr(log_text, "#19 lba 85,") && strstr(log_text, "FAILED"), "журнал: отказ плагина");
+    CHECK(strstr(log_text, "#20 lba 96,") && strstr(log_text, "dropped"), "журнал: брошенный запрос");
+    CHECK(sd_rec_tail == sd_rec_head && sd_logged == 6, "журнал: записей %u", (unsigned)sd_logged);
+
+    /* новый сеанс: до SD_ON — пустой слот */
+    state = 0;
+    const uint8_t name[5] = "NEXT";
+    command(0x70, name, 5);
+    state = 2;
+    sd1_req_reg = 0xA0000016u;
+    input(in4, 4);
+    CHECK(reply_len == 1 && !sd_on, "после START до SD_ON запросов нет");
+    state = 2;
+    sd1_req_reg = 0x20000000u;
+    core_version = 0x03010011;
+}
+
 int main(void)
 {
     fake.size = sizeof fake;
@@ -377,6 +569,8 @@ int main(void)
     test_leave();
     test_input();
     test_audio();
+    test_rtc();
+    test_sd();
     printf("проверок %d, ошибок %d\n%s\n", checks, bad, bad ? "ТЕСТ НЕ ПРОЙДЕН" : "ТЕСТ ПРОЙДЕН");
     return bad != 0;
 }

@@ -25,7 +25,7 @@
         dd #FFFFFFFF                  ; файл читает плагин, WC не грузит его в RAM
 
 .plugin_name
-        db "VDAC4 Cores v0.10"
+        db "VDAC4 Cores v0.12"
         ds 32-($-.plugin_name),' '
         db #05                        ; меню F10, просмотрщик и расширение .NES
         ds 6

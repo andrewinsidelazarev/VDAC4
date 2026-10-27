@@ -21,9 +21,11 @@ startCode:
         DISP #8000
 mainStart:
         INCLUDE "cores.asm"
+        INCLUDE "../../shared/weather/rtc.asm"   ; часы Gluk Evo (TIME для часов ядра Next)
         INCLUDE "ui.asm"
         INCLUDE "nes.asm"
         INCLUDE "evo_menu.asm"
+        INCLUDE "evo_sd.asm"                     ; карта Evo — SD1 ZX Next
         INCLUDE "nes_save.asm"
         INCLUDE "nes_browser.asm"
         INCLUDE "proto.asm"

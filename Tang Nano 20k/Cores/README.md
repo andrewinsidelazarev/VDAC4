@@ -7,7 +7,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 |---|---|---|---|
 | **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.32 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
 | **FT812** — видеоускоритель для программ Evo | flash Tang, слот 1 | 1.29 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
-| **ZX Spectrum Next** (на основе NextNano) | карта Tang, `CORES` | 0.37, слой ESP 0.7 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
+| **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.8, слой ESP 0.6 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
 
 `.BIN` — само ядро. `.ELF` — его слой на ESP: клавиатура и мышь Evo, звук на ЦАП ESP, сохранения на
@@ -19,8 +19,9 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 - Прошивка ESP **vdac4-0.1.100**: мост к карте Tang, кэш ядер, запуск слоёв `.ELF`.
 - Прошивка BL616 модуля Tang **24** — [`../BL616`](../BL616): её кэш ядер грузит ядро с карты в ПЛИС,
   а по F12 возвращает TS-Config.
-- Плагин Wild Commander **VDAC4 Cores** 0.10 —
-  [`ESP32 S3 Zero N8R8/Network/VDAC4 Cores`](../../ESP32%20S3%20Zero%20N8R8/Network/VDAC4%20Cores): меню ядер.
+- Плагин Wild Commander **VDAC4 Cores** 0.12 —
+  [`ESP32 S3 Zero N8R8/Network/VDAC4 Cores`](../../ESP32%20S3%20Zero%20N8R8/Network/VDAC4%20Cores): меню ядер,
+  часы Evo для Next, сектора карты Evo для Next.
 - Для Next — NextZXOS на той же карте Tang (дистрибутив `sn-complete-24.11`) и правленые ROM
   (ниже, шаг 3).
 
@@ -60,6 +61,10 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 | F1 | полный сброс через TBBlue |
 | F8 | частота процессора 3,5 / 7 / 14 / 28 МГц |
 | F9 | NMI |
+| Ctrl | Symbol Shift; двоеточие — Ctrl + Z (или клавиша `\`), кавычка — `'`, косая черта — `/` |
+
+В NextZXOS карта Tang — диск C:, карта Evo — следующий диск (обычно D:), например
+`SAVE "D:/downloads/t.bas"`.
 
 | NES | |
 |---|---|
@@ -73,6 +78,13 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 Джойстик Kempston работает в обоих ядрах. Мышь Kempston работает в Next.
 
 ## Проверено на плате
+
+2026-10-27, ESP 0.1.100, TS-Config 1.32, плагин VDAC4 Cores 0.12:
+- **Next 0.40**, NEXT.ELF 0.10:
+  - время Evo в NextZXOS верное;
+  - карта Evo — диск в NextZXOS и в Browser;
+  - за сеанс прочитано 1745 секторов, все вовремя, ошибок нет;
+  - запись файла из NextBASIC (7 секторов) — без отказов.
 
 2026-10-27, ESP 0.1.100, TS-Config 1.32:
 - **Next 0.37** — без сиреневой полосы. NextZXOS, браузер SD, запуск `.nex`, загрузка программ — без

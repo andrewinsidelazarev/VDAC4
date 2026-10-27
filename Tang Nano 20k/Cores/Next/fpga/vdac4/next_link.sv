@@ -32,13 +32,26 @@
 //   0x40 UART_DIV    RW [15:0] делитель такта ядра на бит UART моста (115200 — 244 при 28,125 МГц);
 //                       скорость меняет ESP по AT+UART_CUR эмулятора ESP-AT
 //   0x44 UART_CTL    W  бит 0 = 1 — сбросить флаг переполнения (бит 0 STATUS)
-//   0x48..0x74 и окна 0x4000..0x7FFC: диагностика удалена, чтение возвращает 0.
+//   0x4C RTC_TIME    W  часы DS1307 (next_rtc): {день недели 1…7, часы, минуты, секунды}, BCD;
+//                    R  текущее время часов
+//   0x50 RTC_DATE    W  {0, год 00…99, месяц, число}, BCD — запись загружает часы (RTC_TIME — раньше);
+//                    R  {бит 31 — время загружено, 0, год, месяц, число}
+//   0x54 SD1_REQ     R  SD1 Next — карта Evo (next_sd1): [31] запрос ждёт ESP, [30] запись (данные —
+//                       в окне 0x4000), [29] карта есть (SD1_CTL), [7:0] номер запроса
+//                    W  итог запроса: [8] 1 — вышел, [7:0] номер; для чтения сектор — в окне 0x4000
+//                       до этой записи. Чужой номер (брошенный запрос) не считается
+//   0x58 SD1_LBA     R  номер блока запроса (SDHC: адрес в блоках по 512)
+//   0x5C SD1_CTL     W  [0] 1 — карта есть (плагин обслуживает SD Evo), 0 — пустой слот
+//                    R  {секторов записано [31:16], прочитано [15:0]}
+//   0x48, 0x60..0x74 и окна 0x4200..0x7FFC: диагностика удалена, чтение возвращает 0.
 //   0x80 SPEED_PREF RW выбор частоты для повторного START. R: 5350 vv ~vv,
 //                      vv[2] — выбор есть, vv[1:0] — частота. W: 53500004 | частота.
 //   0xF0 BOOT        W  0x424F4F54 («BOOT») — вернуться в слот 0: запрос уходит BL616 (next_cp)
 // Окна (только чтение, из BSRAM по фронту SCK):
 //   0x1000…0x1FFC   кольцо UART Next → ESP: слово — байт [7:0], 1024 байта
 //   0x2000…0x3FFC   кольцо звука: {unsigned L[12:0], 000, unsigned R[12:0], 000}, 2048 отсчётов
+//   0x4000…0x41FC   SD1: сектор, что записал Next (запрос записи); слово — 4 байта, первый — [7:0]
+// Окно записи 0x4000…0x41FC — сектор для Next (запрос чтения), раскладка та же.
 //
 // Регистры ESP читает как есть (как у fb_link). Указатели колец — код Грея из регистров домена
 // ядра (за шаг меняется один разряд: чтение LINK посреди шага даёт старое или новое значение, и
@@ -73,7 +86,30 @@ module next_link #(
     input  wire [2:0]   speed_saved_in,
     output reg  [1:0]   speed_saved_out,
     output reg          speed_restore,
-    output reg          boot_req
+    output reg          boot_req,
+    // часы DS1307 (next_rtc): время Evo от ESP
+    output reg  [31:0]  rtc_time,
+    output reg  [23:0]  rtc_date,
+    output reg          rtc_load,
+    input  wire [31:0]  rtc_time_now,
+    input  wire [23:0]  rtc_date_now,
+    input  wire         rtc_valid,
+    // SD1 Next — карта Evo (next_sd1): запрос, итог и буферы сектора
+    output reg          sd1_present,
+    input  wire         sd1_req,
+    input  wire         sd1_req_wr,
+    input  wire [31:0]  sd1_req_lba,
+    input  wire [7:0]   sd1_req_tag,
+    output reg          sd1_done,
+    output reg  [7:0]   sd1_done_tag,
+    output reg          sd1_done_ok,
+    input  wire [6:0]   sd1_rbuf_addr,
+    output reg  [31:0]  sd1_rbuf_q,
+    input  wire         sd1_wbuf_we,
+    input  wire [6:0]   sd1_wbuf_addr,
+    input  wire [31:0]  sd1_wbuf_d,
+    input  wire [15:0]  sd1_rd_cnt,
+    input  wire [15:0]  sd1_wr_cnt
 );
     // ------------------------------------------------------------------
     // QSPI
@@ -233,6 +269,29 @@ module next_link #(
     wire        tq_pop = ut_bit == 4'd0 && tq_n != 7'd0;
 
     // ------------------------------------------------------------------
+    // SD1: сектор для Next (ESP пишет окно 0x4000) и сектор от Next (ESP читает окно 0x4000)
+    // ------------------------------------------------------------------
+    reg  [31:0] sd1_rram [0:127] /* synthesis syn_ramstyle = "block_ram" */;
+    reg  [31:0] sd1_wram [0:127] /* synthesis syn_ramstyle = "block_ram" */;
+    reg         sd1_r_we;
+    reg  [6:0]  sd1_r_wa;
+    reg  [31:0] sd1_r_wd;
+    always @(posedge clk) begin
+        sd1_r_we <= rst_n && wr_stb && wr_addr[17:7] == 11'h020;
+        sd1_r_wa <= wr_addr[6:0];
+        sd1_r_wd <= wr_data;
+    end
+    always @(posedge clk)
+        if (sd1_r_we)
+            sd1_rram[sd1_r_wa] <= sd1_r_wd;
+    always @(posedge clk) sd1_rbuf_q <= sd1_rram[sd1_rbuf_addr];
+    always @(posedge clk)
+        if (sd1_wbuf_we)
+            sd1_wram[sd1_wbuf_addr] <= sd1_wbuf_d;
+    reg [31:0] sd1_w_q;
+    always @(posedge sck) sd1_w_q <= sd1_wram[rd_addr[6:0]];
+
+    // ------------------------------------------------------------------
     // Регистры записи
     // ------------------------------------------------------------------
     reg  [31:0] scratch;
@@ -245,7 +304,11 @@ module next_link #(
         if (!rst_n) begin
             keyboard <= '0; mouse_dx <= '0; mouse_dy <= '0; mouse_btns <= '0; mouse_strobe <= 1'b0;
             joystick0 <= '0; scratch <= '0; u_div <= UART_DIV[15:0]; u_rp <= '0; boot_req <= 1'b0;
+            rtc_time <= '0; rtc_date <= '0; rtc_load <= 1'b0;
+            sd1_present <= 1'b0; sd1_done <= 1'b0; sd1_done_tag <= '0; sd1_done_ok <= 1'b0;
         end else begin
+            rtc_load <= 1'b0;
+            sd1_done <= 1'b0;
             if (wr_stb) begin
             case (wr_addr)
                 18'h0F: scratch <= wr_data;
@@ -259,6 +322,10 @@ module next_link #(
                 18'h0D: u_rp <= wr_data[9:0];
                 18'h10: u_div <= (wr_data[15:0] < 16'd4) ? 16'd4 : wr_data[15:0];
                 18'h3C: if (wr_data == 32'h424F_4F54) boot_req <= 1'b1;
+                18'h13: rtc_time <= wr_data;
+                18'h14: begin rtc_date <= wr_data[23:0]; rtc_load <= 1'b1; end
+                18'h15: begin sd1_done <= 1'b1; sd1_done_tag <= wr_data[7:0]; sd1_done_ok <= wr_data[8]; end
+                18'h17: sd1_present <= wr_data[0];
                 default: ;
             endcase
             end
@@ -313,7 +380,7 @@ module next_link #(
 
     always_comb begin
         if (rd_addr[12])
-            rd_data = 32'd0; // прежние окна журналов
+            rd_data = (rd_addr[11:7] == 5'd0) ? sd1_w_q : 32'd0;   // 0x4000…0x41FC: сектор от Next
         else if (rd_addr[11])
             rd_data = a_q;                               // 0x2000…0x3FFC
         else if (rd_addr[10])
@@ -329,6 +396,11 @@ module next_link #(
             8'h0C: rd_data = {22'd0, u_wp_g};
             8'h0F: rd_data = scratch;
             8'h10: rd_data = {16'd0, u_div};
+            8'h13: rd_data = rtc_time_now;                 // 0x4C: часы DS1307 — время
+            8'h14: rd_data = {rtc_valid, 7'd0, rtc_date_now}; // 0x50: загружено, дата
+            8'h15: rd_data = {sd1_req, sd1_req_wr, sd1_present, 21'd0, sd1_req_tag};   // 0x54: SD1_REQ
+            8'h16: rd_data = sd1_req_lba;                  // 0x58: SD1_LBA
+            8'h17: rd_data = {sd1_wr_cnt, sd1_rd_cnt};     // 0x5C: SD1_CTL
             8'h20: rd_data = {16'h5350, 5'd0, speed_saved_in, 5'b11111, ~speed_saved_in};
             default: rd_data = 32'd0;
         endcase

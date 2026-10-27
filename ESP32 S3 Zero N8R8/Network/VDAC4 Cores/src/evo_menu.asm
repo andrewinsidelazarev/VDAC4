@@ -67,6 +67,9 @@ Ev_Reset:
 Ev_Service:
         xor a
         ld (EvFast),a
+        ld a,(SdOn)
+        or a
+        jp nz,Sd_Service                ; сеанс Next с картой Evo: в ответе — только SD1 (evo_sd.asm)
         ld hl,(ProtoRxLen)
         ld a,h
         or a

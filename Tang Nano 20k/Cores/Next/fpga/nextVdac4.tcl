@@ -59,6 +59,8 @@ add_file mister/zxnext_top_02.vhd
 
 add_file vdac4/ZXNext_vdac4.sv
 add_file vdac4/next_link.sv
+add_file vdac4/next_rtc.sv
+add_file vdac4/next_sd1.sv
 add_file vdac4/next_qspi.sv
 add_file vdac4/next_cp.sv
 add_file vdac4/next_evo_reset.sv
@@ -96,7 +98,7 @@ set_option -print_all_synthesis_warning 0
 set_option -rw_check_on_ram 1
 
 set_option -correct_hold_violation 0
-set_option -place_option 0
+set_option -place_option 1
 set_option -route_option 1
 set_option -ioreg_in_iob 1
 

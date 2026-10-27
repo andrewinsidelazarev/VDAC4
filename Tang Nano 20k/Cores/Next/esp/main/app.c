@@ -14,12 +14,26 @@
  *    выход идут без них;
  *  - EXIT от плагина (F12) или тишина плагина дольше 1,5 с (Evo сбросилась) — назад в слот 0
  *    (core_back). Состояние 3 — только когда TS-Config снова на LINK; не вышло — 255 и текст.
+ *  - TIME от плагина (часы Gluk Evo, как только ядро заработало) → часы DS1307 ядра (next_rtc,
+ *    ядро 0.38+): LINK RTC_TIME / RTC_DATE в BCD, день недели — по дате (1 — воскресенье).
+ *    NextZXOS (RTC.SYS) берёт из них время при старте.
+ *  - SD1 Next — карта Evo (ядро 0.39+, next_sd1): плагин SD_ON — «карта есть» (LINK SD1_CTL).
+ *    Сектор, что просит ядро (SD1_REQ, SD1_LBA), уходит плагину в ответе на INPUT:
+ *    [1][7 — чтение / 8 — запись][номер][LBA LE32]. Плагин читает или пишет сектор карты Evo
+ *    драйвером WC и шлёт SD_DONE; для записи сектор он берёт кусками SD_PART (кадр ESP → Z80 — не
+ *    больше 256 байтов). Чтение — сектор в окно LINK 0x4000, затем итог в SD1_REQ. Всё — в
+ *    обработчике команды: запрос виден в ответе на ближайший INPUT, без задачи-посредника.
  *
  * Команды Z80 (ответ — команда | 0x80):
  *   0x70 START  [имя ядра, 0] (пусто — NEXT)   → F0 {1 — принято}
  *   0x71 INPUT  [джойстик, кнопки мыши, dx, dy, байты очереди PS/2…] → F1 {1}
  *   0x72 STATUS                                 → F2 {состояние, VERSION ядра LE32, текст ошибки, 0}
  *   0x73 EXIT                                   → F3 {1}
+ *   0x74 TIME   [секунды, минуты, часы, число, месяц, год 0…99] (двоичные) → F4 {1 — принято}
+ *   0x75 SD_ON  [1 — плагин обслуживает карту Evo, 0 — нет]   → F5 {1 — ядро с SD1, принято}
+ *   0x76 SD_DONE [номер, итог (0 — да), LBA LE32, сектор 512 — для чтения при итоге 0] → F6 {1 — свой}
+ *   0x77 SD_PART [номер, кусок 0…3]             → F7 {номер, кусок, 128 байтов сектора записи} /
+ *                                                  {FF, кусок} — нет такого запроса
  * Состояния: 0 — ждёт START, 1 — грузит ядро, 2 — ядро работает, 3 — назад в слоте 0, 255 — ошибка.
  */
 #include <stddef.h>
@@ -30,7 +44,7 @@
 #include "ps2_hid.h"
 #include "zm_app.h"
 
-#define APP_VERSION "0.7"
+#define APP_VERSION "0.10"
 
 /* регистры LINK ядра Next (next_link.sv) */
 #define R_STATUS     0x08u
@@ -46,6 +60,18 @@
 #define R_UART_RP    0x34u
 #define R_UART_TX    0x38u
 #define R_UART_DIV   0x40u
+#define R_RTC_TIME   0x4Cu        /* часы DS1307 ядра 0.38+: {день недели, часы, минуты, секунды} BCD */
+#define R_RTC_DATE   0x50u        /* {0, год, месяц, число} BCD; запись загружает часы */
+#define RTC_CORE     0x0026u      /* VERSION ядра, с которого есть часы */
+#define R_SD1        0x54u        /* SD1 ядра 0.39+: R {запрос[31], запись[30], карта есть[29], номер[7:0]},
+                                     W {вышел[8], номер[7:0]} — итог запроса */
+#define R_SD1_LBA    0x58u        /* номер блока запроса */
+#define R_SD1_CTL    0x5Cu        /* W [0] — карта есть; R {записано[31:16], прочитано[15:0]} */
+#define W_SD1        0x4000u      /* сектор: R — что записал Next, W — для Next; первый байт — [7:0] */
+#define SD_CORE      0x0027u      /* VERSION ядра, с которого есть SD1 */
+#define SD_READ      7u           /* операция в ответе INPUT: чтение сектора карты Evo */
+#define SD_WRITE     8u           /* запись */
+#define SD_PIECE     128u         /* кусок сектора записи в ответе SD_PART */
 #define W_UART       0x1000u
 #define W_AUDIO      0x2000u
 #define AUDIO_CELLS  2048u
@@ -84,6 +110,64 @@ static uint8_t joy, mouse_btn, mouse_base, last_x, last_y;
 static int32_t mouse_dx, mouse_dy;
 static uint32_t input_ms;
 
+/* время Evo от плагина (TIME): секунды, минуты, часы, число, месяц, год 0…99; в ядро — рабочим потоком */
+static uint8_t evo_time[6];
+static volatile int rtc_pending;
+
+/* SD1 — карта Evo: только из command (задача обмена с Z80) */
+static int sd_on;                 /* плагин обслуживает карту Evo, у ядра SD1 «карта есть» */
+static int sd_busy;               /* запрос ядра отдан плагину, итога ещё нет */
+static uint8_t sd_tag, sd_op;
+static uint32_t sd_lba;
+static uint32_t sd_buf[128];      /* сектор записи из окна ядра — для SD_PART */
+static uint32_t sd_reads, sd_writes, sd_errors, sd_dropped;
+static uint32_t sd_t0;            /* когда ESP увидел запрос (sd_poll), мс */
+
+/* Журнал SD1: первые SD_LOG_MAX запросов сеанса — номер блока, время до SD_DONE и байты сектора, по
+   которым видно, MBR это, загрузочный сектор FAT или FSInfo. Запись — в command, в журнал ESP — рабочим
+   потоком: журнал пишется во flash, на пути ответа Z80 ему не место. */
+#define SD_LOG_MAX   48u
+#define SD_LOG_RING  16u
+#define SD_REC_DROP  0xFFu        /* ok: ядро бросило запрос раньше итога */
+typedef struct {
+    uint8_t op, tag, ok;
+    uint32_t lba, ms;
+    uint8_t d[54];                /* 000…00F, 020…033, 1BE…1CD, 1FE…1FF */
+} sd_rec_t;
+static sd_rec_t sd_rec[SD_LOG_RING];
+static volatile uint32_t sd_rec_head, sd_rec_tail;
+static uint32_t sd_logged;
+
+static uint8_t bcd(uint8_t v) { return (uint8_t)(v / 10 << 4 | v % 10); }
+
+/* день недели по дате (2000…2099), 1 — воскресенье, как принято у DS1307 */
+static uint8_t weekday(unsigned y, unsigned m, unsigned d)
+{
+    static const uint8_t t[12] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    if (m < 3)
+        y -= 1;
+    return (uint8_t)((y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7 + 1);
+}
+
+static int link_wr(uint32_t a, uint32_t v);
+
+/* время Evo → часы DS1307 ядра (LINK RTC_TIME, затем RTC_DATE — она загружает) */
+static void rtc_apply(void)
+{
+    if ((core_version & 0xFFFFu) < RTC_CORE)
+        return;
+    uint8_t t[6];
+    core->mutex_lock(lock);
+    memcpy(t, evo_time, sizeof t);
+    core->mutex_unlock(lock);
+    const uint8_t dow = weekday(2000u + t[5], t[4], t[3]);
+    const uint32_t tm = (uint32_t)dow << 24 | (uint32_t)bcd(t[2]) << 16 | (uint32_t)bcd(t[1]) << 8 | bcd(t[0]);
+    const uint32_t dt = (uint32_t)bcd(t[5]) << 16 | (uint32_t)bcd(t[4]) << 8 | bcd(t[3]);
+    if (link_wr(R_RTC_TIME, tm) == ZM_OK && link_wr(R_RTC_DATE, dt) == ZM_OK)
+        core->log("next: RTC from Evo 20%02u-%02u-%02u %02u:%02u:%02u (weekday %u)", t[5], t[4], t[3], t[2],
+                  t[1], t[0], dow);
+}
+
 /* задача сети: вывод в UART Next (эмулятор ESP-AT → UART_TX), кольцо */
 static uint8_t tx_ring[8192];
 static uint32_t tx_head, tx_tail;
@@ -114,11 +198,106 @@ static int live_read(uint32_t a, uint32_t *words, uint32_t n)
     return r;
 }
 
+static int live_write(uint32_t a, const uint32_t *words, uint32_t n)
+{
+    core->mutex_lock(link_lock);
+    const int r = session_live ? core->link_write(a, words, n) : ZM_ERROR;
+    core->mutex_unlock(link_lock);
+    return r;
+}
+
 static void end_session(void)
 {
     core->mutex_lock(link_lock);
     session_live = 0;
     core->mutex_unlock(link_lock);
+}
+
+static uint32_t rd32(const uint8_t *p) { return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+/* Запись журнала SD1 (только command): сектор — data (512 байтов) или NULL. Кольцо полно — запись
+   пропадает: журнал не должен задерживать ответ Z80. */
+static void sd_note(uint8_t ok, const uint8_t *data)
+{
+    if (sd_logged >= SD_LOG_MAX || sd_rec_head - sd_rec_tail >= SD_LOG_RING)
+        return;
+    sd_logged++;
+    sd_rec_t *r = &sd_rec[sd_rec_head % SD_LOG_RING];
+    r->op = (uint8_t)sd_op;
+    r->tag = sd_tag;
+    r->ok = ok;
+    r->lba = sd_lba;
+    r->ms = core->millis() - sd_t0;
+    memset(r->d, 0, sizeof r->d);
+    if (data) {
+        memcpy(r->d, data, 16);
+        memcpy(r->d + 16, data + 0x20, 20);
+        memcpy(r->d + 36, data + 0x1BE, 16);
+        memcpy(r->d + 52, data + 0x1FE, 2);
+    }
+    __sync_synchronize();
+    sd_rec_head++;
+}
+
+static void hex(char *out, const uint8_t *p, unsigned n)
+{
+    static const char digit[] = "0123456789abcdef";
+    for (unsigned i = 0; i < n; i++) {
+        *out++ = digit[p[i] >> 4];
+        *out++ = digit[p[i] & 15];
+    }
+    *out = 0;
+}
+
+/* журнал SD1 — в журнал ESP (рабочий поток; строка журнала — не длиннее 135 знаков) */
+static void sd_log_drain(void)
+{
+    while (sd_rec_tail != sd_rec_head) {
+        __sync_synchronize();
+        const sd_rec_t *r = &sd_rec[sd_rec_tail % SD_LOG_RING];
+        char a[33], b[41], c[33], s[5];
+        hex(a, r->d, 16);
+        hex(b, r->d + 16, 20);
+        hex(c, r->d + 36, 16);
+        hex(s, r->d + 52, 2);
+        core->log("next: sd1 %s #%u lba %u, %u ms, %s | 000 %s", r->op == SD_WRITE ? "W" : "R", r->tag,
+                  (unsigned)r->lba, (unsigned)r->ms,
+                  r->ok == SD_REC_DROP ? "dropped" : r->ok ? "ok" : "FAILED", a);
+        core->log("next: sd1   020 %s 1BE %s 1FE %s", b, c, s);
+        sd_rec_tail++;
+    }
+}
+
+/* Запрос SD1 ядра — для ответа на INPUT. SD1_REQ, SD1_LBA и снова SD1_REQ: регистры ядра LINK читает
+   как есть, и значение, пойманное посреди смены, отбрасывается (следующий INPUT прочтёт снова).
+   Запрос записи — сразу и сектор из окна. Новый номер вместо прежнего или снятый запрос — ядро
+   прежний бросило (Next снял CS, вышел срок): его итог ядру уже не нужен. */
+static void sd_poll(void)
+{
+    uint32_t r1, lba, r2;
+    if (live_read(R_SD1, &r1, 1) != ZM_OK || live_read(R_SD1_LBA, &lba, 1) != ZM_OK ||
+        live_read(R_SD1, &r2, 1) != ZM_OK || r1 != r2)
+        return;
+    const int pending = (int)(r1 >> 31);
+    const uint8_t tag = (uint8_t)r1;
+    if (sd_busy && pending && tag == sd_tag)
+        return;                                     /* тот же запрос: плагину ещё раз */
+    if (sd_busy) {
+        sd_dropped++;
+        sd_note(SD_REC_DROP, NULL);
+    }
+    sd_busy = 0;
+    if (!pending)
+        return;
+    sd_tag = tag;
+    sd_lba = lba;
+    sd_t0 = core->millis();
+    sd_op = (r1 >> 30 & 1u) ? SD_WRITE : SD_READ;
+    if (sd_op == SD_WRITE)
+        for (uint32_t i = 0; i < 128; i += 16)
+            if (live_read(W_SD1 + i * 4, sd_buf + i, 16) != ZM_OK)
+                return;
+    sd_busy = 1;
 }
 
 static uint32_t uart_div(uint32_t b) { return (clk_khz * 1000u + b / 2) / b; }
@@ -549,11 +728,27 @@ static void worker(void *arg)
         joy_sent = btn_sent = 0;                    /* после KEYS_CLEAR в ядре */
         while (running && state == 2) {
             input_step(&kb, &joy_sent, &btn_sent);
+            if (rtc_pending) {
+                rtc_pending = 0;
+                rtc_apply();
+            }
+            sd_log_drain();
             core->mutex_lock(lock);
             const uint32_t quiet = core->millis() - input_ms;
             core->mutex_unlock(lock);
             if (exit_req || quiet > SILENCE_MS) {
                 core->log(exit_req ? "next: exit — back to slot 0" : "next: the plugin is silent (Evo reset?) — back to slot 0");
+                if (sd_on) {
+                    uint32_t ctl = 0;
+                    const int got = live_read(R_SD1_CTL, &ctl, 1) == ZM_OK;
+                    sd_log_drain();
+                    core->log("next: Evo SD as SD1: %u sectors read, %u written, %u failed, %u dropped by the core",
+                              (unsigned)sd_reads, (unsigned)sd_writes, (unsigned)sd_errors, (unsigned)sd_dropped);
+                    /* ядро считает только итоги, что застали свой запрос: меньше — Next не дождался */
+                    if (got)
+                        core->log("next: Next SD1 got %u sectors in time, %u writes done", (unsigned)(ctl & 0xFFFFu),
+                                  (unsigned)(ctl >> 16));
+                }
                 leave_core();
                 break;
             }
@@ -577,6 +772,8 @@ static int command(uint8_t cmd, const uint8_t *p, uint16_t n)
                 memcpy(core_name, p, n);
             error_text[0] = 0;
             exit_req = 0;
+            sd_on = sd_busy = 0;                     /* SD1 — до SD_ON нового сеанса пустой слот */
+            sd_reads = sd_writes = sd_errors = sd_dropped = sd_logged = 0;
             ok = 1;
             state = 1;
         }
@@ -617,7 +814,19 @@ static int command(uint8_t cmd, const uint8_t *p, uint16_t n)
             core->mutex_unlock(lock);
             ok = 1;
         }
-        core->reply(0xF1, &ok, 1);
+        /* [1][операция SD1, номер, LBA LE32] — сектор карты Evo для ядра (sd_poll) */
+        uint8_t out[7] = {ok};
+        uint16_t len = 1;
+        if (ok && sd_on && state == 2) {
+            sd_poll();
+            if (sd_busy) {
+                out[1] = sd_op;
+                out[2] = sd_tag;
+                wr32(out + 3, sd_lba);
+                len = 7;
+            }
+        }
+        core->reply(0xF1, out, len);
         if (ok)
             core->signal_give(wake);
     } else if (cmd == 0x72) {
@@ -627,6 +836,76 @@ static int command(uint8_t cmd, const uint8_t *p, uint16_t n)
         const size_t len = strlen(error_text);
         memcpy(st + 5, error_text, len + 1);
         core->reply(0xF2, st, (uint16_t)(5 + len + 1));
+    } else if (cmd == 0x74) {
+        /* [секунды, минуты, часы, число, месяц, год 0…99]: в часы ядра — рабочим потоком, как только
+           ядро работает (плагин шлёт после START) */
+        if (n >= 6 && p[0] < 60 && p[1] < 60 && p[2] < 24 && p[3] >= 1 && p[3] <= 31 && p[4] >= 1 &&
+            p[4] <= 12 && p[5] < 100) {
+            core->mutex_lock(lock);
+            memcpy(evo_time, p, sizeof evo_time);
+            core->mutex_unlock(lock);
+            rtc_pending = 1;
+            ok = 1;
+        }
+        core->reply(0xF4, &ok, 1);
+        if (ok)
+            core->signal_give(wake);
+    } else if (cmd == 0x75) {
+        /* [1/0]: плагин обслуживает карту Evo — у SD1 ядра «карта есть» (ядро 0.39+, ядро работает) */
+        if (n >= 1 && state == 2 && (core_version & 0xFFFFu) >= SD_CORE) {
+            const uint32_t on = p[0] ? 1u : 0u;
+            if (live_write(R_SD1_CTL, &on, 1) == ZM_OK) {
+                sd_on = (int)on;
+                sd_busy = 0;
+                ok = 1;
+                core->log("next: Evo SD card as Next SD1 %s", on ? "on" : "off");
+            }
+        }
+        core->reply(0xF5, &ok, 1);
+    } else if (cmd == 0x76) {
+        /* [номер, итог, LBA LE32, сектор для чтения]: сектор — в окно ядра, затем итог в SD1_REQ.
+           Не вышла запись LINK — итога нет: у ядра выйдет срок (токен ошибки), Next повторит */
+        if (n >= 6 && sd_busy && p[0] == sd_tag && rd32(p + 2) == sd_lba) {
+            int good = p[1] == 0, link = 1;
+            if (sd_op == SD_READ && good) {
+                if (n < 6 + 512) {
+                    good = 0;
+                } else {
+                    uint32_t w[16];
+                    for (uint32_t i = 0; i < 128 && link; i += 16) {
+                        memcpy(w, p + 6 + i * 4, sizeof w);
+                        link = live_write(W_SD1 + i * 4, w, 16) == ZM_OK;
+                    }
+                }
+            }
+            const uint32_t v = (good ? 0x100u : 0u) | sd_tag;
+            const int sent = link && live_write(R_SD1, &v, 1) == ZM_OK;
+            if (sent) {
+                if (!good)
+                    sd_errors++;
+                else if (sd_op == SD_READ)
+                    sd_reads++;
+                else
+                    sd_writes++;
+            }
+            sd_note((uint8_t)(sent && good),
+                    !good ? NULL : sd_op == SD_READ ? p + 6 : (const uint8_t *)sd_buf);
+            sd_busy = 0;
+            ok = 1;
+        }
+        core->reply(0xF6, &ok, 1);
+    } else if (cmd == 0x77) {
+        /* [номер, кусок]: 128 байтов сектора записи (кадр ESP → Z80 — не больше 256 байтов) */
+        uint8_t out[2 + SD_PIECE];
+        out[0] = 0xFF;
+        out[1] = n >= 2 ? p[1] : 0;
+        uint16_t len = 2;
+        if (n >= 2 && sd_busy && sd_op == SD_WRITE && p[0] == sd_tag && p[1] < 4) {
+            out[0] = sd_tag;
+            memcpy(out + 2, (const uint8_t *)sd_buf + p[1] * SD_PIECE, SD_PIECE);
+            len = 2 + SD_PIECE;
+        }
+        core->reply(0xF7, out, len);
     } else if (cmd == 0x73) {
         exit_req = 1;
         ok = 1;

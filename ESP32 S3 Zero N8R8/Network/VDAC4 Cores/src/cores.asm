@@ -14,6 +14,10 @@
 ;      кнопки и счётчики мыши Kempston, байты очереди PS/2 AVR (как загрузчик DOOM VDAC4).
 ;      INPUT — заодно знак жизни: молчание плагина дольше 1,5 с (сброс Evo) слой сам считает
 ;      выходом;
+;      Сразу после старта ядра ZX Next (VERSION: личность 03) — TIME (#74, ядро 0.38+): часы Gluk
+;      Evo (shared/weather/rtc.asm) для часов DS1307 ядра — NextZXOS берёт из них время; затем
+;      SD_ON (#75, ядро 0.39+): карта Evo — вторая SD Next (evo_sd.asm), сектора просит ESP в
+;      ответе на INPUT. Другим ядрам (NES: у NES.ELF #74…#79 — свои команды) их не шлём;
 ;   6. F12 (код набора 2 #07 без префикса) — EXIT (#73): ESP возвращает Tang в слот 0
 ;      (TS-Config); плагин ждёт этого по STATUS, затем APP_STOP и выход в WC.
 ; Пока ядро работает, Evo — в режиме FT812 (VCONFIG #04, M_SEL = 1): видеошина Evo на IDE-40
@@ -32,10 +36,13 @@ CMD_NX_START    equ #70                 ; [имя ядра, 0] -> F0 [1 — пр
 CMD_NX_INPUT    equ #71                 ; [джойстик, кнопки, X, Y, байты PS/2…] -> F1 [1]
 CMD_NX_STATUS   equ #72                 ; -> F2 [состояние][VERSION LE32][текст ошибки, 0]
 CMD_NX_EXIT     equ #73                 ; -> F3 [1]
+CMD_NX_TIME     equ #74                 ; [сек, мин, час, число, месяц, год 0…99] -> F4 [1]
+RTC_CORE        equ #0026               ; VERSION ядра Next с часами DS1307
 RESP_NX_START   equ #F0
 RESP_NX_INPUT   equ #F1
 RESP_NX_STATUS  equ #F2
 RESP_NX_EXIT    equ #F3
+RESP_NX_TIME    equ #F4
 
 NX_RUNNING      equ 2
 NX_BACK         equ 3
@@ -80,6 +87,10 @@ PLUGIN:
         ld (CrCount),a
         ld (MenuSel),a
         ld (MenuTop),a
+        ld (NxVersion+3),a
+        ld (SdOn),a
+        ld (SdWrote),a
+        ld (SdBurst),a
         call Proto_ResetRx
         ld a,1
         call WC_INT_PL                   ; WC не перерисовывает своё под окном
@@ -164,12 +175,18 @@ PLUGIN:
         call Ui_Close                    ; дальше — картинка ядра на HDMI
         call Nx_VideoOff
         call Nx_KeysOwn
+        call Nx_SendTime                 ; часы Evo — в часы ядра (ответ не важен)
+        call Nx_SdOn                     ; карта Evo — SD1 Next (evo_sd.asm)
         call Nx_Run
         jp c,.fatal_exit
         call Nx_Exit
 .done:
         call Ui_Close
-        xor a
+        ld a,(SdWrote)                   ; Next писал на карту Evo — WC перечитает обе панели
+        or a
+        jr z,.code
+        ld a,3
+.code:
         pop ix
         ret
 
@@ -420,7 +437,7 @@ Nx_ErrorFrom:
         scf
         ret
 
-; STATUS. Выход: CF=0, A — состояние слоя; CF=1 — нет ответа.
+; STATUS. Выход: CF=0, A — состояние слоя, NxVersion — VERSION ядра; CF=1 — нет ответа.
 Nx_Status:
         ld a,CMD_NX_STATUS
         call Proto_SendEmpty
@@ -428,8 +445,23 @@ Nx_Status:
         ld de,NX_WAIT
         call Proto_WaitCmd
         ret c
+        ld hl,ProtoBuf+1
+        ld de,NxVersion
+        ld bc,4
+        ldir
         ld a,(ProtoBuf)
         or a
+        ret
+
+; Ядро — ZX Next (VERSION: личность 03), версия не ниже DE. Выход: CF=0 — да.
+Nx_IsNext:
+        ld a,(NxVersion+3)
+        cp 3
+        scf
+        ret nz
+        ld hl,(NxVersion)
+        or a
+        sbc hl,de
         ret
 
 ; Ядро работает: раз в кадр INPUT, раз в STATUS_EVERY кадров — STATUS. Выход: CF=0 — F12 или
@@ -655,6 +687,46 @@ Nx_Input:
         ret c
         jp Ev_Service                    ; в ответе может быть запрос меню F1 (evo_menu.asm)
 
+; Время Evo для часов DS1307 ядра (NEXT.ELF 0.8+, ядро Next 0.38+): часы Gluk -> TIME (#74)
+; [секунды, минуты, часы, число, месяц, год 0…99], двоичные; день недели слой считает по дате.
+; Только ядру ZX Next с часами (0.38+): у других слоёв #74 — своя команда. Выход: CF=1 — нет ответа.
+Nx_SendTime:
+        ld de,RTC_CORE
+        call Nx_IsNext
+        ret c
+        call Rtc_Open
+        call Rtc_Read
+        ld hl,TimeBuf
+        ld a,(RtcSec)
+        ld (hl),a
+        inc hl
+        ld a,(RtcMin)
+        ld (hl),a
+        inc hl
+        ld a,(RtcHour)
+        ld (hl),a
+        inc hl
+        ld a,(RtcDay)
+        ld (hl),a
+        inc hl
+        ld a,(RtcMonth)
+        ld (hl),a
+        inc hl
+        push hl
+        ld hl,(RtcYear)
+        ld de,-2000
+        add hl,de                        ; год — две цифры
+        ld a,l
+        pop hl
+        ld (hl),a
+        ld hl,TimeBuf
+        ld bc,6
+        ld a,CMD_NX_TIME
+        call Proto_Send
+        ld a,RESP_NX_TIME
+        ld de,NX_WAIT
+        jp Proto_WaitCmd
+
 ; Очередь PS/2 AVR — только плагину: WC перестаёт разбирать её в своём прерывании (INT_PL,
 ; A' = 2). Включает разбор снова сам WC, когда плагин вернётся.
 Nx_KeysOwn:
@@ -747,6 +819,8 @@ NxExitKey:      db 0
 NxAppStarted:   db 0
 NxFtMode:       db 0                    ; 1 — Evo в режиме FT812 (Nx_VideoOff)
 NxKbdOwn:       db 0                    ; 1 — очередь PS/2 читает плагин, не WC (Nx_KeysOwn)
+NxVersion:      ds 4                    ; VERSION ядра из STATUS: [3] — личность (03 — ZX Next)
 Ps2Ready:       db 0
 Ps2Prefix:      db 0                    ; 1 — был F0, 2 — был E0
 KeyBuf:         ds 4+PS2_DRAIN
+TimeBuf:        ds 6                    ; TIME: сек, мин, час, число, месяц, год 0…99

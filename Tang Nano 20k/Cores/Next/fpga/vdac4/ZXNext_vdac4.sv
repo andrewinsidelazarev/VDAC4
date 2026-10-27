@@ -108,7 +108,11 @@ wire clk_sys, CLK_14, CLK_7, CLK_140, CLK_140_P /*synthesis syn_keep=1*/;
     wire UART_TX_orig;           
     // reg  [11:0] joy_left = 0; // 12'b111111111111;    // Zmień z [10:0]
     reg  [11:0] joy_right = 0; // 12'b111111111111;   // Zmień z [10:0]
-    wire i2c_sda_i = 1'b1;       // Zmień z reg
+    wire i2c_sda_i;              // SDA для Next: монтажное И ведущего (Next) и часов next_rtc
+    // часы DS1307 (next_rtc): время Evo приходит от ESP по LINK (RTC_TIME / RTC_DATE)
+    wire [31:0] rtc_time, rtc_time_now;
+    wire [23:0] rtc_date, rtc_date_now;
+    wire        rtc_load, rtc_valid, rtc_sda;
 
   // assign led[0] = SD_CS;
   // assign led[1] = SD_MOSI;
@@ -369,7 +373,13 @@ wire sdss0;
 wire sdss1;
 wire sdclk;
 wire sdmosi;
-wire sdmiso = SD_MISO;
+// вторая SD Next (SD1, выбор FD в порту 0xE7): карта Evo — next_sd1, сектора через LINK у ESP
+wire        sd1_miso, sd1_present, sd1_req, sd1_req_wr, sd1_done, sd1_done_ok, sd1_wbuf_we;
+wire [31:0] sd1_req_lba, sd1_rbuf_q, sd1_wbuf_d;
+wire [7:0]  sd1_req_tag, sd1_done_tag;
+wire [6:0]  sd1_rbuf_addr, sd1_wbuf_addr;
+wire [15:0] sd1_rd_cnt, sd1_wr_cnt;
+wire sdmiso = sdss1 ? SD_MISO : sd1_miso;   // SD1 выбрана — отвечает next_sd1, иначе карта Tang
 
 // assign SD_CS   = sdss0;
 // assign SD_SCK  = sdclk;
@@ -574,7 +584,7 @@ wire [3:0] link_io_out;
 wire       link_io_oe;
 wire       boot_req;
 
-next_link #(.VERSION(16'h0025)) next_link_inst (
+next_link #(.VERSION(16'h0028)) next_link_inst (
     .sck          (link_sck),
     .cs_n         (link_cs_n),
     .io_in        (link_io),
@@ -596,11 +606,72 @@ next_link #(.VERSION(16'h0025)) next_link_inst (
     .speed_restore (speed_restore),
     .speed_saved_in (speed_saved_out),
     .speed_saved_out (speed_saved_in),
-    .boot_req     (boot_req)
+    .boot_req     (boot_req),
+    .rtc_time     (rtc_time),
+    .rtc_date     (rtc_date),
+    .rtc_load     (rtc_load),
+    .rtc_time_now (rtc_time_now),
+    .rtc_date_now (rtc_date_now),
+    .rtc_valid    (rtc_valid),
+    .sd1_present  (sd1_present),
+    .sd1_req      (sd1_req),
+    .sd1_req_wr   (sd1_req_wr),
+    .sd1_req_lba  (sd1_req_lba),
+    .sd1_req_tag  (sd1_req_tag),
+    .sd1_done     (sd1_done),
+    .sd1_done_tag (sd1_done_tag),
+    .sd1_done_ok  (sd1_done_ok),
+    .sd1_rbuf_addr(sd1_rbuf_addr),
+    .sd1_rbuf_q   (sd1_rbuf_q),
+    .sd1_wbuf_we  (sd1_wbuf_we),
+    .sd1_wbuf_addr(sd1_wbuf_addr),
+    .sd1_wbuf_d   (sd1_wbuf_d),
+    .sd1_rd_cnt   (sd1_rd_cnt),
+    .sd1_wr_cnt   (sd1_wr_cnt)
 );
 
 assign link_io    = link_io_oe ? link_io_out : 4'hz;
 assign link_irq_n = 1'bz;
+
+// Часы DS1307 на I2C Next (порты 0x103B/0x113B): NextZXOS читает время Evo, загруженное по LINK
+next_rtc #(.CLK_HZ(28125000)) next_rtc_inst (
+    .clk      (clk_sys),
+    .scl      (i2c_scl_o),
+    .sda_m    (i2c_sda_o),
+    .sda_s    (rtc_sda),
+    .load     (rtc_load),
+    .time_in  (rtc_time),
+    .date_in  (rtc_date),
+    .time_out (rtc_time_now),
+    .date_out (rtc_date_now),
+    .valid    (rtc_valid)
+);
+assign i2c_sda_i = i2c_sda_o & rtc_sda;
+
+// SD1 Next — карта Evo: карта SDHC на выводах SPI Next, сектора — у ESP через LINK
+next_sd1 #(.CLK_HZ(28125000)) next_sd1_inst (
+    .clk       (clk_sys),
+    .rst_n     (pll_locked),
+    .cs_n      (sdss1),
+    .sclk      (sdclk),
+    .mosi      (sdmosi),
+    .miso      (sd1_miso),
+    .present   (sd1_present),
+    .req       (sd1_req),
+    .req_wr    (sd1_req_wr),
+    .req_lba   (sd1_req_lba),
+    .req_tag   (sd1_req_tag),
+    .done      (sd1_done),
+    .done_tag  (sd1_done_tag),
+    .done_ok   (sd1_done_ok),
+    .rbuf_addr (sd1_rbuf_addr),
+    .rbuf_q    (sd1_rbuf_q),
+    .wbuf_we   (sd1_wbuf_we),
+    .wbuf_addr (sd1_wbuf_addr),
+    .wbuf_d    (sd1_wbuf_d),
+    .rd_cnt    (sd1_rd_cnt),
+    .wr_cnt    (sd1_wr_cnt)
+);
 
 // Сброс Evo (M_SEL снят после взвода) — назад в слот 0 через BL616, как BOOT от ESP
 wire evo_reset_req;

@@ -30,7 +30,18 @@ CORES_SYM = ROOT / "VDAC4 Cores" / "build" / "vdac4" / "VDAC4COR.sym"
 
 CMD_APP_STOP = 0x6D
 CMD_CORE_LIST, CMD_CORE_APP = 0x2C, 0x2D
-CMD_START, CMD_INPUT, CMD_STATUS, CMD_EXIT = 0x70, 0x71, 0x72, 0x73
+CMD_START, CMD_INPUT, CMD_STATUS, CMD_EXIT, CMD_TIME = 0x70, 0x71, 0x72, 0x73, 0x74
+CMD_SD_ON, CMD_SD_DONE, CMD_SD_PART = 0x75, 0x76, 0x77
+SD_READ, SD_WRITE = 7, 8
+NEXT_SD = 0x03010027                     # VERSION ядра Next 0.39: часы и SD1
+RDD, SDD = 0x400C, 0x400F                # внутренние входы ядра WildDOS: абсолютные сектора
+STREAM1_PAGE = 0xF4                      # страница потока 1 (API 57 кладёт её в #600B)
+PANEL_PAGE = 0xF0                        # что стоит в окне #0000 при входе плагина
+
+
+def sector(lba: int) -> bytes:
+    """Сектор карты Evo в модели драйвера WC."""
+    return bytes((lba * 31 + (lba >> 8) + i * 7 + (i >> 8)) & 0xFF for i in range(512))
 FN_UP, FN_DOWN, FN_ENTER, FN_WAITUP = 0x11, 0x12, 0x16, 0x2E
 FN_MNGV_PL, FN_GVMOD = 0x40, 0x42      # текст WC (A' = 0); видеорежим плагина (A')
 frame = base.frame
@@ -41,7 +52,17 @@ class CoresEsp:
 
     def __init__(self, cores=(("NEXT", 907418, True), ("DEMO", 300000, False)), *, list_error=None,
                  app_error=None, load_polls=5, core_error=None, back_polls=3, run_error=None,
-                 run_inputs=20) -> None:
+                 run_inputs=20, version=NEXT_SD, sd_requests=(), part_fail=False) -> None:
+        self.version = version
+        # запросы SD1 ядра: (операция, номер, LBA, сектор записи) — по одному в ответе INPUT
+        self.sd_queue = [list(r) for r in sd_requests]
+        self.sd_on: list[bytes] = []          # SD_ON
+        self.sd_done: list[bytes] = []        # SD_DONE своего номера
+        self.sd_parts: list[bytes] = []       # SD_PART
+        self.part_fail = int(part_fail)       # столько первых SD_PART — «нет такого запроса»
+        self.sd_enabled = False
+        self.input_frames: list[int] = []     # кадр (прерываний) каждого INPUT
+        self.harness = None
         self.cores = list(cores)
         self.run_error = run_error           # ядро работало и сломалось после run_inputs INPUT
         self.run_inputs = run_inputs
@@ -57,6 +78,7 @@ class CoresEsp:
         self.inputs: list[bytes] = []
         self.commands: list[int] = []
         self.exit_seen = False
+        self.times: list[bytes] = []          # TIME: часы Evo для часов ядра
 
     def __call__(self, command: int, payload: bytes) -> bytes:
         self.commands.append(command)
@@ -93,12 +115,40 @@ class CoresEsp:
                 if self.back_polls <= 0:
                     self.state = 3
             text = (self.core_error or self.run_error or "").encode() + b"\0"
-            return frame(0xF2, bytes([self.state]) + struct.pack("<I", 0x03010002) + text)
+            return frame(0xF2, bytes([self.state]) + struct.pack("<I", self.version) + text)
         if command == CMD_INPUT:
             self.inputs.append(payload)
+            if self.harness is not None:
+                self.input_frames.append(self.harness.interrupts)
             if self.run_error and len(self.inputs) >= self.run_inputs and self.state == 2:
                 self.state = 255
+            if self.sd_enabled and self.state == 2 and self.sd_queue:
+                op, tag, lba = self.sd_queue[0][:3]
+                return frame(0xF1, bytes([1, op, tag]) + struct.pack("<I", lba))
             return frame(0xF1, b"\1")
+        if command == CMD_TIME:
+            self.times.append(payload)
+            return frame(0xF4, b"\1")
+        if command == CMD_SD_ON:
+            self.sd_on.append(payload)
+            self.sd_enabled = (self.version & 0xFFFF) >= (NEXT_SD & 0xFFFF) and payload[:1] == b"\1"
+            return frame(0xF5, b"\1" if self.sd_enabled else b"\0")
+        if command == CMD_SD_PART:
+            self.sd_parts.append(payload)
+            head = self.sd_queue[0] if self.sd_queue else None
+            if self.part_fail:
+                self.part_fail -= 1
+            elif head and head[0] == SD_WRITE and payload[0] == head[1] and payload[1] < 4:
+                k = payload[1]
+                return frame(0xF7, payload[:2] + head[3][k * 128:(k + 1) * 128])
+            return frame(0xF7, bytes([0xFF, payload[1]]))
+        if command == CMD_SD_DONE:
+            head = self.sd_queue[0] if self.sd_queue else None
+            if head and payload[0] == head[1] and struct.unpack("<I", payload[2:6])[0] == head[2]:
+                self.sd_done.append(payload)
+                self.sd_queue.pop(0)
+                return frame(0xF6, b"\1")
+            return frame(0xF6, b"\0")
         if command == CMD_EXIT:
             self.exit_seen = True
             if self.state in (0, 1):
@@ -116,6 +166,8 @@ class CoresHarness(spi.SpiHarness):
         self.ps2: dict[int, bytes] = {}      # кадр -> байты, что встанут в очередь AVR
         self.queue = bytearray()
         self.gluk_reg = 0
+        # часы Gluk (MC146818, BCD, 24 ч): 27.10.2026 12:34:56, обновления нет
+        self.rtc = {0x00: 0x56, 0x02: 0x34, 0x04: 0x12, 0x07: 0x27, 0x08: 0x10, 0x09: 0x26, 0x0A: 0x00, 0x0B: 0x02}
         self.queue_resets = 0
         self.queue_enables = 0
         self.joy = 0x00
@@ -126,6 +178,38 @@ class CoresHarness(spi.SpiHarness):
         self.wc_ps2 = True                   # WC разбирает очередь PS/2 в прерывании (флаг #7F4E)
         self.wc_events = bytearray()         # байты, что забрал обработчик прерывания WC
         self.isr_seen = 0                    # прерываний, обработанных моделью WC
+        # потоки WC (API 57) и драйвер: RDD/SDD с абсолютным LBA, страница потока — в окне #0000
+        self.streams: list[tuple[int, int, int]] = []   # (D, B, C) вызовов STREAM
+        self.stream1_created = False
+        self.page0 = PANEL_PAGE              # последнее значение порта #10AF
+        self.memory[0x6000] = PANEL_PAGE
+        self.memory[0x600B] = 0
+        self.sd_io: list[tuple[str, int, int, int]] = []  # (RDD/SDD, LBA, буфер, страница #0000)
+        self.sd_written: dict[int, bytes] = {}
+        self.rdd_fail = False
+        for address in (RDD, SDD):
+            self.machine.set_memory_block(address, b"\xC9")     # RET после модели
+            self.machine.set_breakpoint(address)
+        self.hooks[RDD] = lambda: self.sector_io("RDD")
+        self.hooks[SDD] = lambda: self.sector_io("SDD")
+
+    def sector_io(self, name: str) -> None:
+        """WildDOS RDD/SDD (docs/04 WC Improved, 8.5): DE:HL — LBA, BC — буфер, A — секторов; A = ABT,
+        Z — вышло. Только с потоком SD-ZC, чья страница стоит в окне #0000 (и в тени #6000)."""
+        m = self.machine
+        lba = m.de << 16 | m.hl
+        page = self.memory[0x6000]
+        self.sd_io.append((name, lba, m.bc, page))
+        good = (m.a == 1 and page == STREAM1_PAGE and self.page0 == STREAM1_PAGE and self.stream1_created
+                and 0x8000 <= m.bc <= 0xC000 - 512)
+        if good and name == "RDD" and not self.rdd_fail:
+            self.machine.set_memory_block(m.bc, sector(lba))
+        elif good and name == "SDD":
+            self.sd_written[lba] = bytes(self.memory[m.bc:m.bc + 512])
+        else:
+            good = False
+        m.a = 0 if good else 1
+        self.flags(zero=good)
 
     def handle_api(self) -> None:
         m = self.machine
@@ -141,6 +225,17 @@ class CoresHarness(spi.SpiHarness):
         elif m.a in (FN_GVMOD, FN_MNGV_PL):
             self.calls.append(m.a)
             self.video.append((m.a, m.alt_a))
+            self.ret()
+        elif m.a == base.FN_STREAM:
+            # D=1, B=0 — создать поток 1 на SD-ZC; D=1, BC=#FFFF — выбрать его (#600B — его страница)
+            self.calls.append(m.a)
+            d, b, c = m.de >> 8, m.bc >> 8, m.bc & 0xFF
+            self.streams.append((d, b, c))
+            if d == 1 and m.bc != 0xFFFF:
+                self.stream1_created = b == 0
+            if d == 1:
+                self.memory[0x600B] = STREAM1_PAGE
+            self.flags(zero=True)
             self.ret()
         elif m.a == base.FN_INT_PL:
             # MD20.ASM INT_PL: A' = 0 — всё выключить, 1 — часы, 2 — разбор PS/2
@@ -172,6 +267,8 @@ class CoresHarness(spi.SpiHarness):
             if port >> 8 == 0xBF and self.gluk_reg == 0xF0:
                 self.wc_interrupts()
                 return self.queue.pop(0) if self.queue else 0
+            if port >> 8 == 0xBF and self.gluk_reg in self.rtc:
+                return self.rtc[self.gluk_reg]
             return 0xFF if port >> 8 != 0xBF else 0
         if port & 0xFF == 0x1F:
             return self.joy
@@ -184,6 +281,9 @@ class CoresHarness(spi.SpiHarness):
         return super().port_in(port)
 
     def port_out(self, port: int, value: int) -> None:
+        if port == 0x10AF:
+            self.page0 = value
+            return
         if port == 0xEFF7:
             return
         if port == 0xDFF7:
@@ -203,6 +303,7 @@ class CoresHarness(spi.SpiHarness):
                          for line in range(1, 20))
 
     def start(self, esp: CoresEsp, keys=None, ps2=None, esc: int | None = None) -> None:
+        esp.harness = self
         self.app = esp
         self.keys = dict(keys or {})
         self.ps2 = dict(ps2 or {})
@@ -220,7 +321,7 @@ class CoresPluginTest(unittest.TestCase):
 
     def test_header_names_the_plugin(self) -> None:
         data = CORES_WMF.read_bytes()
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.10")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.12")
         self.assertEqual(data[34], 1, "одна страница")
         self.assertEqual(len(data) % 512, 0, "файл — целыми секторами")
 
@@ -252,12 +353,87 @@ class CoresPluginTest(unittest.TestCase):
                         "INT_PL 2 — когда ядро уже работает")
         self.assertEqual((h.queue_resets, h.queue_enables), (1, 1), "очередь AVR включена один раз")
         self.assertLess(esp.commands.index(CMD_EXIT), esp.commands.index(CMD_APP_STOP))
+        # время Evo — один раз, когда ядро уже работает, до первого INPUT
+        self.assertEqual(esp.times, [bytes([56, 34, 12, 27, 10, 26])])
+        self.assertLess(esp.commands.index(CMD_START), esp.commands.index(CMD_TIME))
+        self.assertLess(esp.commands.index(CMD_TIME), esp.commands.index(CMD_INPUT))
         # ядро работает — Evo в режиме FT812 (видеошина молчит, M_SEL = 1); выход — текст WC
         self.assertEqual(h.video, [(FN_GVMOD, 0x04), (FN_MNGV_PL, 0)])
         self.assertLess(h.calls.index(base.FN_RRESB), h.calls.index(FN_GVMOD), "режим — после окна")
         self.assertEqual(esp.state, 3)
         self.assertIsNone(esp.app, "APP_STOP после выхода")
         self.assertFalse(h.slave.selected)
+
+    def sd_session(self, esp: CoresEsp, h: CoresHarness | None = None) -> CoresHarness:
+        h = h or CoresHarness()
+        h.start(esp, keys={5: FN_ENTER}, ps2={150: F12})
+        return h
+
+    def test_next_sd_read_write(self) -> None:
+        data = bytes(((i * 5 + 3) ^ (i >> 3)) & 0xFF for i in range(512))
+        esp = CoresEsp(sd_requests=[(SD_READ, 0x11, 0x12345), (SD_WRITE, 0x12, 0x777, data),
+                                    (SD_READ, 0x13, 0)])
+        h = self.sd_session(esp)
+        # поток 1 — заново на SD-ZC (не клон панели), затем SD_ON [1]
+        self.assertIn((1, 0, 0), h.streams)
+        self.assertEqual(esp.sd_on, [b"\1"])
+        self.assertLess(esp.commands.index(CMD_TIME), esp.commands.index(CMD_SD_ON))
+        self.assertLess(esp.commands.index(CMD_SD_ON), esp.commands.index(CMD_INPUT))
+        self.assertEqual(esp.sd_queue, [], "все запросы исполнены")
+        self.assertEqual(esp.sd_done[0], bytes([0x11, 0]) + struct.pack("<I", 0x12345) + sector(0x12345))
+        self.assertEqual(esp.sd_parts, [bytes([0x12, k]) for k in range(4)])
+        self.assertEqual(h.sd_written, {0x777: data})
+        self.assertEqual(esp.sd_done[1], bytes([0x12, 0]) + struct.pack("<I", 0x777))
+        self.assertEqual(esp.sd_done[2], bytes([0x13, 0]) + struct.pack("<I", 0) + sector(0))
+        self.assertEqual([(n, lba, page) for n, lba, _, page in h.sd_io],
+                         [("RDD", 0x12345, STREAM1_PAGE), ("SDD", 0x777, STREAM1_PAGE), ("RDD", 0, STREAM1_PAGE)])
+        self.assertEqual((h.memory[0x6000], h.page0), (PANEL_PAGE, PANEL_PAGE), "окно #0000 — прежнее")
+        self.assertEqual(h.machine.a, 3, "Next писал на карту Evo — WC перечитает панели")
+        # после запроса опрос — без кадров: три запроса подряд, затем ещё 40 ВВОДов (SD_BURST)
+        same = sum(1 for a, b in zip(esp.input_frames, esp.input_frames[1:]) if a == b)
+        self.assertEqual(same, 2 + 1 + 40)
+        self.assertEqual(esp.state, 3)
+
+    def test_next_sd_read_only_session_returns_zero(self) -> None:
+        esp = CoresEsp(sd_requests=[(SD_READ, 0x21, 5)])
+        h = self.sd_session(esp)
+        self.assertEqual(esp.sd_done, [bytes([0x21, 0]) + struct.pack("<I", 5) + sector(5)])
+        self.assertEqual(h.machine.a, 0, "только чтение — WC перечитывать нечего")
+
+    def test_next_sd_driver_failure(self) -> None:
+        esp = CoresEsp(sd_requests=[(SD_READ, 0x31, 9)])
+        h = CoresHarness()
+        h.rdd_fail = True
+        self.sd_session(esp, h)
+        self.assertEqual(esp.sd_done, [bytes([0x31, 2]) + struct.pack("<I", 9)], "отказ — без сектора")
+
+    def test_next_sd_part_refused_then_written_once(self) -> None:
+        # кусок не пришёл (ESP: «нет такого запроса») — карту не трогать; ESP предлагает запрос
+        # снова — сектор пишется один раз, целиком
+        data = bytes(range(256)) * 2
+        esp = CoresEsp(sd_requests=[(SD_WRITE, 0x41, 0x99, data)], part_fail=1)
+        h = self.sd_session(esp)
+        self.assertEqual(esp.sd_parts, [bytes([0x41, 0])] + [bytes([0x41, k]) for k in range(4)])
+        self.assertEqual([n for n, *_ in h.sd_io], ["SDD"])
+        self.assertEqual(h.sd_written, {0x99: data})
+        self.assertEqual(esp.sd_done, [bytes([0x41, 0]) + struct.pack("<I", 0x99)])
+        self.assertEqual(h.machine.a, 3)
+
+    def test_old_next_core_gets_no_time_and_no_sd(self) -> None:
+        esp = CoresEsp(version=0x03010025)
+        h = self.sd_session(esp)
+        self.assertEqual((esp.times, esp.sd_on), ([], []))
+        self.assertNotIn((1, 0, 0), h.streams)
+        self.assertEqual(h.machine.a, 0)
+        esp = CoresEsp(version=0x03010026)
+        h = self.sd_session(esp)
+        self.assertEqual((len(esp.times), esp.sd_on), (1, []), "0.38: часы есть, SD1 нет")
+
+    def test_other_core_gets_no_time_and_no_sd(self) -> None:
+        esp = CoresEsp(version=0x04010027)
+        h = self.sd_session(esp)
+        self.assertEqual((esp.times, esp.sd_on), ([], []), "у слоя NES #74…#79 — свои команды")
+        self.assertNotIn((1, 0, 0), h.streams)
 
     def test_menu_down_selects_second_core(self) -> None:
         h = CoresHarness()
