@@ -17,6 +17,10 @@
  * (next_cp ядра Next) — просьбу о перезагрузке, бит 7 флагов, — и делает JTAG Reconfig: адрес
  * перехода у ядра из кэша — 0, ПЛИС грузит слот 0. Снимков нет 3 с — ядро BL616 не отвечает,
  * назад в слот 0 тоже. После перезагрузки — ждать ядро VDAC4 (снимок C5 01), до 5 с.
+ *
+ * С прошивки 35 — и ядра в слотах flash Tang (команда BOOT, ядро видео — слот 3): BL616 ведёт их
+ * так же, как ядро из кэша. Снимков нет 3 с (слот пуст или битстрим испорчен) — назад в слот 0
+ * переходом core_jtag_boot(0): простой Reconfig взял бы адрес этого слота снова.
  */
 #include <stdio.h>
 #include <string.h>
@@ -289,6 +293,21 @@ static void reconfig(uint32_t now)
     u.t_poll = now;
 }
 
+/* Назад в слот 0 переходом по адресу 0 — и когда ядро не отвечает (слот flash Tang пуст или
+   испорчен: Reconfig по адресу перехода грузил бы его снова) */
+static void home(uint32_t now)
+{
+    const uint64_t t0 = bflb_mtimer_get_time_ms();
+    const int r = core_jtag_boot(0);
+    if (r == CORE_JTAG_NO_FPGA)
+        fpga_jtag_reconfig();      /* JTAG не видит ПЛИС — хотя бы обычный Reconfig */
+    now += (uint32_t)(bflb_mtimer_get_time_ms() - t0);
+    u.foreign = 0;
+    u.relink = 1;
+    u.t_relink = now;
+    u.t_poll = now;
+}
+
 static void begin(uint32_t seq, uint32_t now)
 {
     uint32_t w[13];
@@ -495,6 +514,33 @@ static void load(uint32_t seq, uint32_t now)
     reconfig(now);
 }
 
+/* BOOT (прошивка 35): ядро из слота flash Tang — адрес слова 1. Пришло ли оно, видит ESP (LINK);
+   BL616 ведёт его, как ядро из кэша */
+static void boot(uint32_t seq, uint32_t now)
+{
+    const uint32_t addr = mb_word(CC_W_SIZE);
+    if (addr % CC_SLOT_BYTES != 0 || addr >= CC_SLOT_END) {
+        ack(seq, CC_BAD_OFFSET, now);
+        return;
+    }
+    ack(seq, CC_LOADING, now);
+    const uint64_t t0 = bflb_mtimer_get_time_ms();
+    bflb_mtimer_delay_ms(50);      /* ESP успевает увидеть LOADING, пока ядро VDAC4 ещё есть */
+    const int r = core_jtag_boot(addr);
+    const uint32_t took = (uint32_t)(bflb_mtimer_get_time_ms() - t0);
+    now += took;
+    if (r == CORE_JTAG_NO_FPGA) {
+        printf("переход в слот %06X: JTAG не видит ПЛИС, она не тронута\r\n", (unsigned)addr);
+        ack(seq, CC_LOAD_FAIL | (uint32_t)r, now);
+        return;
+    }
+    printf("переход в слот %06X (%d), %u мс\r\n", (unsigned)addr, r, (unsigned)took);
+    /* стирание не вышло — ПЛИС перезагрузилась по прежнему адресу; ждать её всё равно */
+    u.foreign = 1;
+    u.t_poll = now;
+    u.t_alive = now;
+}
+
 static void format(uint32_t seq, uint32_t now)
 {
     if (!data_end) {
@@ -552,11 +598,11 @@ int core_cache_poll(uint32_t now)
         if (fpga_status_poll() == 0)
             u.t_alive = now;
         if (fpga_boot_requested()) {
-            printf("ядро из кэша просит перезагрузку: JTAG Reconfig\r\n");
+            printf("ядро из кэша или слота просит перезагрузку: JTAG Reconfig\r\n");
             reconfig(now);
         } else if (since(now, u.t_alive) >= (int32_t)LOST_MS) {
-            printf("ядро из кэша не отвечает BL616: назад в слот 0\r\n");
-            reconfig(now);
+            printf("ядро из кэша или слота не отвечает BL616: назад в слот 0\r\n");
+            home(now);
         }
         return 1;
     }
@@ -596,7 +642,7 @@ int core_cache_poll(uint32_t now)
         return u.active;
     uint32_t cmd = (hdr >> 16) & 0xFF, seq = hdr & 0xFFFF;
     u.t_cmd = now;
-    if (foreign_data && cmd != CC_INFO && cmd != CC_FORMAT && cmd != CC_FIND) {
+    if (foreign_data && cmd != CC_INFO && cmd != CC_FORMAT && cmd != CC_FIND && cmd != CC_BOOT) {
         ack(seq, CC_FOREIGN, now);
         return 0;
     }
@@ -610,6 +656,7 @@ int core_cache_poll(uint32_t now)
         break;
     case CC_FIND: find(seq, now); break;
     case CC_LOAD: load(seq, now); break;
+    case CC_BOOT: boot(seq, now); break;
     case CC_INFO: ack(seq, foreign_data ? 0xFF : data_end ? flash_mb : 0, now); break;
     case CC_FORMAT: {
         uint32_t key = mb_word(CC_W_SIZE);

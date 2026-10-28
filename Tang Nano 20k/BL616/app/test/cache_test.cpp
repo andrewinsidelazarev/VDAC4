@@ -152,6 +152,14 @@ int core_jtag_load(core_jtag_read_fn read, void* ctx, uint32_t size, uint32_t* u
     return jtag_result;
 }
 void fpga_jtag_reconfig(void) { ++reconfigs; }
+unsigned boots = 0;
+uint32_t boot_addr = 0xFFFFFFFFu;
+int core_jtag_boot(uint32_t address)
+{
+    ++boots;
+    boot_addr = address;
+    return CORE_JTAG_OK;
+}
 }
 
 int main(int argc, char** argv)
@@ -262,6 +270,28 @@ int main(int argc, char** argv)
         expect((info >> 16) == ((0xC2u << 8) | (0x20u | CORE_JTAG_NOT_DONE)), "CP_INFO — LOAD_FAIL и код JTAG");
         expect(!cache_busy, "BL616 снова за ядром VDAC4");
         jtag_result = CORE_JTAG_OK;
+    }
+
+    // 6а. BOOT (прошивка 35): ядро из слота 3 flash Tang — BL616 ведёт его, как ядро из кэша
+    {
+        const auto good = make_core(4096, 20, 0), jump = make_core(4096, 21, 3);
+        expect(zifi::core_cache::checkHead(good.data(), 128) == nullptr, "начало битстрима слота — годно");
+        const char* e = zifi::core_cache::checkHead(jump.data(), 128);
+        expect(e != nullptr && strstr(e, "jump") != nullptr, "адрес перехода не 0 — отказ ESP");
+        const uint32_t before = reconfigs;
+        e = client.boot(0x300000u);
+        printf("BOOT 300000: %s\n", e ? e : "LOADING");
+        expect(e == nullptr && boots == 1 && boot_addr == 0x300000u, "BOOT принят, переход — в 0x300000");
+        io_sleep(nullptr, 100);
+        expect(cache_busy, "ядро слота работает: главный цикл BL616 — за ним");
+        model_set_boot(1);
+        io_sleep(nullptr, 30);
+        expect(reconfigs == before + 1, "просьба ядра слота о перезагрузке — JTAG Reconfig");
+        model_set_boot(0);
+        io_sleep(nullptr, 100);
+        expect(!cache_busy, "после перезагрузки — снова ядро VDAC4");
+        e = client.boot(0x380000u);
+        expect(e != nullptr && strstr(e, "slot address") != nullptr && boots == 1, "BOOT не на начало слота — отказ");
     }
 
     // 6. Ядро Tang без ящика (1.7) — отказ ESP

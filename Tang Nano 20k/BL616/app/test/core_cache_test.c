@@ -64,10 +64,14 @@ void bflb_mtimer_delay_us(uint32_t us) { t_ms += us / 1000; }
 
 /* ---- ПЛИС: ящик, CP_INFO, STATUS, JTAG ---- */
 static uint32_t mb[FWU_MB_WORDS], info;
-static int fpga_kind = 0;          /* 0 — ядро VDAC4, 1 — ядро из кэша, 2 — грузится */
+static int fpga_kind = 0;          /* 0 — ядро VDAC4, 1 — ядро из кэша или слота, 2 — грузится,
+                                      3 — не настроена (битстрим слота испорчен) */
 static int loading_polls;          /* «грузится» — столько снимков */
+static int load_to;                /* чем станет ПЛИС после загрузки */
 static int boot_flag, foreign_alive = 1;
-static unsigned reconfigs, jtag_loads;
+static unsigned reconfigs, jtag_loads, boots;
+static uint32_t boot_addr;
+static int slot_kind[8] = {0, 0, 0, 1, 3, 0, 0, 0};   /* что грузится из слота flash Tang */
 static int jtag_result = CORE_JTAG_OK;
 static uint8_t *jtag_img;
 static uint32_t jtag_n;
@@ -89,14 +93,26 @@ static void b_wr(void *ctx, uint32_t a, const uint32_t *w, uint32_t n)
 int fpga_status_poll(void)
 {
     if (fpga_kind == 2) {
-        if (--loading_polls <= 0) { fpga_kind = 0; boot_flag = 0; }
+        if (--loading_polls <= 0) { fpga_kind = load_to; boot_flag = 0; }
         return -1;
     }
-    if (fpga_kind == 1 && !foreign_alive) return -1;
+    if (fpga_kind == 3 || (fpga_kind == 1 && !foreign_alive)) return -1;
     return 0;
 }
 int fpga_boot_requested(void) { return boot_flag; }
-void fpga_jtag_reconfig(void) { reconfigs++; fpga_kind = 2; loading_polls = 20; }
+/* Reconfig: адрес перехода у ядер из кэша и слотов — 0 */
+void fpga_jtag_reconfig(void) { reconfigs++; fpga_kind = 2; load_to = 0; loading_polls = 20; }
+/* переход в слот (прошивка 35): ПЛИС грузит то, что лежит в слоте */
+int core_jtag_boot(uint32_t address)
+{
+    boots++;
+    boot_addr = address;
+    if (jtag_result == CORE_JTAG_NO_FPGA) return jtag_result;
+    fpga_kind = 2;
+    load_to = slot_kind[(address >> 20) & 7];
+    loading_polls = 20;
+    return CORE_JTAG_OK;
+}
 int core_jtag_load(core_jtag_read_fn read, void *ctx, uint32_t size, uint32_t *usercode)
 {
     jtag_loads++;
@@ -111,6 +127,7 @@ int core_jtag_load(core_jtag_read_fn read, void *ctx, uint32_t size, uint32_t *u
     fpga_kind = jtag_result == CORE_JTAG_OK ? 1
               : jtag_result == CORE_JTAG_NO_FPGA || jtag_result == CORE_JTAG_BAD_SIZE ? 0 : 2;
     loading_polls = 1000000;
+    load_to = 0;
     if (usercode) *usercode = 0x56443403u;
     return jtag_result;
 }
@@ -196,11 +213,10 @@ static uint32_t upload(const char *name, const img_t *im, const uint8_t *sha)
     return cmd(CC_END);
 }
 
-static uint32_t c_load(const char *name, const uint8_t *sha)
+static uint32_t c_load_cmd(uint32_t c)
 {
-    put_name_sha(name, sha);
     seq++;
-    mb[0] = CC_MAGIC << 24 | CC_LOAD << 16 | (seq & 0xFFFF);
+    mb[0] = CC_MAGIC << 24 | c << 16 | (seq & 0xFFFF);
     /* LOADING пишется до загрузки; итог — по состоянию модели */
     uint32_t want = seq & 0xFFFF;
     for (int i = 0; i < 300; i++) {
@@ -209,6 +225,12 @@ static uint32_t c_load(const char *name, const uint8_t *sha)
         if ((info >> 24) == CC_INFO_MAGIC && (info & 0xFFFF) == want) return (info >> 16) & 0xFF;
     }
     return 0x1FF;
+}
+
+static uint32_t c_load(const char *name, const uint8_t *sha)
+{
+    put_name_sha(name, sha);
+    return c_load_cmd(CC_LOAD);
 }
 
 static void reboot_bl616(void)
@@ -359,12 +381,15 @@ int main(int argc, char **argv)
     CHECK(info == (CC_INFO_MAGIC << 24 | (uint32_t)(CC_LOAD_FAIL | CORE_JTAG_NOT_DONE) << 16 | (seq & 0xFFFF)),
           "ответ неудачной загрузки %08X", (unsigned)info);
     jtag_result = CORE_JTAG_OK;
-    /* ядро не отвечает BL616 — через 3 с назад в слот 0 */
+    /* ядро не отвечает BL616 — через 3 с назад в слот 0 переходом по адресу 0 (прошивка 35) */
     CHECK(c_load("E", NULL) == CC_LOADING, "LOAD E");
     foreign_alive = 0;
     rc = reconfigs;
+    unsigned bt = boots;
     n = steps_while_busy(2000);
-    CHECK(reconfigs == rc + 1 && n >= 290 && n < 1000, "молчащее ядро: перезагрузок %u, шагов %d", reconfigs - rc, n);
+    CHECK(reconfigs == rc && boots == bt + 1 && boot_addr == 0 && fpga_kind == 0 && n >= 290 && n < 1000,
+          "молчащее ядро: перезагрузок %u, переходов %u (адрес %06X), шагов %d", reconfigs - rc, boots - bt,
+          (unsigned)boot_addr, n);
     foreign_alive = 1;
 
     /* 9. Новая копия каталога испорчена: берётся прежняя — без последнего ядра, остальные целы */
@@ -447,6 +472,52 @@ int main(int argc, char **argv)
     CHECK(upload("B", &b, NULL) == CC_OK, "2 МБ: B");
     CHECK(c_find("NEXT", next.sha) == CC_NONE && c_find("B", b.sha) == CC_FOUND, "2 МБ: одно ядро");
     CHECK(fl_overwrite == 0 && fl_bad_erase == 0, "flash: поверх %u, стираний не по секторам %u", fl_overwrite, fl_bad_erase);
+
+    /* 13. BOOT (прошивка 35): ядро из слота flash Tang (видео — слот 3) */
+    {
+        reboot_bl616();
+        bt = boots;
+        rc = reconfigs;
+        mb[1] = 0x300000u;
+        CHECK(c_load_cmd(CC_BOOT) == CC_LOADING && boots == bt + 1 && boot_addr == 0x300000u,
+              "BOOT слот 3: переходов %u, адрес %06X", boots - bt, (unsigned)boot_addr);
+        n = steps_while_busy(100);
+        CHECK(n == 100 && fpga_kind == 1, "ядро слота 3: цикл %d, ПЛИС %d", n, fpga_kind);
+        boot_flag = 1;                                 /* ядро слота просит назад — Reconfig, адрес 0 */
+        n = steps_while_busy(1000);
+        CHECK(reconfigs == rc + 1 && boots == bt + 1 && fpga_kind == 0 && n < 1000,
+              "ядро слота 3 и BOOT: перезагрузок %u, ПЛИС %d, шагов %d", reconfigs - rc, fpga_kind, n);
+        /* адрес не начало слота или за слотом 6 — отказ, ПЛИС не тронута */
+        const uint32_t bad_addr[3] = {0x300001u, 0x380000u, 0x700000u};
+        for (int i = 0; i < 3; i++) {
+            mb[1] = bad_addr[i];
+            CHECK(c_load_cmd(CC_BOOT) == CC_BAD_OFFSET && boots == bt + 1 && fpga_kind == 0,
+                  "BOOT %06X: не отказ", (unsigned)bad_addr[i]);
+        }
+        /* битстрим слота испорчен: ПЛИС не настроена, через 3 с — переход в слот 0 */
+        mb[1] = 0x400000u;
+        CHECK(c_load_cmd(CC_BOOT) == CC_LOADING && boot_addr == 0x400000u, "BOOT слот 4");
+        n = steps_while_busy(2000);
+        CHECK(boots == bt + 3 && boot_addr == 0 && fpga_kind == 0 && n >= 290 && n < 1000,
+              "испорченный слот: переходов %u (последний %06X), ПЛИС %d, шагов %d", boots - bt,
+              (unsigned)boot_addr, fpga_kind, n);
+        /* JTAG не видит ПЛИС — ответ сразу, ПЛИС не тронута */
+        jtag_result = CORE_JTAG_NO_FPGA;
+        mb[1] = 0x300000u;
+        CHECK(c_load_cmd(CC_BOOT) == (CC_LOAD_FAIL | CORE_JTAG_NO_FPGA) && fpga_kind == 0 &&
+              steps_while_busy(10) == 0, "BOOT без ПЛИС");
+        jtag_result = CORE_JTAG_OK;
+        /* чужие данные на месте кэша BOOT не мешают */
+        memset(fl, 0xFF, fl_size);
+        fl[0x100000] = 0x5A;
+        reboot_bl616();
+        CHECK(c_info() == 0xFF, "INFO при чужих данных (BOOT)");
+        mb[1] = 0x300000u;
+        CHECK(c_load_cmd(CC_BOOT) == CC_LOADING && fpga_kind == 2, "BOOT при чужих данных");
+        boot_flag = 1;
+        steps_while_busy(1000);
+        CHECK(fpga_kind == 0, "BOOT при чужих данных: назад в слот 0");
+    }
 
     printf("%s\n", bad ? "ТЕСТ НЕ ПРОЙДЕН" : "ТЕСТ ПРОЙДЕН");
     return bad != 0;

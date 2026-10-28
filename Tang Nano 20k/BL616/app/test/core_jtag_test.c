@@ -8,6 +8,10 @@
  * Ожидается: образ (настоящий NEXT.BIN, если передан, иначе свой) записан байт в байт, UserCode
  * прочитан, TAP в конце — Test-Logic-Reset, настройка выводов — та же, что до загрузки; ошибка
  * источника — CORE_JTAG_READ.
+ * Переход в слот (core_jtag_boot, прошивка 35): модель запоминает адрес перехода из команды D2
+ * принятого потока, Reconfig (0x3C) грузит «из flash» по нему. Ожидается: стирание, только
+ * заголовок (64 байта: синхрослово, IDCODE, D2 с нужным адресом, INIT_ADDR), Reconfig — после
+ * CONFIG_DISABLE, адрес загрузки — заданный, выводы вернулись, TAP — Run-Test/Idle.
  */
 #include <stdbool.h>
 #include <stdio.h>
@@ -40,6 +44,9 @@ static unsigned got_bit, got_byte;
 static uint32_t usercode_img;
 static unsigned bad_cmds;
 static uint64_t now_us;
+static uint32_t jump_reg;                  /* адрес перехода multiboot (команда D2 потока) */
+static unsigned reconfigs;
+static uint32_t boot_from;                 /* откуда ПЛИС грузилась по последнему Reconfig */
 static const uint8_t *img;
 static size_t img_n;
 
@@ -64,7 +71,22 @@ static void update_ir(void)
     case 0x3A:                                             /* CONFIG_DISABLE */
         edit_mode = 0;
         /* DONE — только за целым битстримом (у ПЛИС его закрывают CRC и команды в конце) */
-        if (writing) { done = got_n == img_n && memcmp(got, img, img_n) == 0; writing = 0; }
+        if (writing) {
+            done = got_n == img_n && memcmp(got, img, img_n) == 0;
+            writing = 0;
+            /* D2 00 FF FF и адрес (старшим вперёд) — в заголовке до первого кадра */
+            for (size_t i = 0; i + 8 <= got_n && i < 128; i++)
+                if (got[i] == 0xD2 && got[i + 1] == 0x00 && got[i + 2] == 0xFF && got[i + 3] == 0xFF) {
+                    jump_reg = (uint32_t)got[i + 4] << 24 | (uint32_t)got[i + 5] << 16 |
+                               (uint32_t)got[i + 6] << 8 | got[i + 7];
+                    break;
+                }
+        }
+        break;
+    case 0x3C:                                             /* RECONFIG: загрузка из flash */
+        if (edit_mode) bad_cmds++;
+        reconfigs++;
+        boot_from = jump_reg;
         break;
     case 0x05: if (edit_mode) erased = 1; else bad_cmds++; break;   /* ERASE_SRAM */
     case 0x12: if (!edit_mode) bad_cmds++; break;          /* INIT_ADDR */
@@ -178,6 +200,35 @@ int main(int argc, char **argv)
     r = core_jtag_load(src, NULL, (uint32_t)img_n, &uc);
     printf("отказ источника посреди образа: итог %d (ждали %d), DONE %d\n", r, CORE_JTAG_READ, done);
     if (r != CORE_JTAG_READ || done) bad = 1;
+
+    /* Переход в слот 3 из TS-Config (адрес перехода её заголовка — слот 1), затем назад в 0 */
+    fail_at = (size_t)-1;
+    const uint8_t *file_img = argc > 1 && img_n >= 64 ? img : NULL;   /* настоящий битстрим ядра */
+    img_n = 0;
+    static const uint8_t sync_id[] = {0xA5, 0xC3, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1B};
+    for (int k = 0; k < 2; k++) {
+        const uint32_t want = k == 0 ? 0x300000u : 0u;
+        reset_model();
+        jump_reg = 0x100000u;
+        reconfigs = 0;
+        boot_from = 0xFFFFFFFFu;
+        r = core_jtag_boot(want);
+        bool head = got_n == 64 && memcmp(got + 0x16, sync_id, sizeof sync_id) == 0 &&
+                    got[0x34] == 0xD2 && got[0x35] == 0x00 && got[0x36] == 0xFF &&
+                    got[0x37] == 0xFF && got[0x3C] == 0x12;
+        /* с битстримом ядра VDAC4: заголовок — байт в байт его, кроме адреса перехода */
+        if (file_img && head)
+            head = memcmp(got, file_img, 0x38) == 0 && memcmp(got + 0x3C, file_img + 0x3C, 4) == 0;
+        const bool pins = core_jtag_test_cfg[10] == 0x100Au && core_jtag_test_cfg[12] == 0x100Cu &&
+                          core_jtag_test_cfg[14] == 0x100Eu && core_jtag_test_cfg[16] == 0x1010u;
+        printf("переход в %06X: итог %d, стёрта %s, заголовок %zu байт %s, Reconfig %u, ПЛИС грузится "
+               "с %06X, TAP в конце %s, выводы вернулись %s, неверных команд %u\n", (unsigned)want, r,
+               erased ? "да" : "НЕТ", got_n, head ? "верен" : "НЕВЕРЕН", reconfigs, (unsigned)boot_from,
+               tap == RTI ? "Run-Test/Idle" : "НЕ ТОТ", pins ? "да" : "НЕТ", bad_cmds);
+        if (r != CORE_JTAG_OK || !erased || !head || reconfigs != 1 || boot_from != want || tap != RTI ||
+            !pins || bad_cmds || edit_mode)
+            bad = 1;
+    }
 
     printf("%s\n", bad ? "ТЕСТ НЕ ПРОЙДЕН" : "ТЕСТ ПРОЙДЕН");
     return bad;

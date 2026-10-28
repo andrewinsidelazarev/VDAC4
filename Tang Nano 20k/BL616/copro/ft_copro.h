@@ -63,6 +63,10 @@ typedef struct ftc_bus {
     void (*wr_async)(void *ctx, uint32_t addr, const uint32_t *w, uint32_t n);
     void (*pump)(void *ctx);
     void (*wr_wait)(void *ctx);
+    /* Необязательно (для замера, прошивка 26): время в мкс и сколько мкс с запуска шина простояла,
+       ожидая места в очереди ПЛИС (room) и читая из ПЛИС (read). */
+    uint32_t (*us)(void *ctx);
+    void (*link_us)(void *ctx, uint32_t link[5]);   /* room, read мкс; кусков; опросов; частота данных */
 } ftc_bus_t;
 
 /* Ошибки (REG_CMD_READ = 0xFFF) */
@@ -78,7 +82,8 @@ enum {
 #define FTC_INFLATE_BYTES (32768 + 11264)  /* tinfl: словарь 32 КБ и его состояние */
 #define FTC_IMG_BYTES_DEF (100u * 1024u)   /* CMD_LOADIMAGE: состояние ft_image.c */
 #define FTC_DLQ_WORDS 128
-#define FTC_MW_WORDS  128
+#define FTC_MW_WORDS  256         /* слов в буфере записи байтов (прошивка 32: два, строка 512 точек RGB565) */
+#define FTC_MF_BUF    2048             /* медиа-FIFO: прочитанные из RAM_G байты потока */
 #define FTC_TEXT_MAX  256              /* строка CMD_TEXT; длиннее — хвост не рисуется */
 #define FTC_ROM_FONTROOT 0x2FFFFCu     /* адрес таблицы ПЗУ-шрифтов (у FT812 — 0x201EE0) */
 #define FTC_ROM_WAIT_MS  6000u         /* ждать образ ПЗУ-шрифтов после сброса сопроцессора */
@@ -94,6 +99,15 @@ enum {
 #define FTC3D_STACK      8         /* глубина CMD_3D_PUSH */
 #define FTC3D_CACHE_WORDS 6144    /* кэш неизменных сеток (флаг 8 CMD_3D_MESH): слов */
 #define FTC3D_CACHE_ITEMS 16
+#define FTC3D_DIAG_ADDR  0x1DFE00u  /* блок замера RENDER: выше 1 МБ RAM_G FT812, у самопроверки SPI */
+#define FTC3D_DIAG_RESET 0x3D1A6000u
+#define FTC3D_DIAG_RUN   0x3D1A6001u
+/* С прошивки 28: слово просьбы перебора вариантов (render_variant в ft_3d.c) — 0x3D1A60nn, где
+   nn — сколько вариантов перебирать по кадрам (1…8); читается при FTC3D_DIAG_RESET. Иначе —
+   обычный вариант. Суммы по вариантам — в блоке за меткой, слова 16…47 (по 4 на вариант). */
+#define FTC3D_DIAG_MODE  (FTC3D_DIAG_ADDR + 0xC0u)
+#define FTC3D_DIAG_WORDS 48u
+#define FTC3D_VARIANTS   8u
 
 typedef struct ftc3d_tri {
     int32_t  x[3], y[3];           /* экран цели, 1/16 точки; обход — по часовой (y вниз) */
@@ -129,6 +143,23 @@ typedef struct ftc3d {
     float fog_near, fog_far, color_steps;
     uint32_t material, fog_color, tex_w, tex_h, tex_valid, tex_format;
     float unorm[256];              /* exact byte/255 conversion, outside the pixel loop */
+    /* Быстрый путь RENDER (прошивка 25, ft_3d.c raster_tex_fast): палитра одним словом на
+       цвет — r, g, b, бит 24 — проходит порог alpha, 25 — UNLIT, 26 — NO_FOG (строится в начале
+       каждого RENDER); таблицы квантования: номер ступени floor(значение · color_steps) (без
+       квантования — round(значение · 255)) → итоговый байт, сразу на своём месте в RGB565 (по
+       таблице на канал r, g, b), до fast_wmax (дальше байт уже 255); строятся заново, когда
+       меняется color_steps (−1 — ещё не строились). */
+    /* Замер на плате (прошивка 26): программа пишет FTC3D_DIAG_RESET в RAM_G по
+       FTC3D_DIAG_ADDR, и после каждого RENDER сопроцессор кладёт за меткой суммы по фазам с
+       последнего сброса (ftc3d_diag в ft_3d.c). Без метки ничего не пишется. */
+    uint32_t diag[FTC3D_DIAG_WORDS];
+    uint32_t diag_texmesh_us, diag_texmesh_n, diag_room0, diag_read0, diag_chunks0, diag_snaps0;
+    uint32_t var_n, var_i;         /* перебор вариантов по кадрам (прошивка 28): сколько и счётчик */
+    uint32_t fast_pump_mask;       /* быстрый путь зовёт pump на строках y, где (y & маска) == 0 */
+    uint32_t fast_pal[256];
+    uint16_t fast_q565[3][512];
+    int32_t  fast_wmax;
+    float    fast_lut_steps;
     /* С tris — общая рабочая память сопроцессора (FTC_SCRATCH): у 3D — треугольники кадра,
        сетка команды, кэш сеток, полосы, z-буфер; у CMD_LOADIMAGE — состояние ft_image.c и с
        FTC_IMG_BYTES — inflate (PNG); у CMD_INFLATE — inflate; при обновлении прошивки — образ.
@@ -182,7 +213,8 @@ typedef struct ftc {
     /* запись байтов в память */
     uint32_t mw_addr;          /* адрес следующего байта */
     uint32_t mw_word, mw_mask; /* собираемое слово и его байты */
-    uint32_t mw_buf[FTC_MW_WORDS];
+    uint32_t mw_bufs[2][FTC_MW_WORDS]; /* с прошивки 32 два: один уходит DMA (wr_async), другой копится */
+    uint32_t *mw_buf;          /* копящийся */
     uint32_t mw_n, mw_at;
 
     /* состояние сопроцессора */
@@ -208,6 +240,17 @@ typedef struct ftc {
 
     uint32_t crc_table[256];
     int      scratch_dirty;    /* общую рабочую память занимали картинка, inflate или обновление */
+
+    /* медиа-FIFO и видео (CMD_MEDIAFIFO, CMD_VIDEOSTART, CMD_VIDEOFRAME; ft_copro.c) */
+    uint32_t mf_base, mf_size; /* кольцо в RAM_G; size 0 — CMD_MEDIAFIFO не было */
+    uint32_t mf_pos;           /* позиция потока: байтов взято с CMD_MEDIAFIFO */
+    uint32_t mf_read_pub;      /* REG_MEDIAFIFO_READ, записанный в ПЛИС */
+    uint32_t mf_bi, mf_bn;     /* mf_buf[mf_bi…mf_bn) — байты потока с mf_pos */
+    uint8_t  mf_buf[FTC_MF_BUF];
+    uint32_t avi_end;          /* длина файла из заголовка RIFF + 8 (CMD_VIDEOSTART) */
+    uint32_t vf_state;         /* разбор AVI: что ждём */
+    uint32_t vf_left;          /* байтов до конца чанка (с выравниванием) */
+    uint32_t vf_jpeg;          /* байтов JPEG кадра, ещё не отданных декодеру */
 
     ftc3d_t  g3d;
 } ftc_t;
@@ -235,7 +278,8 @@ typedef struct ftc_img_info {
     int      jpeg;                 /* CMD_GETPROPS: у JPEG — начало, у PNG — конец данных */
 } ftc_img_info_t;
 size_t ftc_img_state_size(void);
-/* opts — параметр CMD_LOADIMAGE (OPT_MONO 1, OPT_NODL 2); inflate_state — для PNG */
+/* opts — параметр CMD_LOADIMAGE (OPT_MONO 1, OPT_NODL 2, OPT_FULLSCREEN 8 — VDAC4: вписать в
+   1024×768); inflate_state — для PNG (у JPEG — память вписывания) */
 void ftc_img_begin(void *st, uint32_t opts, void *inflate_state);
 /* Данные из in[0..n): *used — сколько взято; выход — байты подряд с ptr через emit(). */
 int  ftc_img_run(void *st, const uint8_t *in, size_t n, size_t *used,

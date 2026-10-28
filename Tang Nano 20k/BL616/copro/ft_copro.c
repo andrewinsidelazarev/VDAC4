@@ -9,10 +9,11 @@
  *   CALIBRATE, TRACK, TOUCH_TRANSFORM и недокументированные коды без действия (как BT8XX);
  *   TEXT (ПЗУ-шрифты 16…31 и шрифты CMD_SETFONT), SETFONT.
  *   LOADIMAGE (JPEG baseline и PNG 8 бит из кольца; ft_image.c; JPEG — как libjpeg), NUMBER,
- *   PROGRESS.
- * Остальное (SETFONT2, ROMFONT, прочие виджеты, MEDIAFIFO, видео) — пока ошибка «нет команды».
+ *   PROGRESS; MEDIAFIFO, VIDEOSTART, VIDEOFRAME (MJPEG AVI из медиа-FIFO, см. «Видео»).
+ * Остальное (SETFONT2, ROMFONT, прочие виджеты, PLAYVIDEO) — пока ошибка «нет команды».
  * LOADIMAGE с OPT_MEDIAFIFO — тоже (данные только из кольца).
- * Свои команды VDAC4 — 3D (0xFFFFFFA0…0xFFFFFFAC): ft_3d.c.
+ * Свои команды VDAC4 — 3D (0xFFFFFFA0…0xFFFFFFAC): ft_3d.c. Свой флаг LOADIMAGE —
+ * OPT_FULLSCREEN (8): картинка вписана в холст RGB565 1024×768 (ft_image.c, «Вписывание»).
  *
  * Матрицы — по eve-emu (eve-copro-matrix.cpp, MIT, Copyright alfishe): порядок, шаги угла и
  * округления там сверены с BT8XX. CMD_GRADIENT — замер bt8xxemu (fpga/vdac2/scripts/
@@ -41,7 +42,8 @@ enum {
     CMD_ROTATE = 0xFFFFFF29u, CMD_SETMATRIX = 0xFFFFFF2Au, CMD_TRACK = 0xFFFFFF2Cu,
     CMD_COLDSTART = 0xFFFFFF32u, CMD_GETMATRIX = 0xFFFFFF33u, CMD_GRADCOLOR = 0xFFFFFF34u,
     CMD_SETROTATE = 0xFFFFFF36u, CMD_SETBASE = 0xFFFFFF38u, CMD_SETSCRATCH = 0xFFFFFF3Cu,
-    CMD_SETBITMAP = 0xFFFFFF43u,
+    CMD_SETBITMAP = 0xFFFFFF43u, CMD_MEDIAFIFO = 0xFFFFFF39u, CMD_VIDEOSTART = 0xFFFFFF40u,
+    CMD_VIDEOFRAME = 0xFFFFFF41u,
 };
 
 /* Слов параметров после кода; -1 — команды нет. */
@@ -49,13 +51,15 @@ static int cmd_params(uint32_t code)
 {
     switch (code) {
     case CMD_DLSTART: case CMD_SWAP: case CMD_COLDSTART: case CMD_LOADIDENTITY: case CMD_SETMATRIX:
+    case CMD_VIDEOSTART:
         return 0;
     case CMD_INTERRUPT: case CMD_BGCOLOR: case CMD_FGCOLOR: case CMD_GRADCOLOR: case CMD_SETBASE:
     case CMD_SETSCRATCH: case CMD_SETROTATE: case CMD_INFLATE: case CMD_GETPTR: case CMD_CALIBRATE:
     case CMD_ROTATE:
         return 1;
     case CMD_REGREAD: case CMD_MEMWRITE: case CMD_MEMZERO: case CMD_APPEND: case CMD_TRANSLATE:
-    case CMD_SCALE: case CMD_TEXT: case CMD_SETFONT: case CMD_LOADIMAGE:
+    case CMD_SCALE: case CMD_TEXT: case CMD_SETFONT: case CMD_LOADIMAGE: case CMD_MEDIAFIFO:
+    case CMD_VIDEOFRAME:
         return 2;
     case CMD_GETPROPS: case CMD_MEMCRC: case CMD_MEMSET: case CMD_MEMCPY: case CMD_TRACK:
     case CMD_SETBITMAP: case CMD_NUMBER:
@@ -210,7 +214,15 @@ static int dl_words(ftc_t *c, const uint32_t *w, uint32_t n)
 static void mw_flush(ftc_t *c)
 {
     if (c->mw_n) {
-        c->bus.wr(c->bus.ctx, c->mw_at, c->mw_buf, c->mw_n);
+        if (c->bus.wr_async) {
+            /* с прошивки 32 — без ожидания: этот буфер уходит DMA, пока копится другой (у
+               wr_async прошлая посылка сперва кончается; чтение, снимок и обычная запись шины
+               тоже ждут её — порядок записей в ПЛИС тот же) */
+            c->bus.wr_async(c->bus.ctx, c->mw_at, c->mw_buf, c->mw_n);
+            c->mw_buf = c->mw_bufs[c->mw_buf == c->mw_bufs[0]];
+        } else {
+            c->bus.wr(c->bus.ctx, c->mw_at, c->mw_buf, c->mw_n);
+        }
         c->mw_n = 0;
     }
 }
@@ -252,11 +264,19 @@ static void mw_put(ftc_t *c, const uint8_t *p, size_t n)
 {
     while (n) {
         if (!(c->mw_addr & 3u) && n >= 4) {
-            mw_out(c, c->mw_addr, (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
-                                      ((uint32_t)p[3] << 24));
-            c->mw_addr += 4;
-            p += 4;
-            n -= 4;
+            /* слова — пачкой (строки картинок, прошивка 32), сброс — как у mw_out */
+            if (c->mw_n && (c->mw_at + 4 * c->mw_n != c->mw_addr || c->mw_n == FTC_MW_WORDS))
+                mw_flush(c);
+            if (!c->mw_n)
+                c->mw_at = c->mw_addr;
+            uint32_t k = (uint32_t)(n >> 2), room = FTC_MW_WORDS - c->mw_n;
+            if (k > room)
+                k = room;
+            memcpy(c->mw_buf + c->mw_n, p, 4 * k);
+            c->mw_n += k;
+            c->mw_addr += 4 * k;
+            p += 4 * k;
+            n -= 4 * k;
         } else {
             mw_byte(c, *p++);
             n--;
@@ -341,6 +361,7 @@ void ftc_init(ftc_t *c, const ftc_bus_t *bus)
 {
     memset(c, 0, sizeof *c);
     c->bus = *bus;
+    c->mw_buf = c->mw_bufs[0];
     for (uint32_t i = 0; i < 256; i++) {
         uint32_t r = i;
         for (int k = 0; k < 8; k++)
@@ -783,6 +804,190 @@ static void progress(ftc_t *c)
 /* --- команды ---------------------------------------------------------------------------------- */
 enum { B_DONE, B_DATA, B_WAIT };     /* выполнена; ждёт данных кольца; ждёт события */
 
+/* --- Видео: медиа-FIFO, CMD_VIDEOSTART, CMD_VIDEOFRAME --------------------------------------
+ * Как у FT812 (замер bt8xxemu: fpga/vdac2/scripts/ft_probe_video.py, docs/ft812-mjpeg-video.md):
+ * - CMD_MEDIAFIFO(ptr, size) — кольцо в RAM_G; REG_MEDIAFIFO_READ и _WRITE — в 0. Данные и
+ *   _WRITE пишет хост; сопроцессор двигает _READ: позиция, округлённая вверх до 4 (FT812
+ *   читает словами).
+ * - CMD_VIDEOSTART — заголовок RIFF 'AVI ' (из него — длина файла), затем чанки по 'avih'
+ *   включительно (у обычного AVI — 88 байтов).
+ * - CMD_VIDEOFRAME(dst, ptr) — чанки дальше: в LIST (strl, movi, rec) заходит, прочие (strh,
+ *   strf, JUNK, звук, idx1) пропускает с байтом выравнивания нечётной длины; чанк '..dc' или
+ *   '..db' — кадр JPEG в dst (RGB565; ft_image.c, JPEG — как libjpeg, без DHT — стандартные
+ *   таблицы). В слово RAM_G по ptr — длина файла минус позиция за кадром (0 — файл кончился).
+ *   Дошёл до конца файла на пропуске — 0, кадра нет, dst не тронут. Данных нет — ждёт: так
+ *   ftview узнаёт конец потока, если idx1 нет.
+ * Чанк кадра здесь кончается по длине из заголовка, а не по маркеру EOI с заглядыванием в
+ * следующий чанк (у bt8xxemu чанк нечётной длины с байтом за EOI сбивал разбор), и последнему
+ * кадру не нужен запас данных за ним. */
+#define REG_MF_READ  0x309014u
+#define REG_MF_WRITE 0x309018u
+#define FOURCC(a, b, c_, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c_) << 16) | ((uint32_t)(d) << 24))
+enum { VS_RIFF, VS_HDR, VS_SKIP, VF_HDR, VF_SKIP, VF_DEC, VF_TAIL };
+
+static uint32_t le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Байты потока, записанные хостом (REG_MEDIAFIFO_WRITE), — в mf_buf, сколько влезет. */
+static void mf_fill(ftc_t *c)
+{
+    if (c->mf_bi) {
+        memmove(c->mf_buf, c->mf_buf + c->mf_bi, c->mf_bn - c->mf_bi);
+        c->mf_bn -= c->mf_bi;
+        c->mf_bi = 0;
+    }
+    if (!c->mf_size || FTC_MF_BUF - c->mf_bn < 256)
+        return;
+    uint32_t wr = rd32(c, REG_MF_WRITE) % c->mf_size;
+    for (int part = 0; part < 2; part++) {
+        uint32_t at = (c->mf_pos + c->mf_bn) % c->mf_size;
+        uint32_t n = (wr + c->mf_size - at) % c->mf_size, room = FTC_MF_BUF - c->mf_bn;
+        if (n > c->mf_size - at)
+            n = c->mf_size - at;                  /* до конца кольца; остальное — со второго раза */
+        if (n > room)
+            n = room;
+        if (!n)
+            break;
+        rd_bytes(c, c->mf_base + at, c->mf_buf + c->mf_bn, n);
+        c->mf_bn += n;
+    }
+}
+
+static void mf_take(ftc_t *c, uint32_t n)
+{
+    c->mf_bi += n;
+    c->mf_pos += n;
+}
+
+static void mf_publish(ftc_t *c)
+{
+    if (!c->mf_size)
+        return;
+    uint32_t r = ((c->mf_pos + 3u) & ~3u) % c->mf_size;
+    if (r != c->mf_read_pub) {
+        wr32(c, REG_MF_READ, r);
+        c->mf_read_pub = r;
+    }
+}
+
+/* Кадр кончился (или файл): слово по ptr, _READ, команда выполнена. */
+static void vf_finish(ftc_t *c, int frame)
+{
+    if (frame)
+        mw_end(c);
+    wr32(c, c->p[1] & 0x3FFFFCu, frame && c->mf_pos < c->avi_end ? c->avi_end - c->mf_pos : 0);
+    mf_publish(c);
+    complete(c);
+}
+
+/* CMD_VIDEOSTART и CMD_VIDEOFRAME: B_DONE — выполнена, B_WAIT — ждёт данных медиа-FIFO. */
+static int video(ftc_t *c)
+{
+    while (!c->fault) {
+        mf_fill(c);
+        uint32_t have = c->mf_bn - c->mf_bi;
+        const uint8_t *b = c->mf_buf + c->mf_bi;
+        switch (c->vf_state) {
+        case VS_RIFF:                                /* 'RIFF', длина, 'AVI ' */
+            if (have < 12)
+                goto wait;
+            c->avi_end = le32(b + 4) + 8;
+            mf_take(c, 12);
+            c->vf_state = VS_HDR;
+            break;
+        case VS_HDR:
+        case VF_HDR: {
+            if (have < 8)
+                goto wait;
+            uint32_t id = le32(b), size = le32(b + 4);
+            if (id == FOURCC('L', 'I', 'S', 'T')) {  /* внутрь списка: его тип и дальше чанки */
+                if (have < 12)
+                    goto wait;
+                mf_take(c, 12);
+                break;
+            }
+            mf_take(c, 8);
+            c->vf_left = size + (size & 1u);
+            if (c->vf_state == VS_HDR) {
+                /* чанки заголовка пропускаются (размеры кадра берутся у JPEG); за avih
+                   VIDEOSTART выполнена — vf_jpeg здесь признак avih */
+                c->vf_state = VS_SKIP;
+                c->vf_jpeg = id == FOURCC('a', 'v', 'i', 'h');
+                break;
+            }
+            uint32_t kind = id >> 16;                /* '..dc' — сжатый кадр, '..db' — тоже */
+            /* кадр длины 0 (кодировщики так повторяют прошлый) — пропуск, как у bt8xxemu: этот
+               же вызов берёт следующий кадр (прошивка 33; 32 давала ошибку IMAGE — Reason 04) */
+            if ((kind == ('d' | ('c' << 8)) || kind == ('d' | ('b' << 8))) && size) {
+                c->scratch_dirty = 1;                /* декодер — в рабочей памяти 3D */
+                ftc_img_begin(FTC_SCRATCH(c), 0, FTC_INFLATE_MEM(c));
+                mw_begin(c, c->p[0] & 0x3FFFFCu);
+                c->vf_jpeg = size;
+                c->vf_state = VF_DEC;
+            } else {
+                c->vf_state = VF_SKIP;
+            }
+            break;
+        }
+        case VS_SKIP:
+        case VF_SKIP:
+        case VF_TAIL: {
+            uint32_t n = have < c->vf_left ? have : c->vf_left;
+            mf_take(c, n);
+            c->vf_left -= n;
+            if (c->vf_left)
+                goto wait;
+            if (c->vf_state == VS_SKIP) {
+                if (c->vf_jpeg) {                    /* avih пройден: VIDEOSTART выполнена */
+                    mf_publish(c);
+                    complete(c);
+                    return B_DONE;
+                }
+                c->vf_state = VS_HDR;
+            } else if (c->vf_state == VF_TAIL) {
+                vf_finish(c, 1);
+                return B_DONE;
+            } else if (c->mf_pos >= c->avi_end) {
+                vf_finish(c, 0);                     /* файл кончился, кадра нет */
+                return B_DONE;
+            } else {
+                c->vf_state = VF_HDR;
+            }
+            break;
+        }
+        case VF_DEC: {
+            uint32_t n = have < c->vf_jpeg ? have : c->vf_jpeg;
+            size_t used = 0;
+            int r = n ? ftc_img_run(FTC_SCRATCH(c), b, n, &used, inflate_out, c) : FTC_IMG_NEED_INPUT;
+            mf_take(c, (uint32_t)used);
+            c->vf_jpeg -= (uint32_t)used;
+            c->vf_left -= (uint32_t)used;
+            if (r == FTC_IMG_ERROR || (r == FTC_IMG_NEED_INPUT && !c->vf_jpeg)) {
+                fault(c, FTC_FAULT_IMAGE);           /* испорченный или оборванный кадр */
+                return B_DONE;
+            }
+            if (r == FTC_IMG_DONE) {
+                c->vf_state = VF_TAIL;               /* хвост чанка за EOI и выравнивание */
+                break;
+            }
+            if (!used)
+                goto wait;
+            break;
+        }
+        default:
+            fault(c, FTC_FAULT_UNKNOWN);
+            return B_DONE;
+        }
+        continue;
+    wait:
+        mf_publish(c);
+        return B_WAIT;
+    }
+    return B_DONE;
+}
+
 /* Начало команды (параметры сняты). 1 — команда выполнена целиком. */
 static int begin(ftc_t *c)
 {
@@ -867,6 +1072,21 @@ static int begin(ftc_t *c)
     case CMD_GETPTR:
         result(c, 0, c->inflate_end);
         return 1;
+    case CMD_MEDIAFIFO:
+        c->mf_base = p[0] & 0x3FFFFCu;
+        c->mf_size = p[1] & 0x3FFFFCu;
+        c->mf_pos = c->mf_bi = c->mf_bn = 0;
+        c->mf_read_pub = 0;
+        wr32(c, REG_MF_READ, 0);
+        wr32(c, REG_MF_WRITE, 0);
+        return 1;
+    case CMD_VIDEOSTART:
+        c->vf_state = VS_RIFF;
+        c->vf_jpeg = 0;
+        return 0;
+    case CMD_VIDEOFRAME:
+        c->vf_state = VF_HDR;
+        return 0;
     case CMD_LOADIDENTITY:
         memset(c->matrix, 0, sizeof c->matrix);
         c->matrix[0] = c->matrix[4] = 0x10000;
@@ -930,6 +1150,9 @@ static int begin(ftc_t *c)
 static int body(ftc_t *c)
 {
     switch (c->cmd) {
+    case CMD_VIDEOSTART:
+    case CMD_VIDEOFRAME:
+        return video(c);
     case CMD_DLSTART: {              /* ждёт, пока прошлый лист не сменится [PG §5.11] */
         ftc_status_t st;
         c->bus.status(c->bus.ctx, &st);

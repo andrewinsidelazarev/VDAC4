@@ -1328,6 +1328,254 @@ static int t_loadimage(const char *dir, size_t chunk)
     return bad != 0;
 }
 
+static uint32_t crc32(const uint8_t *p, size_t n)
+{
+    uint32_t c = 0xFFFFFFFFu;
+    while (n--) {
+        c ^= *p++;
+        for (int k = 0; k < 8; k++)
+            c = (c >> 1) ^ (0xEDB88320u & (0u - (c & 1u)));
+    }
+    return ~c;
+}
+
+/* CMD_LOADIMAGE с OPT_FULLSCREEN (расширение VDAC4) через кольцо: картинки data/fit
+   (make_image_data.py fit; случаи стенда с OPT_TEST_DRAFT — мимо) — холст 1024×768 RGB565 с
+   ptr по CRC32 эталона Pillow, лист — как у картинки 1024×768 (SOURCE, LAYOUT_H, LAYOUT, SIZE_H,
+   SIZE), GETPROPS — 1024×768 (у JPEG — начало, у PNG — конец холста) */
+static int t_loadimage_fit(const char *dir, size_t chunk)
+{
+    char path[1024], line[512];
+    snprintf(path, sizeof path, "%s/fit/list.txt", dir);
+    FILE *lst = fopen(path, "r");
+    if (!lst) {
+        printf("LOADIMAGE OPT_FULLSCREEN: нет %s\n", path);
+        return 1;
+    }
+    int bad = 0, n_ok = 0;
+    const uint32_t ptr = 0x1000, w = 1024, h = 768, stride = 2048;
+    while (fgets(line, sizeof line, lst)) {
+        char file[256], expf[256];
+        unsigned fmt, ew, eh, es, pal, opts = 0, ecrc = 0, elen = 0;
+        if (sscanf(line, "%255s %255s %u %u %u %u %u %x", file, expf, &fmt, &ew, &eh, &es, &pal, &opts) != 8 ||
+            opts != 8u || sscanf(expf, "crc:%x:%u", &ecrc, &elen) != 2)
+            continue;
+        size_t n;
+        snprintf(path, sizeof path, "%s/fit/%s", dir, file);
+        uint8_t *data = load(path, &n);
+        if (!data) {
+            bad++;
+            continue;
+        }
+        size_t padded = (n + 3) & ~(size_t)3;
+        uint8_t *s = malloc(padded + 64);
+        uint32_t hdr[4] = {0xFFFFFF00u, 0xFFFFFF24u, ptr, 8u};
+        memcpy(s, hdr, 16);
+        memset(s + 16, 0, padded);
+        memcpy(s + 16, data, n);
+        uint32_t tail[4] = {0xFFFFFF25u, 0, 0, 0};
+        memcpy(s + 16 + padded, tail, 16);
+        chip_reset();
+        memset(mem + ptr, 0xA5, elen);           /* холст должен лечь целиком */
+        int err = feed(s, 16 + padded + 16, chunk);
+        uint32_t rd = peek32(FTC_REG_CMD_READ);
+        uint32_t gp[3];
+        for (int i = 0; i < 3; i++)
+            gp[i] = peek32(FTC_RAM_CMD + ((rd - 12 + 4 * i) & 0xFFF));
+        int jpeg = strstr(file, ".jpg") != NULL;
+        uint32_t want_end = jpeg ? ptr : ptr + stride * h;
+        uint32_t dl[5] = {(0x01u << 24) | ptr, (0x28u << 24) | ((stride >> 10) << 2) | (h >> 9),
+                          (0x07u << 24) | (7u << 19) | ((stride & 0x3FF) << 9) | (h & 0x1FF),
+                          (0x29u << 24) | ((w >> 9) << 2) | (h >> 9), (0x08u << 24) | ((w & 0x1FF) << 9) | (h & 0x1FF)};
+        int dl_ok = peek32(FTC_REG_CMD_DL) == 4 * 5;
+        for (uint32_t i = 0; i < 5 && dl_ok; i++)
+            dl_ok = peek32(FTC_RAM_DL + 4 * i) == dl[i];
+        int mem_ok = elen == stride * h && crc32(mem + ptr, elen) == ecrc;
+        int ok = !err && mem_ok && dl_ok && gp[0] == want_end && gp[1] == w && gp[2] == h;
+        if (!ok) {
+            printf("LOADIMAGE OPT_FULLSCREEN %-14s куски %u: ошибка %d, RAM_G %s, лист %s, GETPROPS %x %u %u\n",
+                   file, (unsigned)chunk, err, mem_ok ? "да" : "НЕТ", dl_ok ? "да" : "НЕТ", gp[0], gp[1], gp[2]);
+            bad++;
+        } else {
+            n_ok++;
+        }
+        free(s);
+        free(data);
+    }
+    fclose(lst);
+    printf("LOADIMAGE OPT_FULLSCREEN (куски %u): %d верно, %d нет\n", (unsigned)chunk, n_ok, bad);
+    return bad != 0 || n_ok == 0;
+}
+
+/* Команды в кольцо и опрос, пока не выполнены, но не дольше polls опросов: 0 — выполнены,
+   1 — ошибка сопроцессора, 2 — ещё не выполнены (ждут данных). */
+static int feed_try(const uint32_t *w, uint32_t n, long polls)
+{
+    uint32_t wp = peek32(FTC_REG_CMD_WRITE);
+    for (uint32_t i = 0; i < n; i++)
+        poke32(FTC_RAM_CMD + ((wp + 4 * i) & 0xFFF), w[i]);
+    poke32(FTC_REG_CMD_WRITE, (wp + 4 * n) & 0xFFF);
+    while (polls-- > 0) {
+        int busy = ftc_poll(&cop);
+        frame_tick();
+        if (peek32(FTC_REG_CMD_READ) == 0xFFF)
+            return 1;
+        if (!busy && peek32(FTC_REG_CMD_READ) == peek32(FTC_REG_CMD_WRITE))
+            return 0;
+    }
+    return 2;
+}
+
+/* Видео: ролики data/video (make_video_data.py) — CMD_MEDIAFIFO, файл в кольце RAM_G, CMD_VIDEOSTART,
+   затем CMD_VIDEOFRAME по списку ожиданий: кадр в dst (эталон libjpeg), слово по ptr и
+   REG_MEDIAFIFO_READ (правила FT812, сверены с bt8xxemu), конец без кадра — dst не тронут,
+   «wait» — ждёт данных. */
+#define V_FIFO 0xE0000u
+#define V_PTR  0xDFFF0u
+static int t_video(const char *dir)
+{
+    char path[1024], line[2048];
+    snprintf(path, sizeof path, "%s/video/list.txt", dir);
+    FILE *lst = fopen(path, "r");
+    if (!lst) {
+        printf("VIDEO: нет %s\n", path);
+        return 1;
+    }
+    int bad = 0, n_ok = 0, calls = 0;
+    while (fgets(line, sizeof line, lst)) {
+        char file[256], expf[256];
+        unsigned w, h;
+        int at = 0;
+        if (sscanf(line, "%255s %255s %u %u %n", file, expf, &w, &h, &at) != 4)
+            continue;
+        size_t n, en;
+        snprintf(path, sizeof path, "%s/video/%s", dir, file);
+        uint8_t *avi = load(path, &n);
+        snprintf(path, sizeof path, "%s/video/%s", dir, expf);
+        uint8_t *exp = load(path, &en);
+        size_t fsz = (size_t)w * h * 2, padded = (n + 3) & ~(size_t)3;
+        chip_reset();
+        uint32_t c1[] = {0xFFFFFF00u, 0xFFFFFF39u, V_FIFO, 0x20000u};
+        int err = feed_try(c1, 4, 100000);
+        memset(mem + V_FIFO, 0, padded);
+        memcpy(mem + V_FIFO, avi, n);
+        poke32(0x309018u, (uint32_t)padded);
+        uint32_t c2[] = {0xFFFFFF40u};
+        err |= feed_try(c2, 1, 100000);
+        int case_bad = err != 0, frame = 0, adv = 0;
+        char t[64];
+        for (const char *s = line + at; !case_bad && sscanf(s, "%63s%n", t, &adv) == 1; s += adv) {
+            calls++;
+            poke32(V_PTR, 0xDEADBEEFu);
+            memset(mem, 0xA5, fsz);
+            uint32_t c3[] = {0xFFFFFF41u, 0, V_PTR};
+            int r = feed_try(c3, 3, 2000);
+            unsigned want_w = 0, want_rd = 0;
+            int is_end = !strncmp(t, "end:", 4), is_wait = !strcmp(t, "wait");
+            if (is_end)
+                sscanf(t + 4, "%u", &want_rd);
+            else if (!is_wait)
+                sscanf(t, "%u:%u", &want_w, &want_rd);
+            int ok;
+            if (is_wait) {
+                ok = r == 2;
+            } else {
+                int untouched = 1;
+                for (size_t i = 0; i < fsz && untouched; i++)
+                    untouched = mem[i] == 0xA5;
+                ok = r == 0 && peek32(V_PTR) == want_w && peek32(0x309014u) == want_rd &&
+                     (is_end ? untouched : (size_t)(frame + 1) * fsz <= en && !memcmp(mem, exp + frame * fsz, fsz));
+                if (!is_end)
+                    frame++;
+            }
+            if (!ok) {
+                printf("VIDEO %-14s вызов %s: r=%d слово %u READ %u\n", file, t, r, peek32(V_PTR),
+                       peek32(0x309014u));
+                case_bad = 1;
+            }
+        }
+        if (case_bad)
+            bad++;
+        else
+            n_ok++;
+        free(avi);
+        free(exp);
+    }
+    fclose(lst);
+    printf("VIDEO: роликов %d верно, %d нет (вызовов VIDEOFRAME %d)\n", n_ok, bad, calls);
+    return bad != 0 || n_ok == 0;
+}
+
+/* Видео через маленькое кольцо (8 КБ): хост кладёт файл кусками по 1…1500 байтов, когда есть
+   место по REG_MEDIAFIFO_READ (как ftview: с запасом 4 байта, словами), сопроцессор
+   декодирует, кольцо оборачивается много раз. Все кадры — как эталон. */
+static int t_video_stream(const char *dir)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/video/ftview512.avi", dir);
+    size_t n, en;
+    uint8_t *avi = load(path, &n);
+    snprintf(path, sizeof path, "%s/video/ftview512.exp", dir);
+    uint8_t *exp = load(path, &en);
+    const uint32_t size = 0x2000, fsz = 512u * 384u * 2u;
+    size_t padded = (n + 3) & ~(size_t)3;
+    uint8_t *data = calloc(1, padded);
+    memcpy(data, avi, n);
+    chip_reset();
+    uint32_t c1[] = {0xFFFFFF00u, 0xFFFFFF39u, V_FIFO, size, 0xFFFFFF40u};
+    feed_try(c1, 5, 1000);                   /* VIDEOSTART ждёт данных */
+    size_t sent = 0;
+    uint32_t wr = 0, frames = 0, seed = 7;
+    int bad = 0, outstanding = 0;
+    for (long it = 0; it < 2000000 && frames < 3 && !bad; it++) {
+        uint32_t rd = peek32(0x309014u), space = (rd - wr - 4) & (size - 1);
+        seed = seed * 1103515245u + 12345u;
+        uint32_t k = (4 + (seed >> 8) % 1500u) & ~3u;
+        if (k > space)
+            k = space & ~3u;
+        if (k > padded - sent)
+            k = (uint32_t)(padded - sent);
+        if (k > size - wr)
+            k = size - wr;
+        if (k) {
+            memcpy(mem + V_FIFO + wr, data + sent, k);
+            sent += k;
+            wr = (wr + k) & (size - 1);
+            poke32(0x309018u, wr);
+        }
+        ftc_poll(&cop);
+        frame_tick();
+        if (peek32(FTC_REG_CMD_READ) == 0xFFF) {
+            printf("VIDEO кольцо: ошибка %d на кадре %u, передано %u, READ %u\n", cop.fault, frames,
+                   (unsigned)sent, peek32(0x309014u));
+            bad = 1;
+        }
+        if (peek32(FTC_REG_CMD_READ) != peek32(FTC_REG_CMD_WRITE))
+            continue;
+        if (outstanding) {                       /* VIDEOFRAME выполнена: кадр — как эталон */
+            if (memcmp(mem, exp + frames * fsz, fsz))
+                bad = 1;
+            frames++;
+            outstanding = 0;
+        }
+        if (frames < 3) {
+            /* как ftview: DISPLAY за VIDEOFRAME — барьер; REG_CMD_READ уходит за параметры
+               команды раньше, чем кончится декодирование (у FT812 тоже) */
+            uint32_t wp = peek32(FTC_REG_CMD_WRITE), c3[] = {0xFFFFFF41u, 0, V_PTR, 0};
+            for (uint32_t i = 0; i < 4; i++)
+                poke32(FTC_RAM_CMD + ((wp + 4 * i) & 0xFFF), c3[i]);
+            poke32(FTC_REG_CMD_WRITE, (wp + 16) & 0xFFF);
+            outstanding = 1;
+        }
+    }
+    printf("VIDEO кольцо 8 КБ: кадров %u из 3, файл %u байт, передано %u: %s\n", frames, (unsigned)n,
+           (unsigned)sent, !bad && frames == 3 ? "да" : "НЕТ");
+    free(avi);
+    free(exp);
+    free(data);
+    return bad || frames != 3;
+}
+
 /* 3D после картинки: CMD_LOADIMAGE берёт рабочую память 3D (кэш сеток, треугольники), 3D
    при следующей команде начинает её заново — кадр тот же, сетки перечитываются из RAM_G */
 static int t3_after_image(const char *dir)
@@ -1370,10 +1618,40 @@ static int t3_after_image(const char *dir)
     return err;
 }
 
+/* Поток кольца RAM_CMD от хоста (например, команды FTVIEW.WMF из модели Z80) — через
+   сопроцессор; RAM_G (2 МБ) и показанный лист (после CMD_SWAP и смены кадра, 8 КБ) — в
+   файлы. Для проверки всей цепочки «плагин → BL616» на ПК (ftview tests/test_ftview.py,
+   VDAC4_COPRO_TEST). */
+static int stream_run(const char *in, const char *ramg_out, const char *dl_out)
+{
+    size_t n;
+    uint8_t *s = load(in, &n);
+    chip_reset();
+    int err = feed(s, n & ~(size_t)3, 0);
+    for (int i = 0; i < 1000 && peek32(FTC_REG_DLSWAP); i++)
+        frame_tick();
+    FILE *f = fopen(ramg_out, "wb");
+    if (!f || fwrite(mem, 1, 0x200000, f) != 0x200000)
+        err = 1;
+    if (f)
+        fclose(f);
+    f = fopen(dl_out, "wb");
+    if (!f || fwrite(dl_front, 1, 8192, f) != 8192)
+        err = 1;
+    if (f)
+        fclose(f);
+    printf("поток %u байт: %s, REG_CMD_READ %03x\n", (unsigned)n, err ? "ошибка" : "выполнен",
+           (unsigned)peek32(FTC_REG_CMD_READ));
+    free(s);
+    return err;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 5 && !strcmp(argv[1], "--stream"))
+        return stream_run(argv[2], argv[3], argv[4]);
     if (argc < 3) {
-        fprintf(stderr, "host_test DATA_DIR RAMG_BIN\n");
+        fprintf(stderr, "host_test DATA_DIR RAMG_BIN\n       host_test --stream ПОТОК RAMG_OUT DL_OUT\n");
         return 2;
     }
     int err = 0;
@@ -1395,6 +1673,10 @@ int main(int argc, char **argv)
     err |= t_loadimage(argv[1], 0);
     err |= t3_after_image(argv[1]);
     err |= t_loadimage(argv[1], 60);
+    err |= t_loadimage_fit(argv[1], 0);
+    err |= t_loadimage_fit(argv[1], 60);
+    err |= t_video(argv[1]);
+    err |= t_video_stream(argv[1]);
     printf(err ? "ТЕСТ НЕ ПРОЙДЕН\n" : "ТЕСТ ПРОЙДЕН\n");
     return err;
 }

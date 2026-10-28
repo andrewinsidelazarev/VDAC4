@@ -20,6 +20,8 @@ else()
     target_sources(app PRIVATE ../copro/ft_copro.c ../copro/ft_inflate.c ../copro/ft_image.c ../copro/ft_3d.c
         core_cache.c core_jtag.c)
     set_source_files_properties(../copro/ft_3d.c PROPERTIES COMPILE_OPTIONS "-O2")
+    # с прошивки 34: декод JPEG/видео и запись байтов — тоже -O2 (с -Os кадр видео ~60 мс)
+    set_source_files_properties(../copro/ft_image.c ../copro/ft_copro.c PROPERTIES COMPILE_OPTIONS "-O2")
 endif()
 
 sdk_set_main_file(main.c)

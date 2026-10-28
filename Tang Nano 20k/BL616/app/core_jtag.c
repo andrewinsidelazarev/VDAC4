@@ -4,6 +4,12 @@
  * во flash Tang (ZX Next и другие, docs/next-core.md): multiboot ведёт только по адресу из
  * заголовка битстрима (слот 0 → 1), третье ядро так не загрузить.
  *
+ * С прошивки 35 — и переход в любой слот flash Tang (core_jtag_boot): адрес перехода ПЛИС
+ * запоминает из команды D2 потока настройки, откуда бы поток ни пришёл — из flash или по JTAG
+ * (ядро из кэша с адресом 0 возвращается в слот 0, а не в слот 1, куда вёл заголовок
+ * TS-Config). Поэтому по JTAG идёт только заголовок битстрима с нужным адресом, без кадров, и
+ * затем Reconfig: ПЛИС грузит из flash битстрим с этого адреса (ядро видео — слот 3).
+ *
  * Порядок команд Gowin — как у FPGA-Companion MiSTle (src/gowin.c, src/jtag.c, src/bl616/
  * mcu_hw.c, Apache-2.0, Till Harbaum и др.): у GW2AR-18 сброс ошибки CRC, CONFIG_ENABLE (ждать
  * SYSTEM_EDIT_MODE), ERASE_SRAM, NOOP, ждать MEMORY_ERASE, XFER_DONE, NOOP, CONFIG_DISABLE (ждать
@@ -36,6 +42,7 @@
 #define GW_CONFIG_ENABLE  0x15u
 #define GW_XFER_WRITE     0x17u
 #define GW_CONFIG_DISABLE 0x3Au
+#define GW_RECONFIG       0x3Cu
 #define GW_STATUS         0x41u
 
 #define ST_CRC_ERROR      (1u << 0)
@@ -209,13 +216,18 @@ static void pins_take(void)
     bflb_gpio_reset(gpio, PIN_TCK);
 }
 
-static void pins_give(void)
+static void pins_restore(void)
 {
-    tms_seq(1, 0x1Fu, 5);              /* Test-Logic-Reset */
     *GPIO_CFG(10) = saved_cfg[0];      /* выводы — снова как у FPGA Partner */
     *GPIO_CFG(12) = saved_cfg[1];
     *GPIO_CFG(14) = saved_cfg[2];
     *GPIO_CFG(16) = saved_cfg[3];
+}
+
+static void pins_give(void)
+{
+    tms_seq(1, 0x1Fu, 5);              /* Test-Logic-Reset */
+    pins_restore();
 }
 
 int core_jtag_usercode(uint32_t *usercode)
@@ -291,5 +303,60 @@ int core_jtag_load(core_jtag_read_fn read, void *ctx, uint32_t size, uint32_t *u
         *usercode = ir_read32(GW_USERCODE);
 out:
     pins_give();
+    return result;
+}
+
+/* Заголовок битстрима до первого кадра — байт в байт как у ядер VDAC4 (fpga/vdac2, Gowin
+   1.9.11, ts_fb_*.bin): преамбула, синхрослово A5C3, проверка IDCODE GW2AR-18, слово настройки
+   загрузки, ключ сжатия (сжатия нет), защита, D2 — адрес перехода (байты 0x38…0x3B, старшим
+   вперёд), INIT_ADDR. Кадров (3B …) нет. */
+#define BOOT_ADDR_AT 0x38u
+static const uint8_t boot_head[] = {
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xA5, 0xC3, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1B,
+    0x10, 0x00, 0x00, 0x00, 0x00, 0xCC, 0x00, 0x00, 0x51, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x0B, 0x00, 0x00, 0x00, 0xD2, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00,
+};
+
+int core_jtag_boot(uint32_t address)
+{
+    uint8_t buf[sizeof boot_head];
+    int result = CORE_JTAG_OK;
+
+    for (uint32_t i = 0; i < sizeof buf; i++)
+        buf[i] = boot_head[i];
+    for (uint32_t i = 0; i < 4; i++)
+        buf[BOOT_ADDR_AT + i] = (uint8_t)(address >> (24 - 8 * i));
+    for (uint32_t i = 0; i < sizeof buf; i++)
+        buf[i] = reverse(buf[i]);
+
+    pins_take();
+    if (identify() != IDCODE_GW2AR18) {
+        result = CORE_JTAG_NO_FPGA;
+        pins_give();
+        return result;
+    }
+    tms_seq(1, 0x1Fu, 5);
+    tms_seq(1, 0x00u, 1);              /* Run-Test/Idle */
+    /* стирание — как перед загрузкой: из любого состояния ПЛИС (и после неудачной настройки) */
+    if ((result = erase_sram()) == CORE_JTAG_OK) {
+        ir(GW_CONFIG_ENABLE);
+        ir(GW_INIT_ADDR);
+        ir(GW_XFER_WRITE);
+        enter_shift_dr();
+        shift_bits(buf, NULL, (int)(8 * sizeof buf - 1));
+        tms_seq((buf[sizeof buf - 1] >> 7) & 1, 0x01u, 1);   /* последний бит — с выходом в Exit1-DR */
+        tms_seq(1, 0x01u, 2);
+        ir(GW_CONFIG_DISABLE);
+        ir(GW_NOOP);
+    }
+    /* Reconfig и NOOP — как fpga_jtag_reconfig (кнопка «Reprogram»): ПЛИС грузится из flash по
+       адресу перехода — новому или, если стирание не вышло, прежнему. TAP — в Run-Test/Idle, без
+       Test-Logic-Reset: так перезагрузка проверена с fpga_jtag.c. */
+    ir(GW_RECONFIG);
+    tms_seq(1, 0x00u, 8);
+    ir(GW_NOOP);
+    tms_seq(1, 0x00u, 8);
+    pins_restore();
     return result;
 }

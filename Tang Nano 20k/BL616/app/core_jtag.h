@@ -27,5 +27,11 @@ int core_jtag_load(core_jtag_read_fn read, void *ctx, uint32_t size, uint32_t *u
    CORE_JTAG_OK или CORE_JTAG_NO_FPGA. По метке VDAC4 (56 44 34 xx, xx ≥ 03) BL616 при запуске
    узнаёт ядро из кэша — у него нет ни ящика, ни сопроцессора. */
 int core_jtag_usercode(uint32_t *usercode);
+/* Переход в слот flash Tang (прошивка 35): стереть SRAM, по JTAG — заголовок битстрима с адресом
+   перехода address (без кадров), затем Reconfig — ПЛИС грузит из flash битстрим с address.
+   Reconfig идёт и после отказа стирания (ПЛИС тогда берёт прежний адрес перехода); итог —
+   CORE_JTAG_OK, CORE_JTAG_NO_FPGA (ПЛИС не тронута) или код стирания. Пришло ли ядро — видно
+   только по связи с ним (снимки STATUS, LINK у ESP). */
+int core_jtag_boot(uint32_t address);
 
 #endif

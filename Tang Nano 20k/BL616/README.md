@@ -8,14 +8,19 @@ BL616 — второй микроконтроллер на Tang Nano 20K. На V
 - **Свои 3D-команды VDAC4** `0xFFFFFFA0…AF`: сетки из RAM_G, отсечение, свет, z-буфер, текстуры,
   туман; кадр уходит в RAM_G битмапом. Версия 3D API — 3 ([`docs/3d-api-v3.md`](docs/3d-api-v3.md),
   заголовок для программ [`copro/vdac3d.h`](copro/vdac3d.h)).
+- **Видео FT812** (с прошивки 31): CMD_MEDIAFIFO, CMD_VIDEOSTART, CMD_VIDEOFRAME — MJPEG AVI из
+  медиа-FIFO; CMD_LOADIMAGE с OPT_FULLSCREEN вписывает картинку в 1024×768 (с 30) — для FTVIEW.
 - **Кэш ядер** для ядер с карты Tang (Next, NES): ESP кладёт ядро во flash BL616, BL616 грузит
   его в ПЛИС по JTAG, а по просьбе ядра (F12) возвращает TS-Config.
-- **Перезагрузка ПЛИС** при переходе между слотами flash Tang (TS-Config ↔ FT812).
+- **Перезагрузка ПЛИС** при переходе между слотами flash Tang (TS-Config ↔ FT812), с прошивки 35 —
+  в любой слот (команда BOOT ящика: заголовок битстрима с адресом перехода по JTAG и Reconfig;
+  ядро видео — слот 3).
 - **Обновление по сети** через ESP — USB нужен только для первой установки.
 
-Готовый образ — [`firmware/vdac4_copro_bl616.bin`](firmware/vdac4_copro_bl616.bin), прошивка **24**
-(110 128 байтов, SHA-256 `409fbf54b95d9a5932dc6e2c679bbef8f8600cb8cf5af16bc273e840a4b09291`).
-Она стоит на плате с 23.10.2026. ESP показывает версию в слове CP_INFO: `C018xxxx`.
+Готовый образ — [`firmware/vdac4_copro_bl616.bin`](firmware/vdac4_copro_bl616.bin), прошивка **35**
+(135 216 байтов, SHA-256 `71159b87ca0f1c0724aa949199ce361d3c7d333b60e1fab821e9efde2572aff0`).
+Она стоит на плате с 27.10.2026. ESP показывает версию в слове CP_INFO: `C023xxxx`. Что менялось
+в 25–35 — в начале [`app/main.c`](app/main.c).
 
 ## Что здесь
 

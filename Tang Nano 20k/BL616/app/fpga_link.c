@@ -88,6 +88,8 @@ static int rd32_on;                  /* слова чтения — кадрам
 /* замеры самопроверки: время DMA, ожидания места в очереди ПЛИС, снимков в ожидании */
 static int meas;
 static uint32_t m_dma, m_wait, m_snaps;
+/* простой шины для замера RENDER (прошивка 26): ожидание места в очереди ПЛИС и чтения, мкс */
+static uint32_t link_room_us, link_read_us, link_read_chunks, link_read_snaps;
 static uint64_t m_t0;
 uint32_t fpga_xacts, fpga_waits;
 
@@ -197,8 +199,10 @@ static void rd_chunk(uint32_t a, uint32_t *w, uint32_t k)
     free_words = free_words ? free_words - 1 : 0;
     snap_t s;
     uint32_t bad = 0, good = 0;
+    link_read_chunks++;
     for (;;) {
         fpga_waits++;
+        link_read_snaps++;
         if (snap(&s) == 0) {
             bad = 0;
             if (s.flags & ST_RD_READY)
@@ -251,6 +255,8 @@ static void chunk_done(uint32_t a, const uint32_t *w, uint32_t n)
 static void wait_room(uint32_t n)
 {
     snap_t s;
+    const int waiting = free_words < n;
+    const uint64_t w0 = waiting ? bflb_mtimer_get_time_us() : 0;
     uint64_t t0 = meas ? bflb_mtimer_get_time_us() : 0;
     for (uint32_t tries = 0; free_words < n; tries++) {
         if (tries >= STUCK_SNAPS) {
@@ -262,6 +268,8 @@ static void wait_room(uint32_t n)
         fpga_waits++;
         m_snaps += (uint32_t)meas;
     }
+    if (waiting)
+        link_room_us += (uint32_t)(bflb_mtimer_get_time_us() - w0);
     if (meas)
         m_wait += (uint32_t)(bflb_mtimer_get_time_us() - t0);
 }
@@ -387,6 +395,7 @@ static void b_rd(void *ctx, uint32_t a, uint32_t *w, uint32_t n)
 {
     (void)ctx;
     fpga_wr_wait();
+    const uint64_t t0 = bflb_mtimer_get_time_us();
     while (n) {
         uint32_t k = n < READ_CHUNK ? n : READ_CHUNK;
         rd_chunk(a, w, k);
@@ -394,6 +403,7 @@ static void b_rd(void *ctx, uint32_t a, uint32_t *w, uint32_t n)
         w += k;
         n -= k;
     }
+    link_read_us += (uint32_t)(bflb_mtimer_get_time_us() - t0);
 }
 
 static void b_status(void *ctx, ftc_status_t *st)
@@ -423,6 +433,22 @@ static uint32_t b_ms(void *ctx)
 {
     (void)ctx;
     return (uint32_t)bflb_mtimer_get_time_ms();
+}
+
+static uint32_t b_us(void *ctx)
+{
+    (void)ctx;
+    return (uint32_t)bflb_mtimer_get_time_us();
+}
+
+static void b_link_us(void *ctx, uint32_t link[5])
+{
+    (void)ctx;
+    link[0] = link_room_us;
+    link[1] = link_read_us;
+    link[2] = link_read_chunks;
+    link[3] = link_read_snaps;
+    link[4] = rdata_hz;
 }
 
 static void dma_init(void)
@@ -506,6 +532,8 @@ void fpga_bus(ftc_bus_t *bus)
     bus->wr_async = b_wr_async;
     bus->pump = b_pump;
     bus->wr_wait = b_wr_wait;
+    bus->us = b_us;
+    bus->link_us = b_link_us;
 }
 
 void fpga_info(uint32_t v)
