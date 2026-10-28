@@ -1,24 +1,27 @@
 # Ядра Tang Nano 20K
 
-Tang Nano 20K на VDAC4 работает с несколькими ядрами ПЛИС. Два живут во flash самой Tang, остальные —
+Tang Nano 20K на VDAC4 работает с несколькими ядрами ПЛИС. Три живут во flash самой Tang, остальные —
 на её microSD и грузятся по выбору из Wild Commander.
 
 | Ядро | Где хранится | Версия | Файлы |
 |---|---|---|---|
 | **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.32 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
-| **FT812** — видеоускоритель для программ Evo | flash Tang, слот 1 | 1.29 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
+| **FT812** — видеоускоритель для программ Evo, вывод 1366×768 | flash Tang, слот 1 | 1.41 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
+| **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Tang, `CORES` | 1.39, слой ESP 0.5 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`SD/CORES/VIDEO.ELF`](SD/CORES/VIDEO.ELF) |
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.9 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
 
 `.BIN` — само ядро. `.ELF` — его слой на ESP: клавиатура и мышь Evo, звук на ЦАП ESP, сохранения на
-карты, выход в WC. Исходники TS-Config и FT812 — в [`../Firmware`](../Firmware), Next и NES — здесь,
-в [`Next`](Next) и [`NES`](NES).
+карты, выход в WC. Исходники TS-Config, FT812 и ядра видео — в [`../Firmware`](../Firmware), Next и
+NES — здесь, в [`Next`](Next) и [`NES`](NES), слой ESP ядра видео — в [`VIDEO/esp`](VIDEO/esp)
+(описание ядра — [`../Docs/video-core.md`](../Docs/video-core.md)).
 
 ## Что нужно
 
-- Прошивка ESP **vdac4-0.1.100**: мост к карте Tang, кэш ядер, запуск слоёв `.ELF`.
-- Прошивка BL616 модуля Tang **24** — [`../BL616`](../BL616): её кэш ядер грузит ядро с карты в ПЛИС,
-  а по F12 возвращает TS-Config.
+- Прошивка ESP **vdac4-0.1.104**: мост к карте Tang, кэш ядер, запуск слоёв `.ELF`, ядро видео из
+  слота 3, пункт FT SIZE меню Tang (размер картинки ядра FT812 отдельно от ядер 720p).
+- Прошивка BL616 модуля Tang **35** — [`../BL616`](../BL616): её кэш ядер грузит ядро с карты в ПЛИС,
+  по F12 возвращает TS-Config, ядро видео поднимает из слота 3 flash Tang.
 - Плагин Wild Commander **VDAC4 Cores** 0.13 —
   [`ESP32 S3 Zero N8R8/Network/VDAC4 Cores`](../../ESP32%20S3%20Zero%20N8R8/Network/VDAC4%20Cores): меню ядер,
   часы Evo для Next, сектора карты Evo для Next, NES из меню — сразу в меню F1 ядра.
@@ -33,6 +36,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
    ```
    python tang_tool.py update <IP ESP> ts_fb_hdmi_top.fs
    python tang_tool.py update --slot 1 <IP ESP> ts_fb_slot1.fs
+   python tang_tool.py update --slot 3 <IP ESP> ts_fb_video.bin
    ```
 
    Новое ядро слота 0 начинает работать после выключения и включения питания.
@@ -79,6 +83,14 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 Джойстик Kempston работает в обоих ядрах. Мышь Kempston работает в Next.
 
 ## Проверено на плате
+
+2026-10-28, ESP 0.1.104, BL616 35, TS-Config 1.32:
+- **FT812 1.41** — вывод 1366×768 приняли телевизор LG, монитор ASUS по HDMI и Dell 16:10 через
+  переходник VGA; шрифты просмотрщика текстов WC больше не режутся; пункт FT SIZE работает.
+
+2026-10-27, ESP 0.1.103, BL616 35, TS-Config 1.32:
+- **Видео 1.39**, VIDEO.ELF 0.5, FTVIEW4: ролики 4:3 и 16:9 растянуты по ASPECT слота 0, ASPECT 4:3
+  сохраняется после выхода.
 
 2026-10-27, ESP 0.1.100, TS-Config 1.32, плагин VDAC4 Cores 0.12:
 - **Next 0.40**, NEXT.ELF 0.10:
