@@ -1,7 +1,10 @@
-# FTView для Wild Commander Improved
+# FTVIEW4 — FTView для VDAC4
 
-Плагин FT812/VDAC2 и VDAC4. Сборка — `FTVIEW4.WMF` (с 26.10.2026: вариант для
-VDAC4, чтобы не путать с обычным `WC/FTVIEW.WMF`; тот — `ftview.wmf` из git).
+Плагин Wild Commander для платы VDAC4 (FT812 в Tang Nano 20K, сопроцессор BL616, ядро видео,
+ESP): картинки и ролики. Сборка — `FTVIEW4.WMF` (готовая — [`build/FTVIEW4.WMF`](build/FTVIEW4.WMF));
+имя — чтобы не путать с обычным `WC/FTVIEW.WMF`: тот, универсальный для всех WC, живёт в репо
+Wild Commander Improved, а этот — железу VDAC4, поэтому здесь (с 28.10.2026, прежде — в
+`wc-improved/source/plugins/ftview`).
 Исходники находятся в `src`, 17 локальных файлов SDK и три файла обмена с ESP
 платы VDAC4 (`vendor/vdac4`) — в `vendor`.
 `vendor/manifest.json` фиксирует происхождение и SHA-256 каждого файла;
@@ -23,8 +26,7 @@ python tests/test_core.py
 
 `test_core.py` — банк ядра видео VDAC4: модель канала SPI ESP берётся из тестов
 сетевых плагинов проекта VDAC4 (`VDAC4_NETWORK_TESTS`, по умолчанию
-`E:\zx\Tang Nano 20k VDAC\VDAC4\ESP32 S3 Zero N8R8\Network\tests`); без них тесты
-пропускаются.
+`../../ESP32 S3 Zero N8R8/Network/tests` этого репо); без них тесты пропускаются.
 
 `test_gs.py` исполняет код плагина вместе с образом ПЗУ General Sound:
 по умолчанию `rom/gs105a.rom` из Unreal Speccy на рабочем столе, другой

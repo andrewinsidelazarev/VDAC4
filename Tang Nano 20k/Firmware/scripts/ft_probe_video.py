@@ -19,7 +19,10 @@ sys.path.insert(0, str(HERE))
 from ft_probe_math import W2  # noqa: E402
 
 sys.path.insert(0, str(W2 / "tools"))
-FTVIEW_TESTS = Path(r"E:\zx\esp\wc-improved\source\plugins\ftview\tests")
+# тесты FTVIEW4 (avigen): в репо VDAC4 — Tang Nano 20k/FTVIEW4; рабочее дерево fpga/vdac2 лежит рядом с VDAC4
+_UP = Path(__file__).resolve().parents
+FTVIEW_TESTS = next((p for p in (_UP[2] / "FTVIEW4" / "tests", _UP[3] / "VDAC4" / "Tang Nano 20k" / "FTVIEW4" / "tests")
+                     if p.exists()), _UP[2] / "FTVIEW4" / "tests")
 sys.path.insert(0, str(FTVIEW_TESTS))
 
 CMD_DLSTART, CMD_MEDIAFIFO, CMD_VIDEOSTART, CMD_VIDEOFRAME = 0xFFFFFF00, 0xFFFFFF39, 0xFFFFFF40, 0xFFFFFF41

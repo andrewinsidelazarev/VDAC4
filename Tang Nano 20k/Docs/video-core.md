@@ -68,7 +68,7 @@ Evo: FTVIEW4.WMF ─ банк ядра видео (стр. 11) ─┬─ SPI FT8
 | Ядро видео | `fpga/vdac2`, `ts_fb_core` с `HAS_VIDEO = 1` → `impl/pnr/ts_fb_video.fs` | разбор AVI, декодер JPEG, темп кадров, вывод 720p, FIFO звука для ESP, оверлеи |
 | VIDEO.ELF | `VDAC4/Tang Nano 20k/Cores/VIDEO/esp` | грузит ядро (слот 3 flash Tang), играет звук на ЦАП ESP в такт картинке, рисует панель плеера, список и сообщения |
 | Переход в слот 3 | прошивка BL616 35 (`UNDERRUN VDAC4/app-bl616`: `core_jtag_boot`, команда BOOT ящика), ESP 0.1.101 (`core_store.cpp`, `core_cache_client.cpp`) | ESP проверяет начало битстрима в слоте, BL616 по JTAG переводит ПЛИС в слот 3 |
-| FTVIEW4 | `Tang Nano 20k/FTVIEW4`, банк 11 (`src/core.c`) | ESP и ядро, поток файла в FIFO ядра, клавиши, пауза, перемотка, список роликов |
+| FTVIEW4 | `VDAC4/Tang Nano 20k/FTVIEW4`, банк 11 (`src/core.c`) | ESP и ядро, поток файла в FIFO ядра, клавиши, пауза, перемотка, список роликов |
 
 ## Ядро
 
@@ -347,7 +347,7 @@ ABI приложений 1.9, команды 0x6E…0x7E. Место — `/WC/ES
 
 ## FTVIEW4: режим ядра видео
 
-`Tang Nano 20k/FTVIEW4`: банк 11 (`src/core.c`), обмен с ESP — `src/esp_link.asm`
+`VDAC4/Tang Nano 20k/FTVIEW4`: банк 11 (`src/core.c`), обмен с ESP — `src/esp_link.asm`
 (proto.asm и zifi_spi.asm сетевых плагинов VDAC4, копия в `vendor/vdac4`, приём до 256 байтов).
 Вход — шлюз `core_try` из банка изображений (crt0.s), до GS и FT812:
 1. разбор заголовка: MJPEG до 1024×768, звук любой;
