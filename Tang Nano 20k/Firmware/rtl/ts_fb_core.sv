@@ -277,7 +277,10 @@ module ts_fb_core #(
     //                     дамп R-Type 14,0 → 13,1 мс, стенд vsys);
     //                     1.41 — ядро FT812: вывод 1366×768 с сокращённым гашением (VESA DMT,
     //                     72 МГц, 60 Гц) вместо 720p60 — кадр 1024×768 точка в точку, окна ASPECT
-    //                     и SIZE — под 768 строк (fb_scanout OUT768), AVI — VIC 0)
+    //                     и SIZE — под 768 строк (fb_scanout OUT768), AVI — VIC 0);
+    //                     1.42 — оверлеи (ядро видео): режим 4 бит — точка — номер цвета палитры
+    //                     оверлея, 16 цветов со своей непрозрачностью (OVL_PAL 0xE0): меню файлов
+    //                     плеера — в точках 720p, текст непрозрачный на полупрозрачном фоне
     //   0x08 STATUS   R   [15:0] флаги: 0 растр захвачен, 3:1 режим raster_detect, 4/5 HS/VS
     //                     активны низким, 6/7 окно по картинке H/V, 8 границы картинки есть,
     //                     9 в SDRAM таблица, 10 SDRAM готова, 11 есть кадр, 12 M_SEL,
@@ -341,11 +344,15 @@ module ts_fb_core #(
     //   0x60…0x7C ADJ_TAB RW поправки растров 0…7: [7:0] H, [15:8] V (0x60 + 4 × режим)
     //   0x80…0xBC FLASH_BUF RW буфер моста, 64 байта (байт 0 — старший байт 0x80)
     //   0xC0, 0xD0 OVL0_CTRL, OVL1_CTRL W  оверлей k (fb_ovl): 0 вкл., 1 — ×2 (точка холста — 2×2
-    //                     точки вывода), [7:4] прозрачность (15 — непрозрачный)
+    //                     точки вывода), 2 — 4 бит (1.42: точка — номер цвета палитры, 8 в слове,
+    //                     [3:0] — левая; строка — ⌈w/64⌉·8 слов), [7:4] прозрачность (15 —
+    //                     непрозрачный; в режиме 4 бит — у каждого цвета своя)
     //   0xC4, 0xD4 OVLk_POS W  [10:0] x, [25:16] y на выводе (левый верхний угол)
     //   0xC8, 0xD8 OVLk_SIZE W [10:0] ширина холста (≤ 1024), [25:16] высота
     //   0xCC, 0xDC OVLk_BASE W [16:0] начало холста — слово региона оверлеев (кратно 8)
     //                     Настройки берутся в начале кадра вывода.
+    //   0xE0 OVL_PAL  W   (1.42) цвет палитры: [15:0] RGB565, [20:16] непрозрачность 0…16 (0 —
+    //                     картинка, 16 — цвет), [27:24] номер цвета, [28] оверлей
     //   0xE4 OVL_STAT R   0 — очередь записи оверлеев переполнялась
     //   0xE8 FT_HOST  W   команда хоста FT812 от ESP (1.12): [7:0] команда (00 ACTIVE, 44 CLKEXT,
     //                     61/62 CLKSEL, 68 CORERST, …), [15:8] параметр — как посылка хоста по SPI
@@ -400,7 +407,7 @@ module ts_fb_core #(
 
     // Оверлеи ESP: настройки (только запись; берутся в начале кадра вывода)
     localparam int NOVL = 2;
-    reg  [NOVL-1:0]    ovl_on, ovl_x2;
+    reg  [NOVL-1:0]    ovl_on, ovl_x2, ovl_p4;
     reg  [NOVL*4-1:0]  ovl_alpha;
     reg  [NOVL*11-1:0] ovl_x, ovl_w;
     reg  [NOVL*10-1:0] ovl_y, ovl_h;
@@ -408,7 +415,7 @@ module ts_fb_core #(
     wire               ovl_ovf;
     always_ff @(posedge pixel_clk or negedge rst_pix_n) begin
         if (!rst_pix_n) begin
-            ovl_on <= '0; ovl_x2 <= '0; ovl_alpha <= '1; ovl_x <= '0; ovl_w <= '0;
+            ovl_on <= '0; ovl_x2 <= '0; ovl_p4 <= '0; ovl_alpha <= '1; ovl_x <= '0; ovl_w <= '0;
             ovl_y <= '0; ovl_h <= '0; ovl_base <= '0;
         end else if (lk_wr_stb && lk_wr_addr[7:5] == 3'b001 && lk_wr_addr[4:3] == 2'b10) begin
             // 0xC0…0xDC: регистр lk_wr_addr[1:0] оверлея lk_wr_addr[2]
@@ -417,6 +424,7 @@ module ts_fb_core #(
                     2'd0: begin
                         ovl_on[k]           <= lk_wr_data[0];
                         ovl_x2[k]           <= lk_wr_data[1];
+                        ovl_p4[k]           <= lk_wr_data[2];
                         ovl_alpha[k*4 +: 4] <= lk_wr_data[7:4];
                     end
                     2'd1: begin ovl_x[k*11 +: 11] <= lk_wr_data[10:0]; ovl_y[k*10 +: 10] <= lk_wr_data[25:16]; end
@@ -947,7 +955,7 @@ module ts_fb_core #(
         if (lk_rd_addr[11]) lk_rd_data = HAS_VIDEO ? vp_au_q : sd_rx_q;   // 0x2000…: окно RX моста к microSD (ядро видео — FIFO звука)
         else case (lk_rd_addr[7:0])
             8'h00: lk_rd_data = 32'h5644_4334;
-            8'h01: lk_rd_data = {HAS_EVO ? 8'h01 : HAS_VIDEO ? 8'h05 : 8'h02, 8'h01, 16'h0129};   // личность: 05 — ядро видео (03 — Next, 04 — NES)
+            8'h01: lk_rd_data = {HAS_EVO ? 8'h01 : HAS_VIDEO ? 8'h05 : 8'h02, 8'h01, 16'h012A};   // личность: 05 — ядро видео (03 — Next, 04 — NES)
             8'h02: lk_rd_data = {pclk_khz, cal_fail, cal_done, cal_busy, blank, p_have_frame,
                                  p_mem_ready, p_pattern_on, p_bb_valid, p_aligned_v, p_aligned_h,
                                  p_vs_low, p_hs_low, p_mode, p_locked};
@@ -1503,8 +1511,10 @@ module ts_fb_core #(
     generate if (HAS_EVO || HAS_VIDEO) begin : g_ovl
     fb_ovl #(.N(NOVL), .REGION(OVL_REGION), .HS_NEG(HS_NEG), .VS_NEG(VS_NEG)) ovl (
         .pclk(pixel_clk), .prst_n(rst_pix_n),
-        .cfg_on(ovl_on), .cfg_x2(ovl_x2), .cfg_alpha(ovl_alpha), .cfg_x(ovl_x), .cfg_y(ovl_y),
-        .cfg_w(ovl_w), .cfg_h(ovl_h), .cfg_base(ovl_base),
+        .cfg_on(ovl_on), .cfg_x2(ovl_x2), .cfg_p4(ovl_p4), .cfg_alpha(ovl_alpha), .cfg_x(ovl_x),
+        .cfg_y(ovl_y), .cfg_w(ovl_w), .cfg_h(ovl_h), .cfg_base(ovl_base),
+        .pal_we(lk_wr_stb && lk_wr_addr == 8'h38), .pal_k(lk_wr_data[28]), .pal_idx(lk_wr_data[27:24]),
+        .pal_data(lk_wr_data[20:0]),
         .ow_stb(ov_stb), .ow_addr(lk_wr_word[16:0]), .ow_data(lk_wr_data), .ow_ovf(ovl_ovf),
         .in_r(s_r), .in_g(s_g), .in_b(s_b), .in_de(s_de), .in_hs(s_hs), .in_vs(s_vs),
         .out_r(vid_r), .out_g(vid_g), .out_b(vid_b),

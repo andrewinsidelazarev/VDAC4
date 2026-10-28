@@ -1,5 +1,6 @@
 // Стенд VIDEO.ELF на ПК (test_video_host.py): приложение (app.c, audio.c, avi_info.c, hud.cpp) и
-// настоящий MP3.ELF (Helix) — те же исходники, что собираются в ELF; ядро ESP — заглушка zm_core_t
+// декодер MP3.ELF (Helix, вкомпилирован в VIDEO.ELF с 0.6) — те же исходники, что собираются в ELF;
+// ядро ESP — заглушка zm_core_t
 // в реальном времени (задачи — потоки), Tang с ядром видео — модель, плагин FTVIEW4 — сценарий.
 //
 // МОДЕЛЬ ЯДРА (как RTL): разбор идёт по чанкам movi; кадр декодируется DECODE_MS и ждёт слота, у
@@ -18,7 +19,7 @@
 // Итог — строки ключ=значение (test_video_host.py).
 //
 //   video_host файл.avi [--seek-at МС --seek-frame N] [--pause-at МС --pause-ms МС] [--decode-ms МС]
-//                       [--cfg CTRL] [--shots КАТАЛОГ] [--no-mp3 1]
+//                       [--cfg CTRL] [--shots КАТАЛОГ]
 #define NOMINMAX
 #include <windows.h>
 
@@ -41,7 +42,6 @@
 #include "zm_source.h"
 
 extern "C" const zm_app_t* video_app_table(void);
-extern "C" int mp3_main(int argc, char** argv);
 
 namespace {
 
@@ -91,6 +91,7 @@ struct Tang {
   uint64_t au_bytes_in = 0, au_bytes_skipped = 0;
   // оверлеи и настройки
   uint32_t ovl[2][4] = {};
+  uint32_t pal[2][16] = {};                 // палитры режима 4 бит: {непрозрачность 0…16, RGB565}
   std::vector<uint32_t> canvas = std::vector<uint32_t>(131072, 0);
   uint32_t cfg = 0;
   uint64_t link_ops = 0;
@@ -175,7 +176,7 @@ struct Tang {
     if (a >= W_AUDIO && a < W_AUDIO + 4096) return au_mem[(a - W_AUDIO) / 4];
     if (a >= 0xC0 && a < 0xE0) return ovl[(a - 0xC0) / 16][(a & 15) / 4];
     switch (a) {
-    case R_VERSION: return 0x05010001;
+    case R_VERSION: return 0x0501012A;
     case R_SLOTS: return slots;
     case R_ABORTS: return 512u << 16;
     case R_CFG: return cfg;
@@ -189,6 +190,7 @@ struct Tang {
   {
     if (a >= W_CANVAS && a < W_CANVAS + 4 * 131072) { canvas[(a - W_CANVAS) / 4] = v; return; }
     if (a >= 0xC0 && a < 0xE0) { ovl[(a - 0xC0) / 16][(a & 15) / 4] = v; return; }
+    if (a == 0xE0) { pal[(v >> 28) & 1][(v >> 24) & 15] = v & 0x1FFFFF; return; }
     switch (a) {
     case R_AU_WP: au_rp = v & 2047; break;
     case R_AU_CTL: ctl = v; break;
@@ -214,6 +216,7 @@ struct Sink {
   uint32_t rate = 0, ch = 0;
   std::deque<float> q;
   double last = 0, frac = 0;
+  double last_write = 0;           // как у ESP: буфер DMA I2S (8 × 480 кадров) доигрывает после записи
   uint64_t played = 0, writes = 0;
   int quiet = 1 << 30;             // кадров тишины подряд
   std::vector<double> onsets;      // когда зазвучал пик (мс)
@@ -234,7 +237,9 @@ struct Sink {
       float peak = 0;
       for (uint32_t c = 0; c < ch; c++) { peak = std::max(peak, std::fabs(q.front())); q.pop_front(); }
       if (peak > 0.05f) {
-        if (quiet >= (int)(rate / 50)) onsets.push_back(last + (double)i * 1000.0 / rate);
+        // слышен — после буфера DMA I2S ESP (8 × 480 кадров): кадр уходит из кольца в DMA и звучит
+        // через 3840 кадров (при 22,05 кГц — 174 мс)
+        if (quiet >= (int)(rate / 50)) onsets.push_back(last + (double)i * 1000.0 / rate + 3840.0 * 1000 / rate);
         quiet = 0;
       } else if (peak < 0.01f) {
         quiet++;
@@ -277,14 +282,20 @@ int pcm_write(const float* frames, uint32_t count)
     for (uint32_t i = 0; i < part * sink.ch; i++) sink.q.push_back(frames[(size_t)done * sink.ch + i]);
     done += part;
     sink.writes++;
+    sink.last_write = now_ms();
   }
   return (int)done;
 }
 uint32_t pcm_queued_ms()
 {
   std::lock_guard<std::mutex> g(sink.m);
-  sink.drain(now_ms());
-  return sink.rate ? (uint32_t)(sink.q.size() / sink.ch * 1000 / sink.rate) : 0;
+  const double t = now_ms();
+  sink.drain(t);
+  if (!sink.rate) return 0;
+  // как AudioPlayer::pcmQueuedMs прошивки: кольцо + то, что DMA (8 × 480 кадров) ещё не доиграл
+  // после последней записи — при 22,05 кГц это 174 мс
+  const double tail = 3840.0 * 1000 / sink.rate, since = t - sink.last_write;
+  return (uint32_t)(sink.q.size() / sink.ch * 1000 / sink.rate) + (since < tail ? (uint32_t)(tail - since) : 0);
 }
 void pcm_flush()
 {
@@ -359,18 +370,15 @@ int c_reply(uint8_t code, const void* d, uint16_t n)
   last_reply.assign((const uint8_t*)d, (const uint8_t*)d + n);
   return ZM_OK;
 }
-bool no_mp3 = false;
-int modules_open = 0;
+// Модулей в кэше ESP нет (на плате MP3.ELF там бывает не всегда): VIDEO.ELF обходится своим
+int modules_open = 0, module_opens = 0;
 int c_module_open(const char* name, void* a1, void* a2, void** handle, int* entry)
 {
-  if (std::strcmp(name, "MP3.ELF") != 0 || no_mp3) return ZM_NOT_FOUND;
-  char* argv[3] = {const_cast<char*>(name), (char*)a1, (char*)a2};
-  *entry = mp3_main(3, argv);
-  *handle = new int(1);
-  modules_open++;
-  return ZM_OK;
+  (void)name; (void)a1; (void)a2; (void)handle; (void)entry;
+  module_opens++;
+  return ZM_NOT_FOUND;
 }
-void c_module_close(void* h) { delete static_cast<int*>(h); modules_open--; }
+void c_module_close(void* h) { (void)h; modules_open--; }
 int core_loads = 0, core_backs = 0;
 int c_core_load(const char* name, uint32_t* version)
 {
@@ -380,7 +388,7 @@ int c_core_load(const char* name, uint32_t* version)
   std::lock_guard<std::mutex> g(tang.m);
   tang.alive = true;
   tang.vt_next = (int64_t)(now_ms() / 20 + 1) * 20;
-  *version = 0x05010001;
+  *version = 0x0501012A;
   return ZM_OK;
 }
 int c_core_back(uint32_t)
@@ -497,19 +505,31 @@ void shot(const std::string& dir, const char* name)
     const uint32_t ctrl = tang.ovl[k][0];
     if (!(ctrl & 1)) continue;
     const int s = (ctrl & 2) ? 2 : 1, a = (ctrl >> 4) & 15;
+    const bool p4 = (ctrl & 4) != 0;                    // ядро 1.42: номер цвета палитры, 8 точек в слове
     const int ox = tang.ovl[k][1] & 2047, oy = (tang.ovl[k][1] >> 16) & 1023;
     const int cw = tang.ovl[k][2] & 2047, ch = (tang.ovl[k][2] >> 16) & 1023;
-    const uint32_t base = tang.ovl[k][3] & 0x1FFF8, stride = (cw + 15) / 16 * 8;
+    const uint32_t base = tang.ovl[k][3] & 0x1FFF8, stride = p4 ? (cw + 63) / 64 * 8 : (cw + 15) / 16 * 8;
     for (int y = 0; y < ch * s; y++)
       for (int x = 0; x < cw * s; x++) {
         const int X = ox + x, Y = oy + y;
         if (X >= 1280 || Y >= 720) continue;
         const int cx = x / s, cy = y / s;
-        const uint32_t word = tang.canvas[(base + cy * stride + cx / 2) & 131071];
-        const uint16_t px = (cx & 1) ? word >> 16 : word & 0xFFFF;
-        const int o[3] = {(px >> 11) << 3, ((px >> 5) & 63) << 2, (px & 31) << 3};
+        uint16_t px;
+        int a1 = a + 1;
+        if (p4) {
+          const uint32_t word = tang.canvas[(base + cy * stride + cx / 8) & 131071];
+          const uint32_t e = tang.pal[k][(word >> (4 * (cx & 7))) & 15];
+          px = (uint16_t)e;
+          a1 = (int)(e >> 16) & 31;
+        } else {
+          const uint32_t word = tang.canvas[(base + cy * stride + cx / 2) & 131071];
+          px = (cx & 1) ? word >> 16 : word & 0xFFFF;
+        }
+        // каналы 8 бит — как fb_ovl (повтор старших разрядов)
+        const int r5 = px >> 11, g6 = (px >> 5) & 63, b5 = px & 31;
+        const int o[3] = {r5 << 3 | r5 >> 2, g6 << 2 | g6 >> 4, b5 << 3 | b5 >> 2};
         uint8_t* p = &img[(Y * 1280 + X) * 3];
-        for (int c = 0; c < 3; c++) p[c] = (uint8_t)(p[c] + (int)std::floor((o[c] - p[c]) * (a + 1) / 16.0));
+        for (int c = 0; c < 3; c++) p[c] = (uint8_t)(p[c] + (int)std::floor((o[c] - p[c]) * a1 / 16.0));
       }
   }
   const std::string path = dir + "/" + name + ".ppm";
@@ -565,7 +585,6 @@ int main(int argc, char** argv)
     else if (k == "--decode-ms") tang.decode_ms = std::atof(v);
     else if (k == "--cfg") tang.cfg = (uint32_t)std::strtoul(v, nullptr, 0);
     else if (k == "--shots") shots = v;
-    else if (k == "--no-mp3") no_mp3 = std::atoi(v) != 0;
     else if (k == "--psram-max") psram_max = (size_t)std::strtoul(v, nullptr, 0);
   }
   Avi avi;
@@ -620,14 +639,19 @@ int main(int argc, char** argv)
     if (!shot1 && t > 1200) { shot1 = true; shot(shots, "panel"); }
     if (!list_done && t > 3200) {
       list_done = true;
-      std::vector<uint8_t> b{1};
+      // как FTVIEW4 e14a: строки с 9-й — VC_ROWS (0x79), затем VC_LIST с флагом #80 и строками 0…8
+      std::vector<uint8_t> rest{9}, b{0x81};
       put16(b, 23); put16(b, 0); put16(b, 3); put16(b, 1);
       put_str(b, "");
       for (int i = 0; i < LIST_ROWS; i++) {
-        char row[64];
-        std::snprintf(row, sizeof row, i == 5 ? "VERY_LONG_NAME_OF_A_FILM_THAT_DOES_NOT_FIT_%02d_ABCDEFGHIJKLMNOPQRSTUVWXYZ.AVI" : "FILM_%02d.AVI", i + 1);
-        put_str(b, row);
+        char row[128];
+        // имена — как их шлёт банк списка FTVIEW4: без «.avi», «_» — пробелом, кириллица — CP866
+        std::snprintf(row, sizeof row, i == 5 ? "Very long name of a film that does not fit %02d ABCDEFGHIJKLMNOPQRSTUVWXYZ" : "Film %02d", i + 1);
+        if (i == 6) std::snprintf(row, sizeof row, "%s", "\x8A" "\x88" "\x8D" "\x8E" " \x8C" "\xA0" "\xAC" "\xA0" ", \xAC" "\xEB" " \xA2" "\xE1" "\xA5" " \xE2" "\xEF" "\xA6" "\xA5" "\xAB" "\xAE" " \xA1" "\xAE" "\xAB" "\xEC" "\xAD" "\xEB" " Live 2020");
+        if (i == 7) std::snprintf(row, sizeof row, "%s", "\x87" "\xA5" "\xAC" "\xE4" "\xA8" "\xE0" "\xA0" " - \x95" "\xAE" "\xE7" "\xA5" "\xE8" "\xEC" " (\xAA" "\xAE" "\xAD" "\xE6" "\xA5" "\xE0" "\xE2" " \xA2" " \x8E" "\xAB" "\xA8" "\xAC" "\xAF" "\xA8" "\xA9" "\xE1" "\xAA" "\xAE" "\xAC" ", \xAF" "\xAE" "\xAB" "\xAD" "\xA0" "\xEF" " \xA2" "\xA5" "\xE0" "\xE1" "\xA8" "\xEF" ")");
+        put_str(i < 9 ? b : rest, row);
       }
+      cmd(0x79, rest);
       cmd(0x77, b);
       sleep_ms(400);
       shot(shots, "list");
@@ -703,8 +727,8 @@ int main(int argc, char** argv)
   model_run = false;
   model.join();
   for (int i = 0; i < 100 && tasks; i++) sleep_ms(10);
-  std::printf("tasks_left=%d\nmodules_open=%d\ncore_loads=%d\ncore_backs=%d\n", (int)tasks, modules_open,
-              core_loads, core_backs);
+  std::printf("tasks_left=%d\nmodules_open=%d\nmodule_opens=%d\ncore_loads=%d\ncore_backs=%d\n", (int)tasks,
+              modules_open, module_opens, core_loads, core_backs);
   std::printf("audio_state_max=%u\n", audio_state_max);
 
   // итоги ядра: какие кадры ролика не показаны (диапазоны; при перемотке вперёд — пропущенные ею)

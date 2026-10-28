@@ -1,0 +1,3 @@
+# Копия SDK сверяется build.py по SHA-256 из vendor/manifest.json: байты хранятся без
+# преобразования концов строк.
+vendor/** -text

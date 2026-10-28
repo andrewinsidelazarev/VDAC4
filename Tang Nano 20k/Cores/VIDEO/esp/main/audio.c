@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0
  * VIDEO.ELF: звук ролика. Ядро видео кладёт байты звуковых чанков (NNwb) в FIFO звука (1024 слова,
  * окно LINK 0x2000; R_AU_WP — сколько записано, эпоха потока и пауза), отсюда они читаются,
- * декодируются (PCM — здесь, MP3 — модулем MP3.ELF) и идут на ЦАП ESP (pcm_write).
+ * декодируются (PCM — здесь, MP3 — декодером MP3.ELF плеера, вкомпилированным в VIDEO.ELF) и идут
+ * на ЦАП ESP (pcm_write).
  *
  * ТЕМП И СИНХРОННОСТЬ. Ведущий — темп ядра (кадры по выходным кадрам 50 Гц): он ровный и не
  * зависит от того, где в файле лежит звук. Звук держится у картинки: время картинки — номер
@@ -10,7 +11,8 @@
  * вставленная тишина). Расходятся больше SYNC_MS — звук позади: лишнее входящее выбрасывается
  * (ещё не выброшенное уже в счёте — иначе поправка раскачивается); звук впереди (картинка
  * встала: поток не успел) — вставляется тишина. После начала звука и после паузы — точно
- * (ALIGN_MS). Очередь ЦАП держится короткой (QUEUE_MS), поэтому поправка действует сразу.
+ * (ALIGN_MS). Очередь ЦАП держится короткой (буфер DMA ESP + QUEUE_MS), поэтому поправка
+ * действует сразу.
  * Режим часов звука ядра (R_AU_CTL бит 1) не включается: если звук в файле лежит позже своего кадра
  * дальше, чем разбор опережает показ (1–2 кадра), часы встали бы навсегда.
  *
@@ -34,7 +36,14 @@
 #include "video.h"
 #include "zm_source.h"
 
-#define QUEUE_MS     120u        /* очередь ЦАП не длиннее */
+#define QUEUE_MS     60u         /* очередь ЦАП сверх буфера DMA ESP не длиннее */
+/* pcm_queued_ms() прошивки ESP считает и буфер DMA I2S: 8 × 480 кадров (audio_player.cpp,
+   kDmaDescriptors × kDmaFrames) — 87 мс при 44,1 кГц, 120 при 32, 174 при 22,05. Прежде предел
+   очереди был 120 мс на всё: при 22,05 кГц сразу после записи очередь уже 174 мс, звук шёл кусками
+   по 23 мс раз в ~55 мс (ЦАП получал ~8,3 тыс. кадров/с вместо 22 050, «fr16677/2000ms udf27»),
+   отставал, и подстройка выбрасывала по 250 мс каждые 100 мс — ролик «тормозил» (28.10.2026, Muse
+   22 кГц; на пути FT812 звук шёл через GS). */
+#define DMA_FRAMES   3840u
 #define START_MS     60u         /* начать вывод, когда принято на столько звука */
 #define SYNC_MS      30u         /* расхождение с картинкой больше — поправка */
 #define ALIGN_MS     8u          /* после начала звука и после паузы — до такого */
@@ -87,14 +96,27 @@ static void ring_reset(void)
   gap_shift = 0;
 }
 
-/* --- декодер MP3 (MP3.ELF) ---------------------------------------------------------------------- */
+/* --- декодер MP3 ------------------------------------------------------------------------------- */
+/* Исходник MP3.ELF плеера (Sound/modules/mp3/main/mp3_source.c, Helix), собранный в VIDEO.ELF: его
+   main переименован в mp3_main (main/CMakeLists.txt). Прежде VIDEO.ELF открывал MP3.ELF из кэша
+   модулей ESP, а туда его кладёт только плагин плеера — после других модулей (NES, NEXT, VIDEO)
+   его в кэше не было, и звук MP3 выключался («MP3.ELF not available»). */
+int mp3_main(int argc, char* argv[]);
+
 static zm_host_t host;
 static const zm_source_t* mp3;
-static void* mp3_module;
 static void* mp3_inst;
 static size_t host_read(void* d, size_t n) { return ring_get((uint8_t*)d, (uint32_t)n); }
 static size_t host_available(void) { return ring_used(); }
 static int host_ended(void) { return 0; }
+/* состояние декодера (~9 КБ) просится во внутреннюю память; её при работе ядра видео мало (Wi-Fi,
+   LWIP) — тогда в PSRAM: 44,1 кГц стерео хватает и её */
+static void* host_alloc(size_t size, uint32_t caps)
+{
+  void* p = core->alloc(size, caps);
+  if (!p && caps != ZM_MEM_PSRAM) p = core->alloc(size, ZM_MEM_PSRAM);
+  return p;
+}
 
 static void mp3_close(void)
 {
@@ -104,19 +126,16 @@ static void mp3_close(void)
 static void mp3_unload(void)
 {
   mp3_close();
-  if (mp3_module) core->module_close(mp3_module);
-  mp3_module = NULL;
   mp3 = NULL;
 }
 static int mp3_load(void)
 {
   if (mp3) return 1;
-  int entry = 0;
   /* поля до make_room: поток без файла целиком, помощника и rest у этого хозяина нет */
   host.size = (uint16_t)offsetof(zm_host_t, make_room);
   host.abi_major = ZM_SOURCE_ABI_MAJOR;
   host.abi_minor = ZM_SOURCE_ABI_MINOR;
-  host.alloc = core->alloc;
+  host.alloc = host_alloc;
   host.free = core->free;
   host.log = core->log;
   host.input_read = host_read;
@@ -124,12 +143,10 @@ static int mp3_load(void)
   host.input_ended = host_ended;
   host.file_type = "MP3";
   host.stream_offset = UINT32_MAX;
-  if (core->module_open("MP3.ELF", &host, &mp3, &mp3_module, &entry) != ZM_OK || entry != ZM_SOURCE_ABI_MAJOR ||
-      !mp3 || mp3->abi_major != ZM_SOURCE_ABI_MAJOR) {
-    if (mp3_module) core->module_close(mp3_module);
-    mp3_module = NULL;
+  char* argv[] = {(char*)"MP3", (char*)&host, (char*)&mp3, NULL};
+  if (mp3_main(3, argv) != ZM_SOURCE_ABI_MAJOR || !mp3 || mp3->abi_major != ZM_SOURCE_ABI_MAJOR) {
     mp3 = NULL;
-    core->log("video: MP3.ELF not available");
+    core->log("video: MP3 decoder did not start");
     return 0;
   }
   return 1;
@@ -356,14 +373,23 @@ static int64_t video_ms(asess_t* a, uint32_t now)
   return (int64_t)(((uint64_t)(base + slots - 1) * per + since) / 1000u);
 }
 
-/* Звук: байты звука в файле до начала потока (индекс перемотки плагина) + кадры PCM, отзвучавшие с
-   начала потока (выдано на ЦАП − очередь + выброшенное − тишина), с выбросом, который ещё впереди. */
+/* Звук: начало потока + кадры PCM, отзвучавшие с начала потока (выдано на ЦАП − очередь +
+   выброшенное − тишина), с выбросом, который ещё впереди. Начало потока у PCM — байты звука в
+   файле до него (индекс перемотки плагина) через nAvgBytesPerSec: точно. У MP3 nAvgBytesPerSec
+   заголовка — лишь средний битрейт, у VBR неточный или 0: после перемотки звук считался впереди
+   или позади на десятки секунд (28.10.2026 на плате — подстройка «largest 264205 ms», ошибка росла
+   с каждой перемоткой вперёд). Поэтому у MP3 начало — время кадра, с которого идёт поток: плагин
+   начинает поток с записи перемотки, и звук за ней в файле — того же места ролика. */
 static int64_t audio_ms(const asess_t* a)
 {
   core->mutex_lock(V.lock);
   const uint32_t base = V.status.audio_base;
+  const uint32_t base_frame = V.status.base_frame;
+  const uint32_t per = V.status.us_frame ? V.status.us_frame : 40000u;
   core->mutex_unlock(V.lock);
-  const int64_t base_ms = a->avg_bytes ? (int64_t)((uint64_t)base * 1000u / a->avg_bytes) : 0;
+  int64_t base_ms;
+  if (a->tag == 1) base_ms = a->avg_bytes ? (int64_t)((uint64_t)base * 1000u / a->avg_bytes) : 0;
+  else base_ms = (int64_t)((uint64_t)base_frame * per / 1000u);
   const uint64_t q = (uint64_t)core->pcm_queued_ms() * a->out_rate / 1000u;
   const int64_t played = (int64_t)a->written - (int64_t)q + a->content_shift + gap_shift + a->fix_drop;
   return base_ms + played * 1000 / (int64_t)a->out_rate;
@@ -411,7 +437,8 @@ static void step(asess_t* a)
   }
 
   /* выдать на ЦАП, пока очередь короткая */
-  while (V.running && V.session_live && (!a->open || core->pcm_queued_ms() < QUEUE_MS)) {
+  const uint32_t queue_ms = QUEUE_MS + (a->out_rate ? DMA_FRAMES * 1000u / a->out_rate : 0);
+  while (V.running && V.session_live && (!a->open || core->pcm_queued_ms() < queue_ms)) {
     uint32_t n = decode(a, FRAMES);
     if (!n) break;
     if (!a->open) {                          /* MP3: частота известна после первых кадров */
@@ -457,12 +484,17 @@ static void step(asess_t* a)
       uint32_t ms = (uint32_t)(d > FIX_MAX_MS ? FIX_MAX_MS : d);
       uint32_t n = ms * a->out_rate / 1000u;
       memset(frames_buf, 0, sizeof frames_buf);
-      a->content_shift -= n;
+      /* в счёт — только тишина, которую ЦАП принял: pcm_write ждёт места не дольше 0,5 с, и
+         непринятая прежде навсегда сдвигала время звука назад */
+      const uint64_t before = a->written;
       while (n) {
         const uint32_t k = n > FRAMES ? FRAMES : n;
+        const uint64_t was = a->written;
         write_frames(a, frames_buf, k);
+        if (a->written - was < k) break;
         n -= k;
       }
+      a->content_shift -= (int64_t)(a->written - before);
     } else if (d < -lim) {
       /* звук позади: выбросить — но только из принятого сверх START_MS. Звук, лежащий в файле
          позже своих кадров дальше, чем разбор опережает показ (1–2 кадра), догнать нечем: он

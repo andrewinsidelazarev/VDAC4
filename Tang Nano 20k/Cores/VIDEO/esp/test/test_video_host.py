@@ -1,6 +1,7 @@
 """VIDEO.ELF (приложение ESP ядра видео VDAC4) на ПК: test/video_host.cpp — заглушка ядра ESP,
 модель Tang с ядром видео (темп vp_pace, FIFO звука с эпохой, оверлеи fb_ovl), модель ЦАП и
-сценарий плагина FTVIEW4; приложение и MP3.ELF (Helix) — те же исходники, что в ELF. Сборка MSVC
+сценарий плагина FTVIEW4; приложение и декодер MP3.ELF (Helix, с 0.6 вкомпилирован в VIDEO.ELF) — те
+же исходники, что в ELF. Сборка MSVC
 x86 (Helix на MSVC — только x86), как у стенда PLAYER (Sound/tests/test_player_host.py).
 
 Ролики — AVI с «пиками» звука: 1 кГц по 40 мс в начале каждой секунды ролика, между ними тишина.
@@ -11,7 +12,8 @@ x86 (Helix на MSVC — только x86), как у стенда PLAYER (Sound
 - перемотка (сброс потока, новая эпоха звука): звук с нового места, синхронно;
 - звук в файле на 1 с раньше кадров (копится в кольце) и на 4 с (кольцо 512 КБ переполнено:
   самое старое выбрасывается, картинка не встаёт), звук на 10 кадров позже кадров;
-- MP3.ELF нет: картинка идёт, звука нет (состояние 3);
+- модулей в кэше ESP нет (MP3.ELF туда кладёт только плагин плеера): MP3 играет своим декодером,
+  module_open не зовётся;
 - ядро загружено (core_load), EXIT — назад в слот 0, задачи и модули закрыты;
 - панель, окно списка, сообщение — снимки вывода в E:\\zx\\cache\\tmp\\video_host\\shots_*.
 Без Visual Studio Build Tools или ffmpeg (MP3) тесты пропускаются.
@@ -44,6 +46,12 @@ sys.path.append(str(FIRMWARE / 'tests'))
 from test_weather_parse import find_vcvars, short  # noqa: E402
 
 US_FRAME = 40000
+# Буфер DMA I2S ESP (8 × 480 кадров; модель ЦАП video_host повторяет его с 0.8): кадр звучит на столько
+# позже, чем ушёл из очереди. Догнать это можно, только если разбор ядра опередил показ на столько
+# же, а модель ядра опережает на 1–2 кадра, и то не всегда: предел «позже кадра» больше на этот
+# буфер (при 44,1 кГц — 87 мс, при 22,05 — 174). Обрывы звука (то, из-за чего ролик 22 кГц
+# «тормозил», 28.10.2026) ловит отдельно common(): ЦАП не пустеет посреди звука.
+DMA_FRAMES = 3840
 BEEP_MS = 40
 
 
@@ -208,6 +216,7 @@ class VideoHostTest(unittest.TestCase):
         self.assertEqual(res['core_backs'], '1')
         self.assertEqual(res['tasks_left'], '0')
         self.assertEqual(res['modules_open'], '0')
+        self.assertEqual(res['module_opens'], '0')          # всё своё: кэш модулей ESP не нужен
         self.assertEqual(res['audio_bytes_skipped'], '0')   # ядро не пропускает звук: приём включён всегда
         if audio:
             self.assertEqual(res['audio_state_max'], '2')
@@ -217,7 +226,9 @@ class VideoHostTest(unittest.TestCase):
             gaps = [u for u in map(float, filter(None, res['pcm_underruns'].split(','))) if u < end - 250]   # хвост: звук кончается чуть раньше последнего кадра
             self.assertEqual(gaps, [], f'ЦАП опустел посреди звука: {res["pcm_underruns"]}')
 
-    def check_sync(self, res, first: int, last: int, lo: float, hi: float, skip=()):
+    def check_sync(self, res, first: int, last: int, lo: float, hi: float, skip=(), rate: int = 0):
+        if rate:
+            hi += DMA_FRAMES * 1000 / rate
         got = dict(offsets(res))
         for s in range(first, last + 1):
             if s in skip:
@@ -242,7 +253,7 @@ class VideoHostTest(unittest.TestCase):
         self.assertEqual(len(missing), 1, res['frames_missing'])
         self.assertTrue(missing[0].endswith('-249'), res['frames_missing'])
         lo_skip = (int(missing[0].split("-")[0]) * US_FRAME // 1000 - 200) // 1000 + 1   # пик у места перемотки — неясен
-        self.check_sync(res, 1, 11, -40, 40, skip=[4, *range(lo_skip, 11)])   # пик 4 — на месте паузы
+        self.check_sync(res, 1, 11, -40, 40, skip=[4, *range(lo_skip, 11)], rate=rate)   # пик 4 — на месте паузы
 
     def test_pcm8_stereo_16x9(self):
         rate, frames = 22050, 200
@@ -255,7 +266,7 @@ class VideoHostTest(unittest.TestCase):
         to_png(shots)
         self.common(res, rate, 2)
         self.assertEqual(res['frames_missing'], '')
-        self.check_sync(res, 1, 7, -40, 40)
+        self.check_sync(res, 1, 7, -40, 40, rate=rate)
 
     def test_pcm16_stereo_audio_ahead_1s(self):
         rate, frames = 44100, 250
@@ -265,7 +276,7 @@ class VideoHostTest(unittest.TestCase):
         res = run(avi)
         self.common(res, rate, 2)
         self.assertEqual(res['frames_missing'], '')
-        self.check_sync(res, 1, 9, -40, 40)
+        self.check_sync(res, 1, 9, -40, 40, rate=rate)
 
     def test_pcm16_stereo_audio_ahead_4s(self):
         """Кольцо 2 МБ (12 с такого звука) держит перекос 4 с целиком."""
@@ -276,7 +287,7 @@ class VideoHostTest(unittest.TestCase):
         res = run(avi)
         self.common(res, rate, 2)
         self.assertEqual(res['frames_missing'], '')
-        self.check_sync(res, 1, 11, -40, 40)
+        self.check_sync(res, 1, 11, -40, 40, rate=rate)
 
     def test_pcm16_stereo_ring_overflow(self):
         """PSRAM дала только 512 КБ (3 с), перекос 4 с: картинка не встаёт, часть звука теряется,
@@ -302,7 +313,7 @@ class VideoHostTest(unittest.TestCase):
         res = run(avi)
         self.common(res, rate, 1)
         self.assertEqual(res['frames_missing'], '')
-        self.check_sync(res, 1, 7, -40, 40)
+        self.check_sync(res, 1, 7, -40, 40, rate=rate)
 
     def test_pcm16_audio_far_behind(self):
         """Звук на 10 кадров позже своих кадров: догнать нечем (приходит в реальном времени) —
@@ -314,7 +325,7 @@ class VideoHostTest(unittest.TestCase):
         res = run(avi)
         self.common(res, rate, 1)
         self.assertEqual(res['frames_missing'], '')
-        self.check_sync(res, 1, 7, 250, 450)
+        self.check_sync(res, 1, 7, 250, 450, rate=rate)
 
     def test_mp3_stereo_pause_seek(self):
         if not FFMPEG.exists():
@@ -329,20 +340,35 @@ class VideoHostTest(unittest.TestCase):
         self.assertEqual(len(missing), 1, res['frames_missing'])
         lo_skip = (int(missing[0].split("-")[0]) * US_FRAME // 1000 - 200) // 1000 + 1   # пик у места перемотки — неясен
         # MP3: задержка кодера и декодера (~1600 отсчётов, ~37 мс) лежит в самом файле
-        self.check_sync(res, 1, 11, -40, 80, skip=[3, *range(lo_skip, 10)])   # пик 3 — на месте паузы
+        self.check_sync(res, 1, 11, -40, 80, rate=44100, skip=[3, *range(lo_skip, 10)])   # пик 3 — на месте паузы
 
-    def test_mp3_without_decoder(self):
+    def test_mp3_seek_with_wrong_avg_bytes(self):
+        # nAvgBytesPerSec заголовка у MP3 (VBR) неточен или 0 — после перемотки время звука берётся
+        # по кадру начала потока, не по байтам (на плате 28.10.2026 — расхождение до 264 с)
+        if not FFMPEG.exists():
+            self.skipTest('нет ffmpeg')
+        frames = 300
+        mp3 = mp3_bytes(frames * US_FRAME / 1e6)
+        for avg in (0, 6000, 40000):          # настоящий — 16 000 (128 кбит/с)
+            with self.subTest(avg=avg):
+                avi = BUILD / f'mp3_avg{avg}.avi'
+                make_avi(avi, frames, wfx(0x55, 2, 44100, 0, avg, 1), mp3)
+                res = run(avi, '--seek-at', '3000', '--seek-frame', '150')
+                self.common(res, 44100, 2)
+                self.check_sync(res, 7, 11, -40, 80, rate=44100)
+
+    def test_mp3_short(self):
+        # ролик с MP3 без паузы и перемотки: звук со своего декодера, синхронно с картинкой
         if not FFMPEG.exists():
             self.skipTest('нет ffmpeg')
         frames = 150
         mp3 = mp3_bytes(frames * US_FRAME / 1e6)
-        avi = BUILD / 'mp3_nodec.avi'
+        avi = BUILD / 'mp3_short.avi'
         make_avi(avi, frames, wfx(0x55, 2, 44100, 0, 16000, 1), mp3)
-        res = run(avi, '--no-mp3', '1')
-        self.common(res, 0, 0, audio=False)
-        self.assertEqual(res['audio_state_max'], '3')
+        res = run(avi)
+        self.common(res, 44100, 2)
         self.assertEqual(res['frames_missing'], '')
-        self.assertNotEqual(res['audio_bytes_in'], '0')   # ядро звук отдаёт, ESP его выбрасывает
+        self.check_sync(res, 1, 5, -40, 80, rate=44100)
 
 
 if __name__ == '__main__':

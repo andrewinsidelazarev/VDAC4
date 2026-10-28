@@ -184,13 +184,17 @@ static int cmd_status(const uint8_t* p, uint16_t n)
   return core->reply(0xF2, st, (uint16_t)(12 + len + 1));
 }
 
+/* Окно списка: [показ (#80 — строки за пришедшими не стирать: их раньше принёс VC_ROWS)][всего]
+   [первая][выбор][текущий LE16][сообщение, 0][строки, 0…]. Имена — целиком: 17 строк в кадр 1024
+   байтов не входят, и FTVIEW4 (e14a+) шлёт строки с 9-й раньше, командой 0x79. */
 static int cmd_list(const uint8_t* p, uint16_t n)
 {
   uint8_t ok = 0;
   if (n >= 9) {
     V.core->mutex_lock(V.lock);
     video_list_t* L = &V.list;
-    L->shown = p[0];
+    const int keep = p[0] & 0x80;
+    L->shown = p[0] & 0x7F;
     L->total = rd16(p + 1);
     L->first = rd16(p + 3);
     L->selected = rd16(p + 5);
@@ -198,14 +202,29 @@ static int cmd_list(const uint8_t* p, uint16_t n)
     uint16_t at = 9;
     at += take_str(L->message, sizeof L->message, p + at, (uint16_t)(n - at));
     for (int i = 0; i < LIST_ROWS; i++) {
-      L->rows[i][0] = 0;
       if (at < n) at += take_str(L->rows[i], sizeof L->rows[i], p + at, (uint16_t)(n - at));
+      else if (!keep) L->rows[i][0] = 0;
     }
     V.ui_serial++;
     V.core->mutex_unlock(V.lock);
     ok = 1;
   }
   return V.core->reply(0xF7, &ok, 1);
+}
+
+/* Строки страницы списка с [первая]: [первая][строки, 0…] — до VC_LIST, окно не перерисовывается */
+static int cmd_rows(const uint8_t* p, uint16_t n)
+{
+  uint8_t ok = 0;
+  if (n >= 1 && p[0] < LIST_ROWS) {
+    V.core->mutex_lock(V.lock);
+    uint16_t at = 1;
+    for (int i = p[0]; i < LIST_ROWS && at < n; i++)
+      at += take_str(V.list.rows[i], sizeof V.list.rows[i], p + at, (uint16_t)(n - at));
+    V.core->mutex_unlock(V.lock);
+    ok = 1;
+  }
+  return V.core->reply(0xF9, &ok, 1);
 }
 
 static int cmd_msg(const uint8_t* p, uint16_t n)
@@ -269,6 +288,10 @@ static int command(uint8_t cmd, const uint8_t* p, uint16_t n)
   case 0x78:
     status_ms = core->millis();
     cmd_msg(p, n);
+    return ZM_OK;
+  case 0x79:
+    status_ms = core->millis();
+    cmd_rows(p, n);
     return ZM_OK;
   default:
     return ZM_ERROR;

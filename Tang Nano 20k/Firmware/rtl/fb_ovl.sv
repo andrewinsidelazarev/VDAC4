@@ -8,11 +8,16 @@
 // ХОЛСТЫ — в SDRAM, в регионе с адреса слова REGION (512 КБ): точка — RGB565, в слове две
 // точки ([15:0] — левая). Строка холста занимает ⌈w/16⌉·8 слов (ширина, округлённая до
 // 16 точек: строки выровнены на пакет SDRAM); строка r оверлея — с base + r·шаг слов
-// региона. ESP пишет холсты окном LINK (fb_link: адреса 0x80000…0xFFFFF — слова региона
+// региона. Режим 4 бит (cfg_p4, 1.42): точка — номер цвета палитры оверлея, восемь точек в
+// слове ([3:0] — левая), строка — ⌈w/64⌉·8 слов. Палитра — 16 цветов RGB565, у каждого своя
+// непрозрачность 0…16 (0 — картинка, 16 — цвет; pal_*): так текст непрозрачен и сглажен, а фон
+// под ним полупрозрачен (меню файлов плеера VIDEO.ELF в точках вывода 720p — прежде холст ×2
+// RGB565: окно 780×616 ×1 в RGB565 в регион не входит). Прозрачность оверлея (cfg_alpha) в
+// режиме 4 бит не действует. ESP пишет холсты окном LINK (fb_link: адреса 0x80000…0xFFFFF — слова региона
 // подряд), запись идёт через очередь в домен SDRAM пакетами по 8 слов.
 //
 // НАСТРОЙКИ оверлея k (регистры LINK, ts_fb_core) берутся в начале кадра: вкл., ×2 (точка
-// холста — 2×2 точки вывода), прозрачность a (0…15: вывод = картинка + ⌊(оверлей −
+// холста — 2×2 точки вывода), 4 бит, прозрачность a (0…15: вывод = картинка + ⌊(оверлей −
 // картинка)·(a + 1)/16⌋; 15 — непрозрачный), положение (x, y) на выводе, размер холста
 // (w ≤ 1024 — шире не показывается, h), начало холста в регионе. Вне прямоугольника —
 // картинка как есть.
@@ -23,8 +28,9 @@
 // показывается другая. Не успела — видна прежняя. Чтение SDRAM на строку вывода: оба
 // оверлея вместе разумно держать в ~320 словах (640 точек холста ×1).
 //
-// Конвейер (такт = точка): 0 — координаты, адрес буфера; 1 — слово буфера; 2 — точка,
-// каналы 8 бит; 3 — оверлей 0; 4 — оверлей 1; выход — регистр. Видео задержано на LAT.
+// Конвейер (такт = точка): 0 — координаты, адрес буфера; 1 — слово буфера; 2 — точка (RGB565
+// или номер цвета); 3 — цвет и непрозрачность (палитра); 4 — оверлей 0; 5 — оверлей 1; выход —
+// регистр. Видео задержано на LAT.
 module fb_ovl #(
     parameter int          N      = 2,
     parameter logic [20:0] REGION = 21'h108000,
@@ -36,12 +42,18 @@ module fb_ovl #(
     input  wire              prst_n,
     input  wire [N-1:0]      cfg_on,
     input  wire [N-1:0]      cfg_x2,
+    input  wire [N-1:0]      cfg_p4,         // точка — 4 бита, номер цвета палитры
     input  wire [N*4-1:0]    cfg_alpha,
     input  wire [N*11-1:0]   cfg_x,
     input  wire [N*10-1:0]   cfg_y,
     input  wire [N*11-1:0]   cfg_w,
     input  wire [N*10-1:0]   cfg_h,
     input  wire [N*17-1:0]   cfg_base,
+    // палитра оверлея pal_k: цвет pal_idx ← {непрозрачность 0…16, RGB565} (домен пикселей)
+    input  wire              pal_we,
+    input  wire [$clog2(N > 1 ? N : 2)-1:0] pal_k,
+    input  wire [3:0]        pal_idx,
+    input  wire [20:0]       pal_data,
     // окно записи LINK: слово ow_addr региона
     input  wire              ow_stb,
     input  wire [16:0]       ow_addr,
@@ -103,6 +115,7 @@ module fb_ovl #(
     // настройки кадра
     reg          f_on   [0:N-1];
     reg          f_x2   [0:N-1];
+    reg          f_p4   [0:N-1];
     reg  [4:0]   f_a1   [0:N-1];             // a + 1
     reg  [10:0]  f_x    [0:N-1];
     reg  [10:0]  f_y    [0:N-1];
@@ -131,7 +144,8 @@ module fb_ovl #(
         if (!prst_n) begin
             rq_tog <= '0; vb_cnt <= '0; vy_a <= '0; vy_b <= '0; cy_a <= '0; cy_b <= '0;
             for (int k = 0; k < N; k++) begin
-                f_on[k] <= 1'b0; f_x2[k] <= 1'b0; f_a1[k] <= 5'd16; f_x[k] <= '0; f_y[k] <= '0;
+                f_on[k] <= 1'b0; f_x2[k] <= 1'b0; f_p4[k] <= 1'b0; f_a1[k] <= 5'd16; f_x[k] <= '0;
+                f_y[k] <= '0;
                 f_sw[k] <= '0; f_ye[k] <= '0; f_base[k] <= '0; f_words[k] <= '0;
                 rq_row[k] <= '0; rq_last[k] <= 11'h7FF;
             end
@@ -143,6 +157,7 @@ module fb_ovl #(
                 f_on[k]    <= cfg_on[k] && cfg_w[k*11 +: 11] != 11'd0 && cfg_w[k*11 +: 11] <= 11'd1024
                               && cfg_h[k*10 +: 10] != 10'd0;
                 f_x2[k]    <= cfg_x2[k];
+                f_p4[k]    <= cfg_p4[k];
                 f_a1[k]    <= {1'b0, cfg_alpha[k*4 +: 4]} + 5'd1;
                 f_x[k]     <= cfg_x[k*11 +: 11];
                 f_y[k]     <= {1'b0, cfg_y[k*10 +: 10]};
@@ -150,7 +165,8 @@ module fb_ovl #(
                 f_ye[k]    <= {2'b0, cfg_y[k*10 +: 10]} +
                               (cfg_x2[k] ? {1'b0, cfg_h[k*10 +: 10], 1'b0} : {2'b0, cfg_h[k*10 +: 10]});
                 f_base[k]  <= cfg_base[k*17 +: 17];
-                f_words[k] <= 10'((cfg_w[k*11 +: 11] + 11'd15) >> 4) << 3;
+                f_words[k] <= cfg_p4[k] ? 10'((cfg_w[k*11 +: 11] + 11'd63) >> 6) << 3
+                                        : 10'((cfg_w[k*11 +: 11] + 11'd15) >> 4) << 3;
                 rq_last[k] <= 11'h7FF;
             end
         end else begin : req
@@ -199,12 +215,24 @@ module fb_ovl #(
     // =========================================================================================
     // Домен пикселей: смешение
     // =========================================================================================
+    // палитры режима 4 бит: {непрозрачность 0…16, RGB565}
+    reg  [20:0]  pal [0:N-1][0:15];
+    always_ff @(posedge pclk or negedge prst_n) begin
+        if (!prst_n) begin
+            for (int k = 0; k < N; k++) for (int i = 0; i < 16; i++) pal[k][i] <= '0;
+        end else if (pal_we) begin
+            for (int k = 0; k < N; k++) if (pal_k == k[$bits(pal_k)-1:0]) pal[k][pal_idx] <= pal_data;
+        end
+    end
+
     // такт 0: в оверлее ли точка, адрес слова буфера
-    reg  [N-1:0] s1_in, s2_in;
-    reg  [N-1:0] s1_hi;                      // точка — старшая половина слова
-    reg  [7:0]   s1_r, s1_g, s1_b, s2_r, s2_g, s2_b;
-    reg  [2:0]   s1_sync, s2_sync, s3_sync, s4_sync;   // {DE, HS, VS}
-    reg  [15:0]  s2_c [0:N-1];               // точка оверлея k, RGB565
+    reg  [N-1:0] s1_in, s2_in, s3_in;
+    reg  [2:0]   s1_sel [0:N-1];             // точка в слове: половина (RGB565) или номер (4 бит)
+    reg  [7:0]   s1_r, s1_g, s1_b, s2_r, s2_g, s2_b, s3_r, s3_g, s3_b;
+    reg  [2:0]   s1_sync, s2_sync, s3_sync;  // {DE, HS, VS}
+    reg  [15:0]  s2_c [0:N-1];               // точка оверлея k: RGB565 или номер цвета ([3:0])
+    reg  [15:0]  s3_c [0:N-1];               // цвет точки оверлея k, RGB565
+    reg  [4:0]   s3_a1 [0:N-1];              // её непрозрачность 0…16
     // dx — точка от левого края оверлея; dx < 0 (разряд 11) — левее
     reg  [11:0]  dx [0:N-1];
     always_comb begin
@@ -212,23 +240,32 @@ module fb_ovl #(
             logic [10:0] cx;
             dx[k] = {1'b0, x} - {1'b0, f_x[k]};
             cx = f_x2[k] ? {1'b0, dx[k][10:1]} : dx[k][10:0];
-            lb_ra[k] = {cy_a[k], cx[9:1]};
+            lb_ra[k] = f_p4[k] ? {cy_a[k], 2'b00, cx[9:3]} : {cy_a[k], cx[9:1]};
         end
     end
     always_ff @(posedge pclk or negedge prst_n) begin
         if (!prst_n) begin
-            s1_in <= '0; s2_in <= '0; s1_hi <= '0;
+            s1_in <= '0; s2_in <= '0; s3_in <= '0;
             s1_r <= '0; s1_g <= '0; s1_b <= '0; s2_r <= '0; s2_g <= '0; s2_b <= '0;
-            s1_sync <= '0; s2_sync <= '0;
-            for (int k = 0; k < N; k++) s2_c[k] <= '0;
-        end else begin
+            s3_r <= '0; s3_g <= '0; s3_b <= '0;
+            s1_sync <= '0; s2_sync <= '0; s3_sync <= '0;
             for (int k = 0; k < N; k++) begin
-                s1_in[k] <= vy_a[k] && in_de && !dx[k][11] && dx[k] < f_sw[k];
-                s1_hi[k] <= f_x2[k] ? dx[k][1] : dx[k][0];
-                s2_c[k]  <= s1_hi[k] ? lb_q[k][31:16] : lb_q[k][15:0];
+                s1_sel[k] <= '0; s2_c[k] <= '0; s3_c[k] <= '0; s3_a1[k] <= '0;
+            end
+        end else begin
+            for (int k = 0; k < N; k++) begin : px
+                logic [2:0] cs;
+                cs = f_x2[k] ? dx[k][3:1] : dx[k][2:0];       // младшие разряды точки холста
+                s1_in[k]  <= vy_a[k] && in_de && !dx[k][11] && dx[k] < f_sw[k];
+                s1_sel[k] <= f_p4[k] ? cs : {2'b00, cs[0]};
+                s2_c[k]   <= f_p4[k] ? {12'd0, lb_q[k][{s1_sel[k], 2'b00} +: 4]}
+                                     : (s1_sel[k][0] ? lb_q[k][31:16] : lb_q[k][15:0]);
+                s3_c[k]   <= f_p4[k] ? pal[k][s2_c[k][3:0]][15:0] : s2_c[k];
+                s3_a1[k]  <= f_p4[k] ? pal[k][s2_c[k][3:0]][20:16] : f_a1[k];
             end
             s1_r <= in_r; s1_g <= in_g; s1_b <= in_b; s1_sync <= {in_de, in_hs, in_vs};
             s2_r <= s1_r; s2_g <= s1_g; s2_b <= s1_b; s2_sync <= s1_sync; s2_in <= s1_in;
+            s3_r <= s2_r; s3_g <= s2_g; s3_b <= s2_b; s3_sync <= s2_sync; s3_in <= s2_in;
         end
     end
 
@@ -236,26 +273,29 @@ module fb_ovl #(
     function automatic logic [7:0] ex5(input logic [4:0] v); ex5 = {v, v[4:2]}; endfunction
     function automatic logic [7:0] ex6(input logic [5:0] v); ex6 = {v, v[5:4]}; endfunction
 
-    // оверлей k: v + ⌊(c − v)·(a + 1)/16⌋ — (c − v) × (a + 1) со знаком в MULT9X9. Сумма всегда
-    // в 0…255 (при c < v она ≥ c, при c ≥ v — ≤ c), поэтому хватает 8 разрядов.
+    // оверлей k: v + ⌊(c − v)·(a + 1)/16⌋ — (c − v) × (a + 1) со знаком в MULT9X9 (a + 1 —
+    // непрозрачность точки: прозрачность оверлея + 1 или из палитры). Сумма всегда в 0…255 (при
+    // c < v она ≥ c, при c ≥ v — ≤ c), поэтому хватает 8 разрядов.
     reg  [7:0]   bv_r [0:N], bv_g [0:N], bv_b [0:N];   // вход ступени k (bv[N] — выход)
     reg  [N-1:0] bin_q [0:N];                          // в оверлее (ступени после k)
     reg  [15:0]  bc_q  [0:N-1][0:N-1];                 // точка оверлея j на ступени k
+    reg  [4:0]   ba_q  [0:N-1][0:N-1];                 // её непрозрачность
     always_comb begin
-        bv_r[0] = s2_r; bv_g[0] = s2_g; bv_b[0] = s2_b;
+        bv_r[0] = s3_r; bv_g[0] = s3_g; bv_b[0] = s3_b;
     end
     generate for (gk = 0; gk < N; gk++) begin : g_bl
-        wire [15:0] c   = gk == 0 ? s2_c[0] : bc_q[gk][gk];
-        wire        on  = gk == 0 ? s2_in[0] : bin_q[gk][gk];
+        wire [15:0] c   = gk == 0 ? s3_c[0] : bc_q[gk][gk];
+        wire [4:0]  a1  = gk == 0 ? s3_a1[0] : ba_q[gk][gk];
+        wire        on  = gk == 0 ? s3_in[0] : bin_q[gk][gk];
         wire [7:0]  cr  = ex5(c[15:11]), cg = ex6(c[10:5]), cb = ex5(c[4:0]);
         wire [7:0]  vr  = bv_r[gk], vg = bv_g[gk], vb = bv_b[gk];
         wire [8:0]  dr  = {1'b0, cr} - {1'b0, vr};       // c − v со знаком
         wire [8:0]  dg  = {1'b0, cg} - {1'b0, vg};
         wire [8:0]  db  = {1'b0, cb} - {1'b0, vb};
         wire [17:0] pr, pg, pb;
-        ft_mul9 #(.SIGNED(1'b1)) mr (.clk(pclk), .a(dr), .b({4'd0, f_a1[gk]}), .p(pr));
-        ft_mul9 #(.SIGNED(1'b1)) mg (.clk(pclk), .a(dg), .b({4'd0, f_a1[gk]}), .p(pg));
-        ft_mul9 #(.SIGNED(1'b1)) mb (.clk(pclk), .a(db), .b({4'd0, f_a1[gk]}), .p(pb));
+        ft_mul9 #(.SIGNED(1'b1)) mr (.clk(pclk), .a(dr), .b({4'd0, a1}), .p(pr));
+        ft_mul9 #(.SIGNED(1'b1)) mg (.clk(pclk), .a(dg), .b({4'd0, a1}), .p(pg));
+        ft_mul9 #(.SIGNED(1'b1)) mb (.clk(pclk), .a(db), .b({4'd0, a1}), .p(pb));
         always_ff @(posedge pclk or negedge prst_n) begin
             if (!prst_n) begin
                 bv_r[gk + 1] <= '0; bv_g[gk + 1] <= '0; bv_b[gk + 1] <= '0;
@@ -271,12 +311,20 @@ module fb_ovl #(
     always_ff @(posedge pclk or negedge prst_n) begin
         if (!prst_n) begin
             for (int k = 0; k <= N; k++) bin_q[k] <= '0;
-            for (int k = 0; k < N; k++) for (int j = 0; j < N; j++) bc_q[k][j] <= '0;
+            for (int k = 0; k < N; k++) for (int j = 0; j < N; j++) begin
+                bc_q[k][j] <= '0; ba_q[k][j] <= '0;
+            end
         end else begin
-            bin_q[1] <= s2_in;
-            for (int j = 0; j < N; j++) bc_q[1 < N ? 1 : 0][j] <= s2_c[j];
+            bin_q[1] <= s3_in;
+            for (int j = 0; j < N; j++) begin
+                bc_q[1 < N ? 1 : 0][j] <= s3_c[j];
+                ba_q[1 < N ? 1 : 0][j] <= s3_a1[j];
+            end
             for (int k = 2; k <= N; k++) bin_q[k] <= bin_q[k - 1];
-            for (int k = 2; k < N; k++) for (int j = 0; j < N; j++) bc_q[k][j] <= bc_q[k - 1][j];
+            for (int k = 2; k < N; k++) for (int j = 0; j < N; j++) begin
+                bc_q[k][j] <= bc_q[k - 1][j];
+                ba_q[k][j] <= ba_q[k - 1][j];
+            end
         end
     end
     // синхроимпульсы — на те же N ступеней, выход — регистр
@@ -286,7 +334,7 @@ module fb_ovl #(
             for (int k = 0; k <= N; k++) sync_d[k] <= '0;
             out_r <= '0; out_g <= '0; out_b <= '0; out_de <= 1'b0; out_hs <= 1'b0; out_vs <= 1'b0;
         end else begin
-            sync_d[0] <= s2_sync;
+            sync_d[0] <= s3_sync;
             for (int k = 1; k <= N; k++) sync_d[k] <= sync_d[k - 1];
             out_r <= bv_r[N]; out_g <= bv_g[N]; out_b <= bv_b[N];
             {out_de, out_hs, out_vs} <= sync_d[N - 1];

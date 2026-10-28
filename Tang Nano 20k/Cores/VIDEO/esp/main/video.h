@@ -19,7 +19,7 @@
 extern "C" {
 #endif
 
-#define APP_VERSION "0.5"
+#define APP_VERSION "0.9"
 #define VIDEO_PERSONALITY 0x05u
 
 /* --- регистры LINK ядра видео (байтовые адреса; ts_fb_core, HAS_VIDEO) ------------------------ */
@@ -32,6 +32,8 @@ extern "C" {
 #define R_AU_CLK    0x108u      /* время проигранного звука с начала потока, мкс */
 #define W_AUDIO     0x2000u     /* окно FIFO звука: 1024 слова, младший байт — первый */
 #define R_OVL(k)    (0x0C0u + 16u * (k))   /* оверлей k: CTRL, POS, SIZE, BASE */
+#define R_OVL_PAL   0x0E0u      /* (ядро 1.42) цвет палитры: [15:0] RGB565, [20:16] непрозрачность 0…16,
+                                   [27:24] номер, [28] оверлей */
 #define W_CANVAS    0x80000u    /* окно холстов оверлеев: слово w региона — 0x80000 + 4·w */
 #define AUDIO_WORDS 1024u
 
@@ -58,7 +60,8 @@ typedef struct {
 typedef struct {
   uint8_t shown;
   uint16_t total, first, selected, current;   /* current — играющий ролик (0xFFFF — нет) */
-  char rows[LIST_ROWS][64];                    /* CP866 */
+  char rows[LIST_ROWS][100];                   /* CP866; имя целиком — по ширине строки режет hud.cpp
+                                                  (FTVIEW4 e14a+: до 96 букв, длиннее — с «...») */
   char message[64];                            /* «Reading folder...» и т. п. (пусто — строки) */
 } video_list_t;
 

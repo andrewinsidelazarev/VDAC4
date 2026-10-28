@@ -7,14 +7,16 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 |---|---|---|---|
 | **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.32 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
 | **FT812** — видеоускоритель для программ Evo, вывод 1366×768 | flash Tang, слот 1 | 1.41 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
-| **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Tang, `CORES` | 1.39, слой ESP 0.5 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`SD/CORES/VIDEO.ELF`](SD/CORES/VIDEO.ELF) |
+| **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Evo, `/WC/ESP` | 1.42, слой ESP 0.9 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`VIDEO/esp/dist/VIDEO.ELF`](VIDEO/esp/dist/VIDEO.ELF) |
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.9 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
 
 `.BIN` — само ядро. `.ELF` — его слой на ESP: клавиатура и мышь Evo, звук на ЦАП ESP, сохранения на
 карты, выход в WC. Исходники TS-Config, FT812 и ядра видео — в [`../Firmware`](../Firmware), Next и
 NES — здесь, в [`Next`](Next) и [`NES`](NES), слой ESP ядра видео — в [`VIDEO/esp`](VIDEO/esp)
-(описание ядра — [`../Docs/video-core.md`](../Docs/video-core.md)).
+(описание ядра — [`../Docs/video-core.md`](../Docs/video-core.md)). Слой ядра видео — не на карте
+Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит в `/WC/ESP` карты Evo рядом с модулями плеера,
+в ESP его отдаёт плагин [FTVIEW4](../FTVIEW4).
 
 ## Что нужно
 
@@ -25,6 +27,8 @@ NES — здесь, в [`Next`](Next) и [`NES`](NES), слой ESP ядра в�
 - Плагин Wild Commander **VDAC4 Cores** 0.13 —
   [`ESP32 S3 Zero N8R8/Network/VDAC4 Cores`](../../ESP32%20S3%20Zero%20N8R8/Network/VDAC4%20Cores): меню ядер,
   часы Evo для Next, сектора карты Evo для Next, NES из меню — сразу в меню F1 ядра.
+- Для ядра видео — плагин Wild Commander **FTVIEW4** (сборка bb34) — [`../FTVIEW4`](../FTVIEW4):
+  `build/FTVIEW4.WMF` — в `/WC` карты Evo, `VIDEO.ELF` — в `/WC/ESP`.
 - Для Next — NextZXOS на той же карте Tang (дистрибутив `sn-complete-24.11`) и правленые ROM
   (ниже, шаг 3).
 
@@ -84,7 +88,9 @@ NES — здесь, в [`Next`](Next) и [`NES`](NES), слой ESP ядра в�
 
 ## Проверено на плате
 
-2026-10-28, ESP 0.1.104, BL616 35, TS-Config 1.32:
+2026-10-28, ESP 0.1.104, BL616 35, TS-Config 1.32, FTVIEW4 bb34:
+- **Видео 1.42**, VIDEO.ELF 0.8–0.9: меню файлов и панель плеера — в точках 720p, шрифты чёткие;
+  PgUp/PgDn — соседний ролик тем же ядром, без возврата в слот 0; русские имена в меню — целиком.
 - **FT812 1.41** — вывод 1366×768 приняли телевизор LG, монитор ASUS по HDMI и Dell 16:10 через
   переходник VGA; шрифты просмотрщика текстов WC больше не режутся; пункт FT SIZE работает.
 

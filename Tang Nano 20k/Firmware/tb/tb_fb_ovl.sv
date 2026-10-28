@@ -40,8 +40,9 @@ module tb_fb_ovl;
 
     fb_ovl #(.N(2), .REGION(REGION)) dut (
         .pclk(pclk), .prst_n(rst_n),
-        .cfg_on(2'b00), .cfg_x2(2'b00), .cfg_alpha('0), .cfg_x('0), .cfg_y('0), .cfg_w('0),
-        .cfg_h('0), .cfg_base('0),
+        .cfg_on(2'b00), .cfg_x2(2'b00), .cfg_p4(2'b00), .cfg_alpha('0), .cfg_x('0), .cfg_y('0),
+        .cfg_w('0), .cfg_h('0), .cfg_base('0),
+        .pal_we(1'b0), .pal_k(1'b0), .pal_idx(4'd0), .pal_data(21'd0),
         .ow_stb(ow_stb), .ow_addr(ow_addr), .ow_data(ow_data), .ow_ovf(ow_ovf),
         .in_r(8'd0), .in_g(8'd0), .in_b(8'd0), .in_de(1'b0), .in_hs(1'b0), .in_vs(1'b0),
         .out_r(o_r), .out_g(o_g), .out_b(o_b), .out_de(o_de), .out_hs(o_hs), .out_vs(o_vs),

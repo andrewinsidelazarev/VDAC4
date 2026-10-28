@@ -13,7 +13,8 @@
 #                                       нужен sim/ft/weather2_spi.txt — запись обмена, см. tb_ft_weather2)
 #                                       и RAM_G в SDRAM против эталона (~20 с), смена листа
 #   sh scripts/run_fb_sim.sh cp       — только связь с BL616 (сопроцессор): SPI 26,67 / 30 / 13,3 МГц
-#   sh scripts/run_fb_sim.sh ovl      — только оверлеи: холст меню окном LINK → SDRAM (секунды)
+#   sh scripts/run_fb_sim.sh ovl      — только оверлеи: холст меню окном LINK → SDRAM, вывод точек
+#                                       (RGB565 и режим 4 бит с палитрой; секунды)
 # Симулятор: Icarus Verilog 13 (IVERILOG/VVP или в PATH). Установка без прав администратора:
 #   py -3 tools/bootstrap_a3_rtl_tools.py --directory E:/zx/tools/rtl --package iverilog --env ucrt64
 set -e
@@ -113,6 +114,9 @@ ovl() {
         echo "--- слово раз в $1 тактов, пауза между посылками $2"
         (cd sim/ovl && "$VVP" -n t.vvp | grep -v '^tb/')
     done
+    echo "=== оверлеи: вывод точек — RGB565 с прозрачностью, режим 4 бит с палитрой (×1, ×2)"
+    "$IV" -g2012 -DSIMULATION -s tb_fb_ovl_px -o sim/ovl/px.vvp         rtl/fb_ovl.sv rtl/ft_mul9.sv rtl/async_fifo.sv rtl/sdram_burst.sv tb/sdram_model.sv tb/tb_fb_ovl_px.sv
+    (cd sim/ovl && "$VVP" -n px.vvp | grep -v '^tb/')
 }
 
 cp() {
