@@ -15,6 +15,7 @@
 
 #include "zifi/bringup_log.hpp"
 #include "zifi/sha256.hpp"
+#include "zifi/tang_flash.hpp"
 #include "zifi/tang_link.hpp"
 #include "zifi/tang_sd.hpp"
 
@@ -95,6 +96,78 @@ bool fileSha(const char* path, uint32_t* size, uint8_t digest[32]) {
 bool fileRead(void* ctx, uint32_t offset, uint8_t* data, uint32_t size) {
   FILE* f = static_cast<FILE*>(ctx);
   return fseek(f, static_cast<long>(offset), SEEK_SET) == 0 && fread(data, 1, size, f) == size;
+}
+
+// Новое ядро на LINK после LOAD или BOOT (seq — номер команды): удача — личность 3+, а если want не 0 —
+// именно want. Смена на другое (TS-Config → FT812: перезагрузка ПЛИС после неудачной загрузки взяла
+// адрес перехода TS-Config — слот 1) — не удача: Tang — в слот 0. Отказ BL616 до команд настройки
+// ПЛИС (прошивка 15: ответ LOAD_FAIL, ПЛИС не тронута) виден в CP_INFO — ждать перезагрузку, которой
+// не будет, незачем.
+const char* waitCore(const char* n, uint32_t seq, uint32_t reloads, uint32_t want, uint32_t* version) {
+  const uint32_t start = static_cast<uint32_t>(millis());
+  while (tang::reloads() == reloads && static_cast<uint32_t>(millis()) - start < kSwitchMs) {
+    uint32_t info = 0;
+    if (tang::read(kRegCpInfo, &info, 1) && (info >> 24) == kCcInfoMagic && (info & 0xFFFF) == seq &&
+        ((info >> 16) & 0xF0) == kCcLoadFail) {
+      bringupLog(kTag, "core %s: BL616 could not load it (JTAG %u), the FPGA kept TS-Config", n,
+                 static_cast<unsigned>((info >> 16) & 0x0F));
+      return "the BL616 could not load the core, Tang stays in TS-Config";
+    }
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  if (tang::reloads() == reloads) {
+    return "no core answered on LINK after the load";
+  }
+  *version = tang::coreVersion();
+  const uint32_t personality = *version >> 24;
+  if (personality < 0x03U || (want != 0 && personality != want)) {
+    if (personality != tang::kPersonalityTs) {
+      tang::backToSlot0(10000);
+    }
+    bringupLog(kTag, "core %s: VERSION %08X instead, back to slot 0", n, static_cast<unsigned>(*version));
+    return personality < 0x03U ? "the core did not start, Tang is back in slot 0"
+                               : "another core started (not the one asked for), Tang is back in slot 0";
+  }
+  bringupLog(kTag, "core %s runs: VERSION %08X, %u ms", n, static_cast<unsigned>(*version),
+             static_cast<unsigned>(millis() - start));
+  return nullptr;
+}
+
+// Ядро из своего слота flash Tang (команда BOOT BL616). kNoSlot — ПЛИС не тронута, грузить с SD через
+// кэш: в слоте нет годного начала битстрима (синхрослово, IDCODE, адрес перехода 0), flash не
+// читается (у ядра FT812 1.31+ моста нет) или прошивка BL616 старше 35.
+const char* const kNoSlot = "no core in its Tang flash slot";
+
+const char* loadSlot(const FlashCore& core, uint32_t* version) {
+  const uint32_t address = core.slot * tang::kSlotBytes;
+  uint8_t head[128];
+  if (!tang_flash::available() || !tang_flash::read(address, head, sizeof head)) {
+    bringupLog(kTag, "core %s: Tang flash is not readable, slot %u skipped", core.name,
+               static_cast<unsigned>(core.slot));
+    return kNoSlot;
+  }
+  const char* bad = core_cache::checkHead(head, sizeof head);
+  if (bad != nullptr) {
+    bringupLog(kTag, "core %s: slot %u (%06X): %s", core.name, static_cast<unsigned>(core.slot),
+               static_cast<unsigned>(address), bad);
+    return kNoSlot;
+  }
+  tang_sd::unmount();                 // у ядра слота моста к SD нет
+  const bl616::PushIo io = {nullptr, linkRead, linkWrite, sleepMs, nowMs, nullptr};
+  core_cache::Client cache(io, esp_random());
+  const uint32_t reloads = tang::reloads();
+  tang_flash::flush();                // несохранённые настройки TS-Config — до смены ядра
+  const char* problem = cache.boot(address);
+  if (problem == core_cache::kNoBoot) {
+    bringupLog(kTag, "core %s: %s", core.name, problem);
+    return kNoSlot;
+  }
+  if (problem != nullptr) {
+    return problem;
+  }
+  bringupLog(kTag, "core %s: BL616 boots Tang flash slot %u (%06X)", core.name, static_cast<unsigned>(core.slot),
+             static_cast<unsigned>(address));
+  return waitCore(core.name, cache.lastSeq(), reloads, core.personality, version);
 }
 
 }  // namespace
@@ -204,6 +277,18 @@ const char* load(const char* name, uint32_t* version, Progress progress, void* c
   if (tang_sd::heldByWc()) {
     return tang_sd::kHeldByWc;
   }
+  // у ядра свой слот во flash Tang — оттуда; слот пуст (или BL616 старше 35) — как прочие, с SD
+  for (const FlashCore& core : kFlashCores) {
+    if (strcmp(core.name, n) == 0) {
+      const char* problem = loadSlot(core, version);
+      if (problem != kNoSlot) {
+        return problem;
+      }
+      bringupLog(kTag, "core %s: not from Tang flash slot %u, trying the Tang SD and the BL616 cache", n,
+                 static_cast<unsigned>(core.slot));
+      break;
+    }
+  }
   // ядро есть на SD — сначала свежий образ в кэш; SD нет (мост пропал, карты нет) — что в кэше
   if (tang_sd::mount() == nullptr) {
     const char* problem = sync(n, progress, ctx);
@@ -214,10 +299,7 @@ const char* load(const char* name, uint32_t* version, Progress progress, void* c
   return loadCached(n, version);
 }
 
-// Удача — ядро из кэша на LINK (личность 3+). Смена на другое (TS-Config → FT812: перезагрузка ПЛИС
-// после неудачной загрузки взяла адрес перехода TS-Config — слот 1) — не удача: Tang — в слот 0.
-// Отказ BL616 до команд настройки ПЛИС (прошивка 15: ответ LOAD_FAIL сразу, ПЛИС не тронута) виден
-// в CP_INFO — ждать перезагрузку, которой не будет, незачем.
+// Удача — ядро из кэша на LINK (личность 3+, waitCore).
 const char* loadCached(const char* name, uint32_t* version) {
   char n[16];
   if (!core_cache::normalizeName(name, n)) {
@@ -231,35 +313,12 @@ const char* loadCached(const char* name, uint32_t* version) {
   const bl616::PushIo io = {nullptr, linkRead, linkWrite, sleepMs, nowMs, nullptr};
   core_cache::Client cache(io, esp_random());
   const uint32_t reloads = tang::reloads();
+  tang_flash::flush();                // несохранённые настройки TS-Config — до смены ядра
   const char* problem = cache.load(n, nullptr);
   if (problem != nullptr) {
     return problem;
   }
-  const uint32_t seq = cache.lastSeq();
-  const uint32_t start = static_cast<uint32_t>(millis());
-  while (tang::reloads() == reloads && static_cast<uint32_t>(millis()) - start < kSwitchMs) {
-    uint32_t info = 0;
-    if (tang::read(kRegCpInfo, &info, 1) && (info >> 24) == kCcInfoMagic && (info & 0xFFFF) == seq &&
-        ((info >> 16) & 0xF0) == kCcLoadFail) {
-      bringupLog(kTag, "core %s: BL616 could not load it (JTAG %u), the FPGA kept TS-Config", n,
-                 static_cast<unsigned>((info >> 16) & 0x0F));
-      return "the BL616 could not load the core, Tang stays in TS-Config";
-    }
-    vTaskDelay(pdMS_TO_TICKS(50));
-  }
-  if (tang::reloads() == reloads) {
-    return "no core answered on LINK after the load";
-  }
-  *version = tang::coreVersion();
-  if ((*version >> 24) < 0x03U) {
-    if ((*version >> 24) != tang::kPersonalityTs) {
-      tang::backToSlot0(10000);
-    }
-    return "the core did not start, Tang is back in slot 0";
-  }
-  bringupLog(kTag, "core %s runs: VERSION %08X, %u ms", n, static_cast<unsigned>(*version),
-             static_cast<unsigned>(millis() - start));
-  return nullptr;
+  return waitCore(n, cache.lastSeq(), reloads, 0, version);
 }
 
 const char* const kNoElf = "the core has no ESP layer (ELF) on the Tang SD";

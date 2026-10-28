@@ -60,6 +60,13 @@ uint32_t g_pending[8] = {};
 // Последние настройки ядра TS-Config, какими их видел опрос (ещё не записанные — тоже)
 bool g_haveSeen = false;
 uint32_t g_seen[8] = {};
+// FT SIZE (слово 6 ячейки, [1:0]); в ячейках до 0.1.104 там 0 — 100 %
+uint32_t g_ftSize = 0;
+
+uint32_t ftSizeOf(const uint32_t* record) {
+  const uint32_t size = record[6] & 3;
+  return size == 3 ? 0 : size;
+}
 
 // ------------------------------------------------------------------
 // Мост
@@ -206,7 +213,7 @@ void buildRecord(uint32_t ctrl, const uint32_t* table, uint32_t* record) {
   for (int k = 0; k < 4; ++k) {
     record[2 + k] = (table[2 * k] & 0xFFFF) | ((table[2 * k + 1] & 0xFFFF) << 16);
   }
-  record[6] = 0;
+  record[6] = g_ftSize & 3;   // FT SIZE (с 0.1.104; ядра Tang слово 6 только суммируют)
   uint32_t sum = 0;
   for (int i = 0; i < 7; ++i) {
     sum += record[i];
@@ -316,7 +323,8 @@ uint32_t ctrlFromRecord(const uint32_t* record) {
          (((r >> 7) & 1) << 5) | (((r >> 4) & 3) << 3) | (((r >> 6) & 1) << 2);
 }
 
-// Ядро FT812 без моста: ASPECT и SIZE — те, что были в TS-Config (остальное ему не нужно)
+// Ядро FT812 без моста: ASPECT — тот, что был в TS-Config, размер — FT SIZE (с 0.1.104; до неё —
+// SIZE слота 0); остальное ему не нужно
 void pushSettings() {
   uint32_t record[8];
   const char* from = "TS-Config";
@@ -328,10 +336,15 @@ void pushSettings() {
     bringupLog(kTag, "Tang settings: FT812 core has no flash bridge and no settings are known yet: defaults");
     return;
   }
-  const uint32_t ctrl = ctrlFromRecord(record);
+  // FT SIZE: виденный в TS-Config — текущий (его могли сменить меню позже последнего опроса: в
+  // FT812 ядро уходит само, по обмену Evo, без flush()); если ESP запустилась уже при FT812 — из копии
+  if (!g_haveSeen) {
+    g_ftSize = ftSizeOf(record);
+  }
+  const uint32_t ctrl = (ctrlFromRecord(record) & ~(3U << 15)) | (g_ftSize << 15);
   const bool ok = tang::write(tang::kRegCtrl, &ctrl, 1);
-  bringupLog(kTag, "Tang settings: FT812 core (no flash bridge) gets aspect %s, size %s from %s: %s",
-             ((record[1] >> 16) & 1) ? "16:9" : "4:3", sizeName((record[1] >> 17) & 3), from,
+  bringupLog(kTag, "Tang settings: FT812 core (no flash bridge) gets aspect %s, FT size %s from %s: %s",
+             ((record[1] >> 16) & 1) ? "16:9" : "4:3", sizeName(g_ftSize), from,
              ok ? "written" : "FAILED");
 }
 
@@ -488,7 +501,12 @@ void begin(uint32_t coreVersion) {
     return;
   }
   g_available = true;
-  if (!g_haveSaved) {
+  if (g_haveSaved) {
+    g_ftSize = ftSizeOf(g_saved);
+  } else {
+    // FT SIZE в Tang не хранится: без ячеек — из копии ESP
+    uint32_t copy[8];
+    g_ftSize = recallRecord(copy) ? ftSizeOf(copy) : 0;
     // Сохранять есть смысл только изменения: текущие (значения по умолчанию) — исходная точка
     currentRecord(g_saved);
     g_haveSaved = true;
@@ -535,28 +553,56 @@ void poll() {
   if (saveRecord(record)) {
     bringupLog(kTag,
                "Tang settings saved to flash slot %d: clock %X delay %u phase %u align %u aspect %s "
-               "size %s",
+               "size %s, FT size %s",
                g_savedSlot, static_cast<unsigned>(record[1] & 0xF),
                static_cast<unsigned>(((record[1] >> 4) & 3) + 1),
                static_cast<unsigned>((record[1] >> 6) & 1), static_cast<unsigned>((record[1] >> 7) & 1),
-               ((record[1] >> 16) & 1) ? "16:9" : "4:3", sizeName((record[1] >> 17) & 3));
+               ((record[1] >> 16) & 1) ? "16:9" : "4:3", sizeName((record[1] >> 17) & 3),
+               sizeName(ftSizeOf(record)));
   } else {
     bringupLog(kTag, "Tang settings: saving FAILED");
   }
 }
 
+void flush() {
+  if (!g_available || (g_coreVersion >> 24) != 0x01) {
+    return;                           // настройки во flash ведёт только TS-Config
+  }
+  uint32_t record[8];
+  if (!currentRecord(record)) {
+    return;
+  }
+  memcpy(g_seen, record, sizeof(g_seen));
+  g_haveSeen = true;
+  g_havePending = false;
+  if (memcmp(record, g_saved, sizeof(record)) == 0) {
+    return;
+  }
+  if (saveRecord(record)) {
+    bringupLog(kTag, "Tang settings saved to flash slot %d before the core switch: aspect %s size %s FT size %s",
+               g_savedSlot, ((record[1] >> 16) & 1) ? "16:9" : "4:3", sizeName((record[1] >> 17) & 3),
+               sizeName(ftSizeOf(record)));
+  } else {
+    bringupLog(kTag, "Tang settings: saving before the core switch FAILED");
+  }
+}
+
 void describe(char* out, size_t size) {
   if (!g_available) {
-    snprintf(out, size, "settings storage off");
+    snprintf(out, size, "settings storage off, FT size %s", sizeName(g_ftSize));
     return;
   }
   snprintf(out, size,
            "flash %06X, last saved slot %d, free slot %u/%u, saves since start %u, "
-           "bridge buffer re-sent %u times",
+           "bridge buffer re-sent %u times, FT size %s",
            static_cast<unsigned>(g_jedec), g_savedSlot, static_cast<unsigned>(g_freeSlot),
            static_cast<unsigned>(kSettingsSlots), static_cast<unsigned>(g_saves),
-           static_cast<unsigned>(g_linkErrors));
+           static_cast<unsigned>(g_linkErrors), sizeName(g_ftSize));
 }
+
+uint32_t ftSize() { return g_ftSize; }
+
+void setFtSize(uint32_t size) { g_ftSize = size > 2 ? 0 : size; }
 
 }  // namespace tang_flash
 }  // namespace zifi

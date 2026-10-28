@@ -18,6 +18,12 @@ A5C3, IDCODE GW2AR-18), стирает и пишет flash Tang через яд�
 её в слот, адрес которого записан в заголовке текущего битстрима (слот 0 → 1, слот 1 → 0).
 Скрипт печатает этот адрес и предупреждает, если он ведёт в тот же слот.
 
+--slot 3 — ядро видео (fpga/vdac2/scripts/gowin_fb_video.tcl → ts_fb_video.bin, адрес перехода 0):
+его грузит не BOOT, а BL616 (прошивка 35+) по команде ESP 0.1.101+ — ядро ESP VIDEO.ELF
+(core_load "VIDEO") или сетевая консоль «tang core load VIDEO».
+
+    python tools/tang_tool.py update --slot 3 192.168.1.113 ts_fb_video.bin
+
 --slot 2+ с образом шрифтов ПЗУ FT812 (VD4FONT1, ESP 0.1.77+): его собирает
 fpga/vdac2/scripts/ft_rom_fonts.py из образа ПЗУ, снятого с bt8xxemu (данные Bridgetek — в
 репозиторий не кладутся). Ядро FT812 1.18+ берёт шрифты из слота 2: ESP переписывает их в SDRAM
@@ -283,6 +289,8 @@ def update(address: str, path: Path, slot: int = 0) -> None:
         print(f"Слот {slot} (0x{base:06X}), переход multiboot по BOOT: 0x{jump:06X}")
         if jump == base:
             print("ВНИМАНИЕ: BOOT перезагрузит ПЛИС в этот же слот")
+        if slot >= 3 and jump != 0:
+            print("ВНИМАНИЕ: ядро слота 3+ должно переходить в слот 0 — BL616 его не загрузит")
     with socket.create_connection((address, PORT), timeout=CONNECT_TIMEOUT) as sock:
         sock.settimeout(STEP_TIMEOUT)
         banner = receive_line(sock).split()
@@ -312,6 +320,9 @@ def update(address: str, path: Path, slot: int = 0) -> None:
                     raise ToolError("подтверждение ESP с другим SHA-256: " + line)
                 if fonts:
                     print("Записано и проверено. Шрифты попадут в ядро FT812 при его следующей загрузке.")
+                elif slot >= 3:
+                    print(f"Записано и проверено. Слот {slot} грузит BL616 (35+) по команде ESP "
+                          f"(«tang core load VIDEO»).")
                 elif slot:
                     print(f"Записано и проверено. Слот {slot} загрузится по BOOT («tang boot»).")
                 else:

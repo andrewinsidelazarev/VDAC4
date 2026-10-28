@@ -12,6 +12,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
+#include "zifi/tang_flash.hpp"
 #include "zifi/tang_link.hpp"
 #include "zifi/tang_menu_font.hpp"
 #include "zifi/tang_overlay.hpp"
@@ -23,20 +24,20 @@ namespace {
 
 constexpr char kTag[] = "zifi-menu";
 
-// Панель: 40 знаков в строке, до 16 строк по 8×8 точек холста и поле 8 точек вокруг; на
+// Панель: 40 знаков в строке, до 17 строк по 8×8 точек холста и поле 8 точек вокруг; на
 // выводе — ×2 (знак 16×16, как у прежнего меню ядра), по центру кадра 1280×720. Только
 // настройки: заголовок, пункты этого ядра, подсказка; состояние входа — в сетевой консоли
 // («tang»). Высота — по числу пунктов (у ядра FT812 их меньше).
 constexpr int kCols = 40;
-constexpr int kRows = 16;
+constexpr int kRows = 17;
 constexpr int kFirstItem = 2;                       // строка первого пункта
 constexpr int kBorder = 8;
 constexpr uint16_t kW = kCols * 8 + 2 * kBorder;   // 336
-constexpr uint16_t kH = kRows * 8 + 2 * kBorder;   // 144
+constexpr uint16_t kH = kRows * 8 + 2 * kBorder;   // 152
 constexpr uint32_t kStride = tang_overlay::strideWords(kW);
 constexpr uint16_t kOutW = 1280, kOutH = 720;
 constexpr uint32_t kBase = 0;                       // начало холста в регионе оверлеев:
-                                                    // слова 0…24 191; экран плеера — с 15 872
+                                                    // слова 0…25 535; экран плеера — с 15 872
                                                     // (player_overlay): холст общий, см. yield()
 constexpr int kOverlay = 0;
 constexpr uint8_t kAlpha = 12;                      // картинка под панелью видна на 3/16
@@ -57,8 +58,11 @@ constexpr uint32_t kHideMs = 12000;
 // Пункты (курсор)
 enum Item : int {
   kPhase, kDelay, kClock, kHAdjust, kVAdjust, kAlign, kSdRead, kCalibrate, kAspect, kSize,
-  kBlend, kSource, kItems
+  kFtSize, kBlend, kSource, kItems
 };
+// SIZE — размер картинки ядер 720p (TS-Config, Base conf, ядро видео, NES), FT SIZE — ядра FT812
+// (с 1.41 — 1366×768): у телевизора, обрезающего края 720p, кадр 1366×768 целый (0.1.104).
+// FT SIZE хранит ESP (tang_flash, слово 6 ячейки настроек), в CTRL TS-Config его нет.
 // FRAME BLEND (CTRL 17, CHECK 18 — смешивает сейчас): ядро TS-Config 1.32+
 constexpr uint32_t kBlendCore = 0x0120;
 // События нажатий
@@ -137,7 +141,7 @@ void buildLines(const Regs& r, char lines[kRows][kCols + 1]) {
   char map[5];
   for (int p = 0; p < 4; ++p) map[p] = calBusy ? '.' : (((calMap >> p) & 1) ? '+' : '-');
   map[4] = 0;
-  setLine(lines[0], g_ftCore ? "VDAC4  FT812 -> HDMI 1280X720P50" : "VDAC4  ZX EVOLUTION -> HDMI 1280X720P50");
+  setLine(lines[0], g_ftCore ? "VDAC4  FT812 -> HDMI 1366X768" : "VDAC4  ZX EVOLUTION -> HDMI 1280X720P50");
   setLine(lines[1], " ");
   for (int i = 0; i < g_count; ++i) {
     char* out = lines[kFirstItem + i];
@@ -157,6 +161,11 @@ void buildLines(const Regs& r, char lines[kRows][kCols + 1]) {
         break;
       case kAspect: setLine(out, "%c ASPECT      %s", c, bit(r.ctrl, 14) ? "16:9" : "4:3"); break;
       case kSize: setLine(out, "%c SIZE        %s", c, size == 1 ? "95%" : size == 2 ? "90%" : "100%"); break;
+      case kFtSize: {
+        const unsigned ft = tang_flash::ftSize();
+        setLine(out, "%c FT SIZE     %s", c, ft == 1 ? "95%" : ft == 2 ? "90%" : "100%");
+        break;
+      }
       case kBlend:
         setLine(out, "%c FRAME BLEND %-4s   NOW %s", c, bit(r.ctrl, 17) ? "ON" : "OFF",
                 bit(r.check, 18) ? "ON" : "OFF");
@@ -242,6 +251,10 @@ void change(int item, bool up) {
     case kCalibrate: ctrl |= 1U << 9; break;
     case kAspect: field(14, 1, bit(ctrl, 14) ? 0 : 1); break;
     case kSize: field(15, 2, step((ctrl >> 15) & 3, 3)); break;
+    case kFtSize:   // в Tang не пишется: во flash его сохранит tang_flash::poll()
+      tang_flash::setFtSize(step(tang_flash::ftSize(), 3));
+      writeCtrl = false;
+      break;
     case kBlend: field(17, 1, bit(ctrl, 17) ? 0 : 1); break;
     default: field(0, 2, step(ctrl & 3, 3)); break;   // источник
   }

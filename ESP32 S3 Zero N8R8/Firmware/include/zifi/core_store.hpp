@@ -40,7 +40,18 @@ const char* sync(const char* name, Progress progress, void* ctx);
 // Загрузить ядро в ПЛИС (не в кэше — сначала с SD) и дождаться его на LINK; *version — VERSION
 // нового ядра. SD Tang при этом снимается: у ядра из кэша моста к ней нет. Удача — только если
 // работает ядро из кэша (личность 3+); не вышло — Tang возвращается в слот 0 (TS-Config).
+// Ядро, у которого есть свой слот во flash Tang (kFlashCores: VIDEO — слот 3), грузится оттуда
+// (прошивка BL616 35+, команда BOOT); в слоте нет битстрима или BL616 старше — как прежде, с SD
+// через кэш.
 const char* load(const char* name, uint32_t* version, Progress progress, void* ctx);
+
+// Ядра во flash Tang (слоты multiboot, docs/video-core.md): имя, слот, личность в VERSION.
+struct FlashCore {
+  const char* name;
+  uint32_t slot;
+  uint32_t personality;
+};
+constexpr FlashCore kFlashCores[] = {{"VIDEO", 3, 0x05}};
 // То же без SD: ядро уже в кэше (служба 8268, tang_tool.py core-load).
 const char* loadCached(const char* name, uint32_t* version);
 // Слой ESP ядра `ИМЯ.ELF` с SD Tang — в PSRAM (*data освобождает вызывающий, heap_caps_free);

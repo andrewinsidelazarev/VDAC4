@@ -30,6 +30,12 @@ enum class Found : uint8_t { kNone, kStale, kFound };
 // (UserCode 56 44 34 xx — метка VDAC4). nullptr — годится; *usercode — UserCode.
 const char* checkImage(const uint8_t* head, size_t headSize, const uint8_t* tail, size_t tailSize,
                        uint32_t* usercode);
+// Только начало битстрима (первые 128 байт): синхрослово, IDCODE, адрес перехода 0 — для ядра в
+// слоте flash Tang (команда BOOT): с другим адресом оно не вернулось бы в слот 0.
+const char* checkHead(const uint8_t* head, size_t headSize);
+
+// Ответ BL616 на BOOT прошивки до 35 (команды нет).
+extern const char* const kNoBoot;
 
 // Имя ядра для кэша: false — не годится.
 bool normalizeName(const char* name, char out[16]);
@@ -47,6 +53,12 @@ class Client {
   // работает новое ядро (видно по VERSION LINK) или — если не вышло — снова слот 0.
   // sha == nullptr — любое ядро с этим именем.
   const char* load(const char* name, const uint8_t* sha);
+  // Ядро из слота flash Tang (прошивка BL616 35+): address — начало слота (кратно 1 МБ; ядро
+  // видео — 0x300000). nullptr — BL616 принял (LOADING): через 50 мс ПЛИС стирается, BL616 по
+  // JTAG шлёт заголовок битстрима с этим адресом перехода и Reconfig — ПЛИС грузит слот; ядро
+  // видно по VERSION LINK, не ответит BL616 3 с — снова слот 0. kNoBoot — прошивка BL616 старше
+  // 35 (ПЛИС не тронута).
+  const char* boot(uint32_t address);
   // Пустой каталог (кэш на месте чужих данных) — только по слову пользователя.
   const char* format();
   // Номер последней команды: ответ BL616 о ней в CP_INFO — {0xC2, состояние, номер}.

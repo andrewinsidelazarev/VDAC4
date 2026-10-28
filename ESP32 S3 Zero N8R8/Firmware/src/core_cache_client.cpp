@@ -17,9 +17,11 @@ constexpr uint32_t kPayloadWord = 16;
 constexpr uint32_t kPayloadMax = (512 - kPayloadWord) * 4;
 constexpr uint32_t kMagic = 0xB7;
 constexpr uint32_t kInfoMagic = 0xC2;
-constexpr uint32_t kBegin = 1, kData = 2, kEnd = 3, kAbort = 4, kFind = 5, kLoad = 6, kInfo = 7, kFormat = 8;
+constexpr uint32_t kBegin = 1, kData = 2, kEnd = 3, kAbort = 4, kFind = 5, kLoad = 6, kInfo = 7, kFormat = 8,
+                   kBoot = 9;
 constexpr uint32_t kFormatKey = 0x21544D46;   // "FMT!"
 constexpr uint32_t kOk = 0x00, kLoading = 0x10, kFoundSame = 0x11, kStale = 0x12, kNone = 0x13;
+constexpr uint32_t kBadCmd = 0x01, kBadOffset = 0x03, kLoadFail = 0x20;
 
 constexpr uint32_t kAckMs = 3000;       // BL616 смотрит ящик раз в 50 мс
 constexpr uint32_t kDataMs = 6000;      // посылка со стиранием блока 64 КБ flash BL616
@@ -93,10 +95,33 @@ bool normalizeName(const char* name, char out[16]) {
   return n > 0;
 }
 
+const char* const kNoBoot = "BL616 firmware 35+ needed to start a core from a Tang flash slot";
+
 const char* checkImage(const uint8_t* head, size_t headSize, const uint8_t* tail, size_t tailSize,
                        uint32_t* usercode) {
-  static const uint8_t kId[8] = {0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1B};
   if (headSize < 128 || tailSize < 64) {
+    return "core image too small";
+  }
+  const char* problem = checkHead(head, headSize);
+  if (problem != nullptr) {
+    return problem;
+  }
+  const uint8_t* t = tail + tailSize - 64;
+  for (size_t k = 0; k + 8 <= 64; ++k) {
+    if (t[k] == 0x0A && t[k + 1] == 0 && t[k + 2] == 0 && t[k + 3] == 0 && t[k + 4] == 0x56 && t[k + 5] == 0x44 &&
+        t[k + 6] == 0x34) {
+      if (usercode != nullptr) {
+        *usercode = 0x56443400U | t[k + 7];
+      }
+      return nullptr;
+    }
+  }
+  return "no VDAC4 mark in UserCode (core not built for VDAC4)";
+}
+
+const char* checkHead(const uint8_t* head, size_t headSize) {
+  static const uint8_t kId[8] = {0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1B};
+  if (headSize < 128) {
     return "core image too small";
   }
   size_t i = 0;
@@ -119,17 +144,7 @@ const char* checkImage(const uint8_t* head, size_t headSize, const uint8_t* tail
   if (!jump) {
     return "no multiboot jump address in the bitstream";
   }
-  const uint8_t* t = tail + tailSize - 64;
-  for (size_t k = 0; k + 8 <= 64; ++k) {
-    if (t[k] == 0x0A && t[k + 1] == 0 && t[k + 2] == 0 && t[k + 3] == 0 && t[k + 4] == 0x56 && t[k + 5] == 0x44 &&
-        t[k + 6] == 0x34) {
-      if (usercode != nullptr) {
-        *usercode = 0x56443400U | t[k + 7];
-      }
-      return nullptr;
-    }
-  }
-  return "no VDAC4 mark in UserCode (core not built for VDAC4)";
+  return nullptr;
 }
 
 bool Client::put(uint32_t first, const uint32_t* words, uint32_t count) {
@@ -302,6 +317,24 @@ const char* Client::load(const char* name, const uint8_t* sha) {
     e = statusText(status);
   }
   return e;
+}
+
+const char* Client::boot(uint32_t address) {
+  uint32_t status = 0;
+  const char* e = command(kBoot, &address, 1, nullptr, 0, kAckMs, &status);
+  if (e != nullptr || status == kLoading) {
+    return e;
+  }
+  if (status == kBadCmd) {
+    return kNoBoot;
+  }
+  if (status == kBadOffset) {
+    return "BL616: not a Tang flash slot address";
+  }
+  if ((status & 0xF0) == kLoadFail) {
+    return "BL616: JTAG does not see the FPGA, Tang stays in TS-Config";
+  }
+  return statusText(status);
 }
 
 const char* Client::format() {
