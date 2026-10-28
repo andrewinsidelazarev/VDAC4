@@ -16,14 +16,25 @@
 // в выводимый буфер; растеризатор не ждёт читателя (кадров за время — по времени кадра);
 // лист тот же — буферы 0, 1, 2 совпадают слово в слово во всех строках (буфер 2 — двумя
 // кусками: строки 0…511 и 512…767).
+//
+// SDF = 1 — как в ядре FT812 (ts_fb_core SD_FAST, с 1.40): мост sd_bridge (метки 100/101, выгрузка —
+// по два слова за такт), контроллер sdram_train на clk_sd = 2 × clk (60,75 / 121,5 МГц, CL 3,
+// подбор сдвига клока микросхемы, ранняя следующая операция), модель — на clk_sd со сдвигом
+// подбора. Кадр — тот же, что при SDF = 0 (слово в слово); нарушения протокола модели после
+// подбора — ошибка.
 module tb_ft_render;
     parameter int N_LINES = 768;
     parameter int TW_LOG = 6, TH_LOG = 4;      // плитка ft_render
     parameter int FRAMES = 1;
     parameter int RD_PERIOD = 1_031_250;      // кадр вывода 720p60 на 61,875 МГц
-    localparam real TCK = 16.16;            // 61,875 МГц
+    parameter bit SDF = 1'b0;
+    // SDF: TCK/2 и TCK/4 — целые пикосекунды (иначе фаза clk_sd к clk плывёт; у PLL она жёсткая)
+    localparam real TCK = SDF ? 16.46 : 16.16;    // 60,75 МГц (SDF) или 61,875
     reg clk = 1'b0, rst_n = 1'b0;
     always #(TCK / 2) clk = ~clk;
+    // clk_sd: фронт — с каждым фронтом clk и посередине (как CLKOUT/CLKOUTD fb_pll_sd)
+    reg clk_sd = 1'b1;
+    initial if (SDF) forever #(TCK / 4) clk_sd = ~clk_sd;
 
     // RAM_DL
     reg  [31:0] dl [0:2047];
@@ -35,9 +46,11 @@ module tb_ft_render;
     wire        s_req, s_we, s_sub, sd_ack, wr_take, rd_valid, init_done;
     wire [20:0] s_addr;
     wire [2:0]  s_len;
-    wire [31:0] s_wdata, rd_data;
+    wire [31:0] s_wdata, s_wdata2, rd_data;
     wire [5:0]  wr_idx, rd_idx;
     wire [0:0]  op_tag;
+    wire        r_ack, r_op_sub, r_wr_take, r_rd_valid;   // порт растеризатора
+    wire [3:0]  sd_phase;
     wire        sd_cs_n, sd_ras_n, sd_cas_n, sd_we_n, sd_dq_oe;
     wire [10:0] sd_a;
     wire [1:0]  sd_ba;
@@ -54,29 +67,78 @@ module tb_ft_render;
     wire [31:0] status;
     wire [15:0] frame_time;
 
-    ft_render #(.TW_LOG(TW_LOG), .TH_LOG(TH_LOG)) dut (
-        .clk(clk), .rst_n(rst_n), .enable(enable), .hsize(12'd1024), .vsize(12'(N_LINES)),
+    ft_render #(.TW_LOG(TW_LOG), .TH_LOG(TH_LOG), .UP2(SDF)) dut (
+        .clk(clk), .rst_n(rst_n), .clk_sd(clk_sd), .enable(enable), .hsize(12'd1024), .vsize(12'(N_LINES)),
         .ramg_3mb(1'b0), .dither(1'b1),
         .dl_addr(dl_addr), .dl_q(dl_q), .swap_hold(swap_hold), .swap_wait(1'b0),
         .s_req(s_req), .s_we(s_we), .s_addr(s_addr), .s_len(s_len), .s_sub(s_sub),
-        .s_ack(sd_ack), .s_op_sub(op_tag[0]), .s_wr_take(wr_take && op_tag[0]), .s_wdata(s_wdata),
-        .s_rd_valid(rd_valid && !op_tag[0]), .s_rd_idx(rd_idx[2:0]), .s_rd_data(rd_data),
+        .s_ack(r_ack), .s_op_sub(r_op_sub), .s_wr_take(r_wr_take), .s_wdata(s_wdata), .s_wdata2(s_wdata2),
+        .s_rd_valid(r_rd_valid), .s_rd_idx(rd_idx[2:0]), .s_rd_data(rd_data),
         .fb_showing(showing), .fb_front(front),
         .pub_v(pub_v), .pub_buf(pub_buf), .pub_words(pub_words), .pub_w(pub_w), .pub_h(pub_h),
         .status(status), .frame_time(frame_time)
     );
 
-    sdram_burst #(.TAGW(1), .CLK_KHZ(61_875), .INIT_US(5)) ctrl (
-        .clk(clk), .rst_n(rst_n), .rd_phase(2'd1),
-        .req(s_req), .we(s_we), .addr(s_addr), .req_len(s_len), .req_tag(s_sub),
-        .ack(sd_ack), .op_tag(op_tag),
-        .wr_take(wr_take), .wr_idx(wr_idx), .wdata(s_wdata), .wmask(4'hF),
-        .rd_valid(rd_valid), .rd_idx(rd_idx), .rd_data(rd_data), .init_done(init_done),
-        .sdram_cs_n(sd_cs_n), .sdram_ras_n(sd_ras_n), .sdram_cas_n(sd_cas_n),
-        .sdram_we_n(sd_we_n), .sdram_a(sd_a), .sdram_ba(sd_ba), .sdram_dqm(sd_dqm),
-        .sdram_dq_out(sd_dq_out), .sdram_dq_oe(sd_dq_oe), .sdram_dq_in(sd_dq_in));
-    sdram_model #(.TCK_NS(TCK)) mem (
-        .clk(~clk), .cs_n(sd_cs_n), .ras_n(sd_ras_n), .cas_n(sd_cas_n), .we_n(sd_we_n),
+    generate if (SDF) begin : g_sdf
+        wire [2:0]  ack_tag, wr_tag, rd_tag;
+        wire        c_req, c_we, c_ack, c_wr_take, c_rd_valid, c_init, c_tag, c_rd_tag;
+        wire [20:0] c_addr;
+        wire [2:0]  c_len;
+        wire [31:0] c_wdata, c_rd_data;
+        wire [3:0]  c_wmask;
+        sd_bridge #(.TAGW(3), .W2(1'b1)) bridge (
+            .clk(clk), .rst_n(rst_n), .clk_sd(clk_sd), .rst_sd_n(rst_n),
+            .req(s_req), .we(s_we), .addr(s_addr), .req_len(s_len), .req_tag({2'b10, s_sub}),
+            .ack(sd_ack), .ack_tag(ack_tag), .wr_take(wr_take), .wr_idx(wr_idx), .wr_tag(wr_tag),
+            .wdata(s_wdata), .wmask(4'hF), .wdata2(s_wdata2),
+            .rd_valid(rd_valid), .rd_idx(rd_idx), .rd_tag(rd_tag), .rd_data(rd_data),
+            .rd_phase(2'd1), .init_done(init_done),
+            .c_req(c_req), .c_we(c_we), .c_addr(c_addr), .c_len(c_len), .c_ack(c_ack),
+            .c_wr_take(c_wr_take), .c_wdata(c_wdata), .c_wmask(c_wmask),
+            .c_rd_valid(c_rd_valid), .c_rd_data(c_rd_data), .c_rd_phase(), .c_init_done(c_init),
+            .c_tag(c_tag), .c_rd_tag(c_rd_tag));
+        sdram_train #(.TAGW(1), .CLK_KHZ(121_500), .CL(3), .T_RCD(2), .T_RP(2), .T_WR(2), .T_RFC(8),
+                      .INIT_US(5)) ctrl (
+            .clk(clk_sd), .rst_n(rst_n),
+            .req(c_req), .we(c_we), .addr(c_addr), .req_len(c_len), .req_tag(c_tag),
+            .ack(c_ack), .op_tag(), .wr_take(c_wr_take), .wr_idx(), .wdata(c_wdata), .wmask(c_wmask),
+            .rd_valid(c_rd_valid), .rd_idx(), .rd_data(c_rd_data), .rd_tag(c_rd_tag), .init_done(c_init),
+            .phase(sd_phase), .train_st(), .train_win(),
+            .sdram_cs_n(sd_cs_n), .sdram_ras_n(sd_ras_n), .sdram_cas_n(sd_cas_n),
+            .sdram_we_n(sd_we_n), .sdram_a(sd_a), .sdram_ba(sd_ba), .sdram_dqm(sd_dqm),
+            .sdram_dq_out(sd_dq_out), .sdram_dq_oe(sd_dq_oe), .sdram_dq_in(sd_dq_in));
+        assign op_tag     = ack_tag[0];
+        assign r_ack      = sd_ack && ack_tag[2:1] == 2'd2;
+        assign r_op_sub   = ack_tag[0];
+        assign r_wr_take  = wr_take && wr_tag == 3'b101;
+        assign r_rd_valid = rd_valid && rd_tag == 3'b100;
+    end else begin : g_one
+        sdram_burst #(.TAGW(1), .CLK_KHZ(61_875), .INIT_US(5)) ctrl (
+            .clk(clk), .rst_n(rst_n), .rd_phase(2'd1),
+            .req(s_req), .we(s_we), .addr(s_addr), .req_len(s_len), .req_tag(s_sub),
+            .ack(sd_ack), .op_tag(op_tag),
+            .wr_take(wr_take), .wr_idx(wr_idx), .wdata(s_wdata), .wmask(4'hF),
+            .rd_valid(rd_valid), .rd_idx(rd_idx), .rd_data(rd_data), .init_done(init_done),
+            .sdram_cs_n(sd_cs_n), .sdram_ras_n(sd_ras_n), .sdram_cas_n(sd_cas_n),
+            .sdram_we_n(sd_we_n), .sdram_a(sd_a), .sdram_ba(sd_ba), .sdram_dqm(sd_dqm),
+            .sdram_dq_out(sd_dq_out), .sdram_dq_oe(sd_dq_oe), .sdram_dq_in(sd_dq_in));
+        assign sd_phase   = 4'd0;
+        assign r_ack      = sd_ack;
+        assign r_op_sub   = op_tag[0];
+        assign r_wr_take  = wr_take && op_tag[0];
+        assign r_rd_valid = rd_valid && !op_tag[0];
+    end endgenerate
+    // клок модели: SDF — clk_sd со сдвигом PLL, что выбрал подбор (как tb_ts_fb), иначе ~clk
+    reg sd_clk_sh = 1'b0;
+    always @(clk_sd) sd_clk_sh <= #(sd_phase * TCK / 32.0) clk_sd;
+    integer err_train = 0;               // нарушений протокола модели к концу подбора (SDF)
+    initial if (SDF) begin
+        wait (rst_n && init_done);
+        err_train = mem.errors;
+        $display("подбор SDRAM: сдвиг %0d, нарушений протокола во время подбора: %0d", sd_phase, err_train);
+    end
+    sdram_model #(.TCK_NS(SDF ? TCK / 2 : TCK), .CL(SDF ? 3 : 2)) mem (
+        .clk(SDF ? sd_clk_sh : ~clk), .cs_n(sd_cs_n), .ras_n(sd_ras_n), .cas_n(sd_cas_n), .we_n(sd_we_n),
         .a(sd_a), .ba(sd_ba), .dqm(sd_dqm), .dq_from_ctrl(sd_dq_out), .dq_oe(sd_dq_oe),
         .dq_to_ctrl(sd_dq_in));
 
@@ -220,7 +282,10 @@ module tb_ft_render;
         wait (pub_v);
         $display("кадр объявлен: буфер %0d, %0dx%0d, слов в строке %0d, время %0d × 1024 тактов (%0d мкс)",
                  pub_buf, pub_w, pub_h, pub_words, frame_time, ($time - t0) / 1000);
-        $display("состояние %08h, ошибок протокола SDRAM: %0d", status, mem.errors);
+        // SDF: записи плиток ещё могут быть в мосте — дождаться их в SDRAM
+        if (SDF) repeat (4000) @(posedge clk);
+        $display("состояние %08h, ошибок протокола SDRAM: %0d (после подбора: %0d)", status, mem.errors,
+                 mem.errors - err_train);
         for (int yy = 0; yy < N_LINES; yy++) begin
             $fwrite(fl, "%0d", yy);
             for (int xx = 0; xx < 1024; xx++) $fwrite(fl, " %08h", frame[yy * 1024 + xx]);
@@ -262,8 +327,8 @@ module tb_ft_render;
             if (used2 == 0) begin tb_errors = tb_errors + 1; $display("буфер 2 не использовался"); end
             if (diff != 0) begin tb_errors = tb_errors + 1; $display("буферы расходятся: слов %0d", diff); end
         end
-        if (mem.errors == 0 && tb_errors == 0) $display("ТЕСТ ПРОЙДЕН (кадр нарисован; сверка — ft_rtl_check.py)");
-        else $display("ТЕСТ НЕ ПРОЙДЕН: протокол SDRAM %0d, проверок %0d", mem.errors, tb_errors);
+        if (mem.errors - err_train == 0 && tb_errors == 0) $display("ТЕСТ ПРОЙДЕН (кадр нарисован; сверка — ft_rtl_check.py)");
+        else $display("ТЕСТ НЕ ПРОЙДЕН: протокол SDRAM %0d, проверок %0d", mem.errors - err_train, tb_errors);
         $finish;
     end
 

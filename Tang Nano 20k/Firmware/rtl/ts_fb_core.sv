@@ -57,6 +57,8 @@ module ts_fb_core #(
     parameter bit         CALIBRATE = 1'b1,
     // Картинка на всю высоту кадра 1280×720 (fb_scanout); 0 — точка в точку с (IMG_X, IMG_Y)
     parameter bit         SCALE = 1'b0,
+    // С SCALE: вывод 1366×768 (VESA DMT RB, ядро FT812 с 1.41) — кадр FT 1024×768 точка в точку
+    parameter bit         OUT768 = 1'b0,
     // Выход HDMI с пакетом AVI InfoFrame (hdmi_tx); 0 — DVI
     parameter bit         HDMI = 1'b0,
     // Flash Tang: сектор настроек и ожидание перед их чтением после сброса
@@ -74,10 +76,22 @@ module ts_fb_core #(
     // обмена с FT812 нет SWITCH_IDLE_MS
     parameter bit          HAS_EVO = 1'b1,
     parameter bit          HAS_FT  = 1'b1,
+    // Ядро видео (HAS_EVO = 0, HAS_FT = 0): MJPEG AVI плагина FTVIEW4 декодирует ПЛИС (vp_core) —
+    // на месте FT812 тот же SPI хоста, кадры — в кадры FT fb_core, вывод 720p50 (окна ASPECT/SIZE,
+    // кадр 512×384 — fb_scanout FT_W512), поверх — оверлеи ESP (панель плеера). Возврат в слот 0 —
+    // как у ядра FT812
+    parameter bit          HAS_VIDEO = 1'b0,
     parameter int          SWITCH_IDLE_MS = 500,    // с 1.22; было 3000 (возврат ~6 с вместе с загрузкой)
-    // Контроллер SDRAM на clk_sd = 2 × clk_mem (123,75 МГц, CL 3) за мостом sd_bridge (ядро FT812,
-    // с 1.24): вывод 720p60 и выгрузка кадра FT держат шину вдвое меньше. 0 — контроллер на clk_mem
-    parameter bit          SD_FAST = 1'b0
+    // Контроллер SDRAM на clk_sd = 2 × clk_mem (с 1.38 — 121,5 МГц, CL 3) за мостом sd_bridge (ядро
+    // FT812, с 1.24): вывод 720p60 и выгрузка кадра FT держат шину вдвое меньше. 0 — контроллер на
+    // clk_mem. С 1.38 — с подбором сдвига клока микросхемы после включения (sdram_train)
+    parameter bit          SD_FAST = 1'b0,
+    // Сдвиг клока микросхемы SDRAM (SD_FAST, 1/16 периода clk_sd, CLKOUTP fb_pll_sd) на время паузы
+    // включения и если подбор не нашёл годной пары; иначе — найденный (LINK SD_TRAIN 0xEC)
+    parameter logic [3:0]  DEF_SD_PHASE = 4'd12,
+    // Ядро FT812 (с 1.38): после загрузки — чёрное поле до записи CTRL от ESP, но не дольше 2^этого
+    // кадров вывода (8 — 256 кадров, ~4,3 с при 60 Гц; см. fmt_wait у развёртки)
+    parameter int          FMT_WAIT_LOG2 = 8
 ) (
     input  wire        clk_cap,
     input  wire        rst_cap_n,
@@ -142,9 +156,12 @@ module ts_fb_core #(
     output wire [31:0] sdram_dq_out,
     output wire        sdram_dq_oe,
     input  wire [31:0] sdram_dq_in,
-    // тонкая задержка чтения DQ (IODELAYA в верхнем модуле, только SD_FAST): {SDTAP, SETN, VALUE}
+    // задержка чтения DQ 1.33–1.34 (IODELAYA): с 1.38 её нет — sdram_dly всегда 0, df не читается
     output wire [2:0]  sdram_dly,
-    input  wire        sdram_dly_df,    // DF задержки DQ0 (переполнение или исчерпание)
+    input  wire        sdram_dly_df,
+    // сдвиг клока микросхемы (fb_pll_sd в верхнем модуле, только SD_FAST): 1/16 периода clk_sd,
+    // его подбирает sdram_train
+    output wire [3:0]  sdram_phase,
 
     // Выход: и цвет (для отладки/теста), и готовые слова TMDS
     output wire [7:0]  vid_r,
@@ -182,6 +199,13 @@ module ts_fb_core #(
 );
     localparam logic [1:0] SRC_AUTO = 2'd0, SRC_EVO = 2'd1, SRC_TEST = 2'd2;
     localparam logic [1:0] DEF_DELAY_CODE = DEF_DELAY - 1;
+    // Калибровка SD READ после сброса (fb_ui): у ядра FT812 с 1.38 её нет — точку выборки подбирает
+    // sdram_train, а SD READ мосту не нужен; с ней ядро ещё ~0,4 с показывало чёрное поле
+    localparam bit CAL_ON = CALIBRATE && !SD_FAST;
+    // Испытательная таблица (fb_pattern, её запись в SDRAM и сверка в развёртке): у ядра FT812 с 1.38
+    // её нет — она была нужна калибровке SD READ, а SOURCE = TEST в нём не выбрать (меню ESP в
+    // ядре FT812 не показывается); освободившееся место — растеризатору
+    localparam bit HAS_PAT = !SD_FAST;
 
     // ------------------------------------------------------------------
     // Настройки, кнопки, калибровка (pixel_clk)
@@ -206,6 +230,11 @@ module ts_fb_core #(
     wire [15:0] p_rd_time;
     wire [10:0] p_rd_w;
     wire [9:0]  p_rd_h;
+    // ядро видео: звук для LINK (объявлены до чтения LINK — Icarus не берёт объявление после use)
+    wire [10:0] vp_au_wp_p;              // слов FIFO звука записано (домен пикселей)
+    wire [7:0]  vp_au_ep_p;              // эпоха звука
+    wire        vp_au_pause_p;           // пауза плеера (бит 2 REG_CPURESET)
+    wire [31:0] vp_au_q;                 // окно FIFO звука (домен LINK SCK)
 
     // ------------------------------------------------------------------
     // LINK: регистры для ESP (домен пикселей). Адрес — байтовый, регистр 32 бита.
@@ -221,7 +250,34 @@ module ts_fb_core #(
     //                     1.10 — оверлеи ESP вместо экранного меню: OVL*, окно 0x80000…;
     //                     кнопки Tang не читаются; 1.11 — multiboot: регистр BOOT;
     //                     1.30 — мост к microSD Tang для ESP: SD_*, только TS-Config;
-    //                     1.32 — FRAME BLEND: CTRL 17, CHECK 18, бит 19 настроек во flash)
+    //                     1.32 — FRAME BLEND: CTRL 17, CHECK 18, бит 19 настроек во flash;
+    //                     1.33 — ядро FT812: SDRAM на 123,75 МГц, сдвиг клока микросхемы в SD_DLY;
+    //                     1.34 — сдвиг 270° после включения, без защитной полосы видео HDMI;
+    //                     1.35 — защитная полоса видео HDMI снова (hdmi_tx 1.20–1.33): без неё
+    //                     телевизор пользователя показывал чёрный экран — ядро FT812 1.34 и ядро
+    //                     видео 27.10.2026, звук при этом шёл;
+    //                     1.36 — ядро видео: холсты 16:9 (512×288, 640×360, 1024×576) окном 16:9;
+    //                     1.37 — ядро видео: настройки слота 0 читает из flash само (берёт SIZE),
+    //                     ASPECT не берёт (ролик вписан в экран в своих пропорциях), записи CTRL
+    //                     с LINK не принимает;
+    //                     1.38 — ядро FT812: SDRAM на 121,5 МГц, clk_sd, clk_mem (60,75 МГц) и клок
+    //                     микросхемы — одна PLL от кварца, DQ — регистром у вывода, сдвиг и такт
+    //                     выборки ядро подбирает само после включения: SD_TRAIN 0xEC; ядро видео:
+    //                     медиа-FIFO 2 МБ в SDRAM (было 32 КБ BSRAM — картинка вставала при паузах
+    //                     подачи с карты Evo), кадр больше 1024×768 — вдвое меньше, звук — только
+    //                     дорожка 01wb;
+    //                     1.39 — ядро FT812, скорость рендера (стенд vsys, дамп R-Type 18,6 → 14,0 мс,
+    //                     прочие сцены −3…−9 %): 4 заполнения кэша в полёте, контроллер SDRAM
+    //                     начинает следующую операцию через BL + tRP после READ (слова прошлой
+    //                     различает метка), соседние строки текселей — одним чтением, запись
+    //                     плитки — строкой в 32 слова одной операцией; ядро видео: окно по ASPECT
+    //                     и SIZE слота 0, холст растянут на него, как у FT812;
+    //                     1.40 — ядро FT812: выгрузка плиток по два слова за такт clk_mem (порты
+    //                     цвета буфера плитки — на clk_sd, мост берёт пару; пустой кадр 8,4 → 5,1 мс,
+    //                     дамп R-Type 14,0 → 13,1 мс, стенд vsys);
+    //                     1.41 — ядро FT812: вывод 1366×768 с сокращённым гашением (VESA DMT,
+    //                     72 МГц, 60 Гц) вместо 720p60 — кадр 1024×768 точка в точку, окна ASPECT
+    //                     и SIZE — под 768 строк (fb_scanout OUT768), AVI — VIC 0)
     //   0x08 STATUS   R   [15:0] флаги: 0 растр захвачен, 3:1 режим raster_detect, 4/5 HS/VS
     //                     активны низким, 6/7 окно по картинке H/V, 8 границы картинки есть,
     //                     9 в SDRAM таблица, 10 SDRAM готова, 11 есть кадр, 12 M_SEL,
@@ -293,6 +349,9 @@ module ts_fb_core #(
     //   0xE4 OVL_STAT R   0 — очередь записи оверлеев переполнялась
     //   0xE8 FT_HOST  W   команда хоста FT812 от ESP (1.12): [7:0] команда (00 ACTIVE, 44 CLKEXT,
     //                     61/62 CLKSEL, 68 CORERST, …), [15:8] параметр — как посылка хоста по SPI
+    //   0xEC SD_TRAIN R   (1.38, ядро FT812) итог подбора сдвига клока SDRAM после включения: [3:0]
+    //                     сдвиг, [5:4] такт, 6 идёт, 7 закончен, 8 годных пар нет, 9 сверка на
+    //                     выбранной не сошлась, [16:10] годный участок, пар, [22:17] его середина k
     //   0xF0 BOOT     RW  чтение: [7:0] слот flash этого битстрима (по 1 МБ: слот 0 — TS-Config),
     //                     [15:8] слот, который загрузит RECONFIG_N, [16] захват Evo, [17] FT812,
     //                     [18] автопереход разрешён, [19] перезагрузка запрошена (1.13), [31:20]
@@ -451,29 +510,34 @@ module ts_fb_core #(
     end
 
     // Ядро FT812 без Evo: M_SEL = 0 (Evo вернула монитор TS-Config, например после сброса) и
-    // обмена с FT812 нет SWITCH_IDLE_MS — обратно в слот TS-Config
+    // обмена с FT812 нет SWITCH_IDLE_MS — обратно в слот TS-Config. Ядро FT812 включает первый же
+    // обмен Evo, а ядро видео грузит ESP (core_load), пока плагин ждёт его готовности и с ним не
+    // говорит: у ядра видео правило действует только после первого обмена хоста (host_seen).
+    // До того ядро стерегут правила ESP: VIDEO.ELF при молчании плагина возвращает слот 0.
     localparam int IDLE_W = $clog2(SWITCH_IDLE_MS + 1);
     reg  [$clog2(PIX_KHZ + 1)-1:0] ms_div;
     reg  [IDLE_W-1:0] idle_ms;
     reg         boot_armed;
+    reg         host_seen;
     always_ff @(posedge pixel_clk or negedge rst_pix_n) begin
         if (!rst_pix_n) begin
-            boot_req <= 1'b0; boot_armed <= 1'b0; ms_div <= '0; idle_ms <= '0;
+            boot_req <= 1'b0; boot_armed <= 1'b0; ms_div <= '0; idle_ms <= '0; host_seen <= 1'b0;
         end else begin
+            if (ft_act && !ft_cfg_esp) host_seen <= 1'b1;
             if (lk_wr_stb && lk_wr_addr == 8'h3C) begin
                 if (lk_wr_data == 32'h424F_4F54) boot_req <= 1'b1;
                 if (lk_wr_data == 32'h4152_4D31) boot_armed <= 1'b1;
                 if (lk_wr_data == 32'h4152_4D30) boot_armed <= 1'b0;
             end
             if (HAS_EVO && !HAS_FT && boot_armed && ft_start) boot_req <= 1'b1;
-            if (!HAS_EVO && HAS_FT) begin
+            if (!HAS_EVO && (HAS_FT || HAS_VIDEO)) begin
                 // тишина отсчитывается от последнего обмена: делитель миллисекунд — заново
                 ms_div <= (blank || (ft_act && !ft_cfg_esp) || ms_div == PIX_KHZ - 1) ? '0 : ms_div + 1'b1;
                 if (blank || (ft_act && !ft_cfg_esp))     // хост — ESP: обмен Evo не в счёт
                     idle_ms <= '0;
                 else if (ms_div == PIX_KHZ - 1 && idle_ms != SWITCH_IDLE_MS[IDLE_W-1:0])
                     idle_ms <= idle_ms + 1'b1;
-                if (idle_ms == SWITCH_IDLE_MS[IDLE_W-1:0]) boot_req <= 1'b1;
+                if (idle_ms == SWITCH_IDLE_MS[IDLE_W-1:0] && (HAS_FT || host_seen)) boot_req <= 1'b1;
             end
         end
     end
@@ -493,12 +557,13 @@ module ts_fb_core #(
     wire        ft_tg;
     wire [1:0]  ft_kind;
     wire [7:0]  ft_h0, ft_h1, ft_b, ft_rd_byte;
+    wire [7:0]  vp_rd_byte;                  // ядро видео: байт чтения хоста
     wire        ft_miso_core;
     // вывод MISO — и DIN светодиода WS2812 модуля Tang: при поднятом FT_CS — «чёрный»
     ws_dark #(.CLK_KHZ(MEM_KHZ)) ws_dark (
         .clk(clk_mem), .rst_n(rst_mem_n), .cs_n(ft_cs_n), .miso(ft_miso_core), .pin(ft_miso)
     );
-    generate if (HAS_FT) begin : g_ft_spi
+    generate if (HAS_FT || HAS_VIDEO) begin : g_ft_spi
         // хост — ESP (FT_CFG бит 2): выбор FT812 от Evo не доходит, MISO — 0
         wire miso_spi;
         ft_spi ft_spi (
@@ -548,7 +613,8 @@ module ts_fb_core #(
     wire          ft_busy = ft_rd_busy || wq_w != wq_d;
     wire          ft_wq_stb = (lk_wr_stb && lk_wr_addr == 8'h16) ||                  // FT_DATA
                               (lk_wr_stb_w && lk_wr_word[17:16] == 2'b01);           // FT_BURST
-    wire          ft_wq_put = ft_wq_stb && !wq_full && !ft_rd_busy;
+    // ядро видео: FT812 нет — очередь не пишется и синтезом убирается (её BSRAM — FIFO звука)
+    wire          ft_wq_put = !HAS_VIDEO && ft_wq_stb && !wq_full && !ft_rd_busy;
     reg           ft_lost;                // FT_STAT 14: запись окна потеряна
     always_ff @(posedge pixel_clk)
         if (ft_wq_put) wq_mem[wq_w[WQ_B-1:0]] <= lk_wr_data;
@@ -580,6 +646,25 @@ module ts_fb_core #(
         end
     end
 
+    // Ядро видео: звук для приложения ESP (vp_core). Запись LINK (у TS-Config здесь мост к microSD):
+    //   0x40 AU_RP   — слов FIFO звука прочитано ESP (11 бит, по модулю 2048);
+    //   0x41 AU_CTL  — бит 0: приём звука, бит 1: темп по часам звука, [15:8] — подтверждённая
+    //                  эпоха (ESP сбросил свой указатель после сброса потока);
+    //   0x42 AU_CLK  — время проигранного звука с начала потока, мкс.
+    // Чтение: 0x40 — {эпоха[7:0], пауза, 12'b0, AU_WP[10:0]} (слов записано), 0x41/0x42 — что записано;
+    // окно 0x2000… — FIFO звука (1024 слова, младший байт — первый байт потока).
+    reg  [10:0] au_rp_p;
+    reg  [15:0] au_ctl_p;
+    reg  [31:0] aclk_p;
+    always_ff @(posedge pixel_clk or negedge rst_pix_n)
+        if (!rst_pix_n) begin
+            au_rp_p <= '0; au_ctl_p <= '0; aclk_p <= '0;
+        end else if (HAS_VIDEO && lk_wr_stb) begin
+            if (lk_wr_addr == 8'h40) au_rp_p  <= lk_wr_data[10:0];
+            if (lk_wr_addr == 8'h41) au_ctl_p <= lk_wr_data[15:0];
+            if (lk_wr_addr == 8'h42) aclk_p   <= lk_wr_data;
+        end
+
     // FT_HOST (0xE8): команда хоста FT812 от ESP — [7:0] команда (00 ACTIVE, 44 CLKEXT,
     // 61/62 CLKSEL, 68 CORERST, …), [15:8] параметр; в ft_core — переключателем
     reg         ft_hc_tg;
@@ -591,47 +676,16 @@ module ts_fb_core #(
             ft_hc_cmd <= lk_wr_data[7:0]; ft_hc_par <= lk_wr_data[15:8]; ft_hc_tg <= ~ft_hc_tg;
         end
 
-    // SD_DLY (0xEC, ядро FT812): тонкая задержка чтения DQ SDRAM — IODELAYA на всех 32 входах DQ,
-    // шаг ~18 пс (GW2A-18, UG289), 0…127 (~2,3 нс); вместе с точкой выборки SD READ (CTRL [7:6], шаг
-    // полтакта clk_sd — 4 нс) — окно чтения на 123,75 МГц подбирается на плате. Запись: [6:0] —
-    // нужная задержка, 7 — обратить направление шага (на случай другой полярности SETN), 8 — снова
-    // взять статическую (0, SDTAP = 0). Чтение: [31:24] D1, 16 — DF, 15 — идут шаги, [14:8] — текущая,
-    // 7 — обращение, [6:0] — нужная. Шаг — спад VALUE (UG289), раз в 16 тактов pixel_clk; задержка
-    // общая для всех 32 линий; после включения — 0, как без IODELAYA.
-    reg  [6:0]  sdl_tgt, sdl_cur;
-    reg         sdl_inv, sdl_sdtap, sdl_setn, sdl_value, sdl_df, sdl_up;
-    reg  [3:0]  sdl_ph;
-    wire        sdl_busy = !sdl_sdtap || sdl_cur != sdl_tgt || sdl_ph != 4'd0;
-    always_ff @(posedge pixel_clk or negedge rst_pix_n)
-        if (!rst_pix_n) begin
-            sdl_tgt <= '0; sdl_cur <= '0; sdl_inv <= 1'b0; sdl_sdtap <= 1'b0; sdl_setn <= 1'b0;
-            sdl_value <= 1'b0; sdl_ph <= '0; sdl_df <= 1'b0; sdl_up <= 1'b1;
-        end else begin
-            sdl_df <= sdram_dly_df;
-            if (lk_wr_stb && lk_wr_addr == 8'h3B) begin
-                sdl_tgt <= lk_wr_data[6:0];
-                sdl_inv <= lk_wr_data[7];
-                if (lk_wr_data[8]) begin
-                    sdl_sdtap <= 1'b0; sdl_cur <= '0; sdl_ph <= '0; sdl_value <= 1'b0;
-                end
-            end else if (!sdl_sdtap) begin
-                sdl_ph <= sdl_ph + 4'd1;                 // статическая берётся 16 тактов,
-                if (sdl_ph == 4'd15) sdl_sdtap <= 1'b1;  // дальше — на ходу
-            end else if (sdl_ph != 4'd0 || sdl_cur != sdl_tgt) begin
-                // шаг: направление — в его начале (новая нужная посреди шага его не сбивает)
-                sdl_ph <= sdl_ph + 4'd1;
-                if (sdl_ph == 4'd0) begin
-                    sdl_up   <= sdl_tgt > sdl_cur;
-                    sdl_setn <= (sdl_tgt < sdl_cur) ^ sdl_inv;           // SETN 0 — больше
-                end
-                if (sdl_ph == 4'd4) sdl_value <= 1'b1;
-                if (sdl_ph == 4'd10) begin
-                    sdl_value <= 1'b0;                   // спад VALUE — шаг
-                    sdl_cur <= sdl_up ? sdl_cur + 7'd1 : sdl_cur - 7'd1;
-                end
-            end
-        end
-    assign sdram_dly = {sdl_sdtap, sdl_setn, sdl_value};
+    // SD_TRAIN (0xEC), ядро FT812, с 1.38: итог подбора сдвига клока SDRAM и такта выборки
+    // (sdram_train, домен clk_sd; после подбора не меняется, поэтому читается без синхронизатора):
+    // [3:0] сдвиг (1/16 периода clk_sd), [5:4] такт, 6 подбор идёт, 7 закончен, 8 годных пар нет
+    // (стоит DEF_SD_PHASE), 9 сверка на выбранной паре не сошлась, [16:10] длина годного участка
+    // (пар), [22:17] его середина k (k = 16·такт + 15 − сдвиг). Границы годных пар (train_win) в LINK
+    // не выведены — ядро на пределе по месту. Сдвиг на ходу не меняется: подбор — только после
+    // включения, пока SDRAM никому не нужна (у 1.33–1.34 его меняли записью в 0xEC, и содержимое
+    // SDRAM портилось); запись в 0xEC ничего не делает.
+    wire [22:0]  sd_train_st;
+    assign sdram_dly = 3'b000;
 
     // FT_CFG: размер RAM_G, дизеринг (меняются редко — в домен SDRAM через два триггера);
     // M_SEL — туда же: режим FT812 кадрового буфера и растеризатора
@@ -651,7 +705,7 @@ module ts_fb_core #(
         m_ft_s          <= {m_ft_s[0], SCALE ? blank : 1'b0};
     end
     // Кадр FT вместо кадра Evo: общее ядро — по M_SEL, ядро FT812 — всегда, кроме таблицы
-    wire        m_ft = HAS_FT && (HAS_EVO ? m_ft_s[1] : !pattern_on);
+    wire        m_ft = (HAS_FT || HAS_VIDEO) && (HAS_EVO ? m_ft_s[1] : !pattern_on);
 
     // RAM_G FT812 — клиент SDRAM (арбитр — у sdram_burst ниже)
     wire        ft_g_req, ft_g_we, ft_g_ack, ft_g_wr_take, ft_g_rd_valid;
@@ -809,7 +863,7 @@ module ts_fb_core #(
         );
     end else begin : g_no_ft
         // FT812 нет: сопроцессор BL616 видит его в сбросе и ждёт, очередь команд пуста
-        assign ft_rd_byte = 8'd0; assign pa_ack = 1'b0; assign pa_rdata = 32'd0;
+        assign ft_rd_byte = HAS_VIDEO ? vp_rd_byte : 8'd0; assign pa_ack = 1'b0; assign pa_rdata = 32'd0;
         assign ft_int_core = 1'b1; assign ft_copro_hold = 1'b0; assign ft_dl_active = 1'b0;
         assign ft_cmd_read = '0; assign ft_cmd_write = '0; assign ft_cmd_dl = '0;
         assign ft_dlswap = '0; assign ft_cpureset = 3'b001; assign ft_cp_resets = '0;
@@ -848,17 +902,23 @@ module ts_fb_core #(
     // Мост — только в ядре с Evo (TS-Config, слот 0). Ядру FT812 (слот 1, 1.31+) он не нужен:
     // из настроек у него важны лишь ASPECT и SIZE — их пишет в CTRL ESP после перехода, шрифты ПЗУ
     // ESP берёт из своей копии (читает её из flash в TS-Config). FLASH_STATUS = 0: моста нет.
-    generate if (HAS_EVO) begin : g_flash
+    // Ядро видео (1.37) читает настройки слота 0 из flash само, как TS-Config после сброса (ему
+    // нужны ASPECT и SIZE — с 1.39; в 1.37–1.38 только SIZE), но моста ESP не показывает: FLASH_STATUS для LINK — 0, команды и буфер с
+    // LINK не принимаются — ESP не сохраняет настройки из ядра видео и не пишет их ему.
+    generate if (HAS_EVO || HAS_VIDEO) begin : g_flash
+        wire [31:0] st, bufq;
         fb_flash #(.CLK_KHZ(PIX_KHZ), .SET_ADDR(FLASH_SET_ADDR), .BOOT_US(FLASH_BOOT_US)) flash (
             .clk(pixel_clk), .rst_n(rst_pix_n),
             .f_sck(flash_sck), .f_cs_n(flash_cs_n), .f_mosi(flash_mosi), .f_miso(flash_miso),
-            .buf_we(lk_wr_stb && lk_wr_addr[7:4] == 4'h2), .buf_waddr(lk_wr_addr[3:0]),
+            .buf_we(HAS_EVO && lk_wr_stb && lk_wr_addr[7:4] == 4'h2), .buf_waddr(lk_wr_addr[3:0]),
             .buf_wdata(lk_wr_data),
-            .buf_raddr(lk_rd_addr[3:0]), .buf_rdata(fl_buf_rdata),
-            .cmd_we(lk_wr_stb && lk_wr_addr == 8'h12), .cmd(lk_wr_data),
-            .status(fl_status),
+            .buf_raddr(lk_rd_addr[3:0]), .buf_rdata(bufq),
+            .cmd_we(HAS_EVO && lk_wr_stb && lk_wr_addr == 8'h12), .cmd(lk_wr_data),
+            .status(st),
             .load_stb(fl_load_stb), .load_cfg(fl_load_cfg), .load_adj(fl_load_adj)
         );
+        assign fl_status = HAS_EVO ? st : 32'd0;
+        assign fl_buf_rdata = HAS_EVO ? bufq : 32'd0;
     end else begin : g_no_flash
         assign flash_sck = 1'b0; assign flash_cs_n = 1'b1; assign flash_mosi = 1'b0;
         assign fl_status = 32'd0; assign fl_buf_rdata = 32'd0;
@@ -884,10 +944,10 @@ module ts_fb_core #(
     end endgenerate
 
     always_comb begin
-        if (lk_rd_addr[11]) lk_rd_data = sd_rx_q;            // 0x2000…: окно RX моста к microSD
+        if (lk_rd_addr[11]) lk_rd_data = HAS_VIDEO ? vp_au_q : sd_rx_q;   // 0x2000…: окно RX моста к microSD (ядро видео — FIFO звука)
         else case (lk_rd_addr[7:0])
             8'h00: lk_rd_data = 32'h5644_4334;
-            8'h01: lk_rd_data = {HAS_EVO ? 8'h01 : 8'h02, 8'h01, 16'h0120};
+            8'h01: lk_rd_data = {HAS_EVO ? 8'h01 : HAS_VIDEO ? 8'h05 : 8'h02, 8'h01, 16'h0129};   // личность: 05 — ядро видео (03 — Next, 04 — NES)
             8'h02: lk_rd_data = {pclk_khz, cal_fail, cal_done, cal_busy, blank, p_have_frame,
                                  p_mem_ready, p_pattern_on, p_bb_valid, p_aligned_v, p_aligned_h,
                                  p_vs_low, p_hs_low, p_mode, p_locked};
@@ -911,11 +971,11 @@ module ts_fb_core #(
             8'h16: lk_rd_data = ft_rs_data;
             8'h0C: lk_rd_data = p_cp_info;
             8'h39: lk_rd_data = {31'd0, ovl_ovf};
-            8'h3B: lk_rd_data = SD_FAST ? {8'hD1, 7'd0, sdl_df, sdl_busy, sdl_cur, sdl_inv, sdl_tgt} : 32'd0;
-            8'h3C: lk_rd_data = {12'hB00, boot_req, boot_armed, HAS_FT, HAS_EVO, BOOT_NEXT, BOOT_SLOT};
-            8'h40: lk_rd_data = sd_ctrl_rd;
-            8'h41: lk_rd_data = sd_ptr_rd;
-            8'h42: lk_rd_data = sd_stat;
+            8'h3B: lk_rd_data = SD_FAST ? {9'd0, sd_train_st} : 32'd0;
+            8'h3C: lk_rd_data = {11'h580, HAS_VIDEO, boot_req, boot_armed, HAS_FT, HAS_EVO, BOOT_NEXT, BOOT_SLOT};
+            8'h40: lk_rd_data = HAS_VIDEO ? {vp_au_ep_p, vp_au_pause_p, 12'd0, vp_au_wp_p} : sd_ctrl_rd;
+            8'h41: lk_rd_data = HAS_VIDEO ? {16'd0, au_ctl_p} : sd_ptr_rd;
+            8'h42: lk_rd_data = HAS_VIDEO ? aclk_p : sd_stat;
             8'h17: lk_rd_data = {ft_busy, ft_int_core, ft_dl_active, ft_copro_hold, ft_cfg_3mb,
                                  ft_ramg_late, ft_ramg_drop, cp_ovf, ft_status, 1'b0, ft_lost, ft_cfg_nodith, ft_cfg_esp, ft_cmd_write};
             default:
@@ -929,12 +989,14 @@ module ts_fb_core #(
         .TICK(PIX_KHZ), .CAL_TIMEOUT_MS(CAL_TIMEOUT_MS),
         .DEF_SRC(DEF_SRC), .DEF_PHASE(DEF_PHASE), .DEF_DELAY(DEF_DELAY_CODE), .DEF_CLOCK(DEF_CLOCK),
         .DEF_RD(DEF_RD), .DEF_ALIGN(DEF_ALIGN), .DEF_ASPECT(DEF_ASPECT), .DEF_SIZE(DEF_SIZE),
-        .DEF_AVG(DEF_AVG), .CALIBRATE(CALIBRATE)
+        .DEF_AVG(DEF_AVG), .CALIBRATE(CAL_ON), .HAS_CAL(!SD_FAST)
     ) ui (
         .clk(pixel_clk), .rst_n(rst_pix_n),
         .chk_tick(chk_tick), .chk_err(chk_err), .pattern_on(p_pattern_on),
         .frames_written(p_frames_written),
-        .ext_ctrl_we(ui_ctrl_we), .ext_ctrl(ui_wr_data[17:0]), .ext_src_auto(evo_rst),
+        // ядро видео записи CTRL с LINK не принимает: настройки — свои, из flash (ESP 0.1.102
+        // писала ему CTRL целиком и сбрасывала точку выборки SDRAM SD READ — мусор на картинке)
+        .ext_ctrl_we(ui_ctrl_we && !HAS_VIDEO), .ext_ctrl(ui_wr_data[17:0]), .ext_src_auto(evo_rst),
         .ext_adj_we(ui_adj_we),
         .ext_h_adj(ui_wr_data[7:0]), .ext_v_adj(ui_wr_data[15:8]),
         .ext_tab_we(ui_tab_we), .ext_tab_idx(ui_tab_idx),
@@ -1040,7 +1102,7 @@ module ts_fb_core #(
     // ------------------------------------------------------------------
     wire [1:0] m_src, m_rd;
     wire       m_avg;
-    cdc_bus #(.W(5), .INIT({CALIBRATE ? SRC_TEST : DEF_SRC, DEF_RD, DEF_AVG})) cfg_to_mem (
+    cdc_bus #(.W(5), .INIT({CAL_ON ? SRC_TEST : DEF_SRC, DEF_RD, DEF_AVG})) cfg_to_mem (
         .clk(clk_mem), .rst_n(rst_mem_n), .d({cfg_src, cfg_rd, cfg_avg}), .q({m_src, m_rd, m_avg})
     );
     wire m_locked;
@@ -1060,8 +1122,9 @@ module ts_fb_core #(
             end else begin
                 nosig_cnt <= nosig_cnt + 27'd1;
             end
-            // без захвата Evo (ядро FT812) таблица — только при калибровке и SOURCE = TEST
-            pattern_on <= (m_src == SRC_TEST) || (m_src == SRC_AUTO && no_evo && HAS_EVO);
+            // без захвата Evo таблица — только при SOURCE = TEST; у ядра FT812 (SD_FAST) с 1.38 её
+            // нет совсем (HAS_PAT)
+            pattern_on <= HAS_PAT && ((m_src == SRC_TEST) || (m_src == SRC_AUTO && no_evo && HAS_EVO));
         end
     end
 
@@ -1070,10 +1133,15 @@ module ts_fb_core #(
     reg         pattern_q;           // источник слова, запрошенного тактом раньше
     always_ff @(posedge clk_mem) pattern_q <= pattern_on;
 
-    fb_pattern #(.H_ACTIVE(H_ACTIVE), .V_ACTIVE(V_ACTIVE), .PERIOD(PATTERN_PERIOD)) pattern (
-        .clk(clk_mem), .rst_n(rst_mem_n), .enable(pattern_on),
-        .rd(fb_rd & pattern_on), .q(pat_q), .empty(pat_empty)
-    );
+    generate if (HAS_PAT) begin : g_pattern
+        fb_pattern #(.H_ACTIVE(H_ACTIVE), .V_ACTIVE(V_ACTIVE), .PERIOD(PATTERN_PERIOD)) pattern (
+            .clk(clk_mem), .rst_n(rst_mem_n), .enable(pattern_on),
+            .rd(fb_rd & pattern_on), .q(pat_q), .empty(pat_empty)
+        );
+    end else begin : g_no_pattern
+        assign pat_q = '0;
+        assign pat_empty = 1'b1;
+    end endgenerate
     // Пока пишется таблица, FIFO захвата сливается, чтобы не переполняться
     assign cap_rd = pattern_on ? !cap_empty : fb_rd;
     wire        fb_empty = pattern_on ? pat_empty : cap_empty;
@@ -1106,6 +1174,8 @@ module ts_fb_core #(
     wire [20:0] rd_addr;
     wire [2:0]  rd_len;
     wire [31:0] rd_wdata;
+    wire [3:0]  rd_wmask;            // маска слов записи (ядро видео: неполная группа медиа-FIFO)
+    wire [31:0] rd_wdata2;           // растеризатор ядра FT812: второе слово пары выгрузки
     wire        ov_req, ov_we, ov_ack, ov_wr_take, ov_rd_valid;
     wire [20:0] ov_addr;
     wire [2:0]  ov_len;
@@ -1151,44 +1221,51 @@ module ts_fb_core #(
     wire [2:0]  sd_len  = sd_sel_ov ? ov_len : sd_sel_ft ? 3'd0 : sd_sel_fb ? mem_len : rd_len;
     wire [2:0]  sd_tag  = sd_sel_ov ? 3'b110 : sd_sel_ft ? 3'b010 : sd_sel_fb ? {2'b00, mem_tag} : {2'b10, rd_sub};
     wire [31:0] sd_wdata = sd_wr_ov ? ov_wdata : sd_wr_ft ? ft_g_wdata : sd_wr_rd ? rd_wdata : mem_wdata;
-    wire [3:0]  sd_wmask = sd_wr_ov ? ov_wmask : sd_wr_ft ? ft_g_wmask : 4'hF;
+    wire [3:0]  sd_wmask = sd_wr_ov ? ov_wmask : sd_wr_ft ? ft_g_wmask : sd_wr_rd ? rd_wmask : 4'hF;
 
     generate if (SD_FAST) begin : g_sd_fast
-        wire        c_req, c_we, c_ack, c_wr_take, c_rd_valid, c_init;
+        wire        c_req, c_we, c_ack, c_wr_take, c_rd_valid, c_init, c_tag, c_rd_tag;
         wire [20:0] c_addr;
         wire [2:0]  c_len;
         wire [31:0] c_wdata, c_rd_data;
         wire [3:0]  c_wmask;
-        wire [1:0]  c_rd_phase;
-        sd_bridge #(.TAGW(3)) bridge (
+        // запись растеризатора (метка 101) — по два слова за такт (ft_rd_pix UP2)
+        sd_bridge #(.TAGW(3), .W2(HAS_FT)) bridge (
             .clk(clk_mem), .rst_n(rst_mem_n), .clk_sd(clk_sd), .rst_sd_n(rst_sd_n),
             .req(sd_req), .we(sd_we), .addr(sd_addr), .req_len(sd_len), .req_tag(sd_tag),
             .ack(sd_ack), .ack_tag(sd_ack_tag),
             .wr_take(mem_wr_take_any), .wr_idx(mem_wr_idx), .wr_tag(sd_wr_tag),
-            .wdata(sd_wdata), .wmask(sd_wmask),
+            .wdata(sd_wdata), .wmask(sd_wmask), .wdata2(rd_wdata2),
             .rd_valid(mem_rd_valid_any), .rd_idx(mem_rd_idx), .rd_tag(sd_rd_tag), .rd_data(mem_rd_data),
             .rd_phase(m_rd), .init_done(mem_ready),
             .c_req(c_req), .c_we(c_we), .c_addr(c_addr), .c_len(c_len), .c_ack(c_ack),
             .c_wr_take(c_wr_take), .c_wdata(c_wdata), .c_wmask(c_wmask),
-            .c_rd_valid(c_rd_valid), .c_rd_data(c_rd_data), .c_rd_phase(c_rd_phase), .c_init_done(c_init)
+            .c_rd_valid(c_rd_valid), .c_rd_data(c_rd_data), .c_rd_phase(), .c_init_done(c_init),
+            .c_tag(c_tag), .c_rd_tag(c_rd_tag)
         );
-        // такты из паспортных времён на 2 × MEM_KHZ (123,75 МГц: tRCD, tRP — 2, tWR — 2, tRFC — 8), CL 3
+        // такты из паспортных времён на 2 × MEM_KHZ (121,5 МГц: tRCD, tRP — 2, tWR — 2, tRFC — 8), CL 3.
+        // Точку выборки чтения выбирает подбор (sdram_train), а не SD READ (rd_phase моста не нужен);
+        // пока он идёт, c_init = 0 — мост команд не подаёт.
         localparam int SD_KHZ = 2 * MEM_KHZ;
         localparam int SD_RCD = (15 * SD_KHZ + 999_999) / 1_000_000;
         localparam int SD_WR  = (12 * SD_KHZ + 999_999) / 1_000_000;
         localparam int SD_RFC = (60 * SD_KHZ + 999_999) / 1_000_000;
-        sdram_burst #(.TAGW(1), .CLK_KHZ(SD_KHZ), .CL(3), .T_RCD(SD_RCD < 2 ? 2 : SD_RCD), .T_RP(SD_RCD),
-                      .T_WR(SD_WR), .T_RFC(SD_RFC), .INIT_US(SDRAM_INIT_US)) sdram (
-            .clk(clk_sd), .rst_n(rst_sd_n), .rd_phase(c_rd_phase),
-            .req(c_req), .we(c_we), .addr(c_addr), .req_len(c_len), .req_tag(1'b0),
+        sdram_train #(.TAGW(1), .CLK_KHZ(SD_KHZ), .CL(3), .T_RCD(SD_RCD < 2 ? 2 : SD_RCD), .T_RP(SD_RCD),
+                      .T_WR(SD_WR), .T_RFC(SD_RFC), .INIT_US(SDRAM_INIT_US),
+                      .DEF_PHASE(DEF_SD_PHASE)) sdram (
+            .clk(clk_sd), .rst_n(rst_sd_n),
+            .req(c_req), .we(c_we), .addr(c_addr), .req_len(c_len), .req_tag(c_tag),
             .ack(c_ack), .op_tag(), .wr_take(c_wr_take), .wr_idx(), .wdata(c_wdata), .wmask(c_wmask),
-            .rd_valid(c_rd_valid), .rd_idx(), .rd_data(c_rd_data), .init_done(c_init),
+            .rd_valid(c_rd_valid), .rd_idx(), .rd_data(c_rd_data), .rd_tag(c_rd_tag), .init_done(c_init),
+            .phase(sdram_phase), .train_st(sd_train_st), .train_win(),
             .sdram_cs_n(sdram_cs_n), .sdram_ras_n(sdram_ras_n), .sdram_cas_n(sdram_cas_n),
             .sdram_we_n(sdram_we_n), .sdram_a(sdram_a), .sdram_ba(sdram_ba), .sdram_dqm(sdram_dqm),
             .sdram_dq_out(sdram_dq_out), .sdram_dq_oe(sdram_dq_oe), .sdram_dq_in(sdram_dq_in)
         );
     end else begin : g_sd
         wire [2:0] op_tag;
+        assign sdram_phase  = 4'd0;
+        assign sd_train_st  = '0;
         sdram_burst #(.TAGW(3), .CLK_KHZ(MEM_KHZ), .INIT_US(SDRAM_INIT_US)) sdram (
             .clk(clk_mem), .rst_n(rst_mem_n), .rd_phase(m_rd),
             .req(sd_req), .we(sd_we), .addr(sd_addr), .req_len(sd_len), .req_tag(sd_tag),
@@ -1214,26 +1291,69 @@ module ts_fb_core #(
     wire [1:0]  ft_front, ft_pub_buf;
     wire [9:0]  ft_pub_words, ft_pub_h;
     wire [10:0] ft_pub_w;
-    wire [31:0] rd_status;
-    wire [15:0] rd_time;
+    wire        vp_vtick;                // ядро видео: импульс начала выходного кадра (clk_mem)
+    wire [31:0] rd_status;               // ядро видео: слотов темпа (LINK 0x0A)
+    wire [15:0] rd_time;                 //   отменённых кадров (LINK 0x0B)
     generate if (HAS_FT) begin : g_render
-        ft_render #(.FB_BASE(FB_BASE)) render (
-            .clk(clk_mem), .rst_n(rst_mem_n),
+        ft_render #(.FB_BASE(FB_BASE), .UP2(SD_FAST)) render (
+            .clk(clk_mem), .rst_n(rst_mem_n), .clk_sd(clk_sd),
             .enable(m_ft && ft_disp_on), .hsize(ft_hsize), .vsize(ft_vsize),
             .ramg_3mb(ft_cfg_3mb_s[1]), .dither(!ft_cfg_nodith_s[1]),
             .dl_addr(rd_dl_addr), .dl_q(rd_dl_q), .swap_hold(rd_swap_hold), .swap_wait(ft_dlswap != 2'd0),
             .s_req(rd_req), .s_we(rd_we), .s_addr(rd_addr), .s_len(rd_len), .s_sub(rd_sub),
             .s_ack(sd_ack && sd_ack_tag[2:1] == 2'd2), .s_op_sub(sd_ack_tag[0]),
-            .s_wr_take(mem_wr_take_any && sd_wr_tag == 3'b101), .s_wdata(rd_wdata),
+            .s_wr_take(mem_wr_take_any && sd_wr_tag == 3'b101), .s_wdata(rd_wdata), .s_wdata2(rd_wdata2),
             .s_rd_valid(mem_rd_valid_any && sd_rd_tag == 3'b100), .s_rd_idx(mem_rd_idx[2:0]),
             .s_rd_data(mem_rd_data),
             .fb_showing(ft_showing), .fb_front(ft_front),
             .pub_v(ft_pub_v), .pub_buf(ft_pub_buf), .pub_words(ft_pub_words), .pub_w(ft_pub_w),
             .pub_h(ft_pub_h), .status(rd_status), .frame_time(rd_time)
         );
+        assign vp_au_wp_p = '0; assign vp_au_ep_p = '0; assign vp_au_q = '0; assign vp_au_pause_p = 1'b0;
+        assign rd_wmask = 4'hF;
+    end else if (HAS_VIDEO) begin : g_video
+        // Ядро видео — на разъёме растеризатора: запись кадров FT fb_core и медиа-FIFO (метка 101),
+        // чтение медиа-FIFO (метка 100; 2 МБ с адреса 0 — место RAM_G, которой здесь нет).
+        // Темп — по началу кадровой синхронизации вывода (vp_vtick, ниже у развёртки)
+        wire [15:0] vp_aborts;
+        // звук: значения ESP — в clk_mem, указатель записи и эпоха — обратно, к LINK
+        wire [10:0] au_rp_m, au_wp_m;
+        wire [15:0] au_ctl_m;
+        wire [31:0] aclk_m;
+        wire [7:0]  au_ep_m;
+        wire        au_pause_m;
+        vp_core #(.OUT_US(20_000)) video (
+            .clk(clk_mem), .rst_n(rst_mem_n),
+            .spi_tg(ft_tg), .spi_kind(ft_kind), .spi_h0(ft_h0), .spi_h1(ft_h1), .spi_b(ft_b),
+            .spi_rd_byte(vp_rd_byte),
+            .vtick(vp_vtick),
+            .s_req(rd_req), .s_we(rd_we), .s_addr(rd_addr), .s_len(rd_len),
+            .s_ack(sd_ack && sd_ack_tag[2:1] == 2'd2),
+            .s_wr_take(mem_wr_take_any && sd_wr_tag == 3'b101), .s_wdata(rd_wdata), .s_wmask(rd_wmask),
+            .s_rd_valid(mem_rd_valid_any && sd_rd_tag == 3'b100), .s_rd_data(mem_rd_data),
+            .fb_showing(ft_showing), .fb_front(ft_front),
+            .pub_v(ft_pub_v), .pub_buf(ft_pub_buf), .pub_words(ft_pub_words), .pub_w(ft_pub_w),
+            .pub_h(ft_pub_h),
+            .st_slots(rd_status), .st_frames(), .st_aborts(vp_aborts), .st_pause(au_pause_m),
+            .au_en(au_ctl_m[0]), .au_ack_epoch(au_ctl_m[15:8]), .au_rp(au_rp_m),
+            .au_wp(au_wp_m), .au_epoch(au_ep_m), .aclk_en(au_ctl_m[1]), .aclk_us(aclk_m),
+            .au_rd_clk(link_sck), .au_rd_addr(lk_rd_addr[9:0]), .au_rd_q(vp_au_q)
+        );
+        cdc_bus #(.W(11)) au_rp_cdc  (.clk(clk_mem), .rst_n(rst_mem_n), .d(au_rp_p),  .q(au_rp_m));
+        cdc_bus #(.W(16)) au_ctl_cdc (.clk(clk_mem), .rst_n(rst_mem_n), .d(au_ctl_p), .q(au_ctl_m));
+        cdc_bus #(.W(32)) aclk_cdc   (.clk(clk_mem), .rst_n(rst_mem_n), .d(aclk_p),   .q(aclk_m));
+        cdc_bus #(.W(20)) au_wp_cdc  (.clk(pixel_clk), .rst_n(rst_pix_n), .d({au_pause_m, au_ep_m, au_wp_m}),
+                                      .q({vp_au_pause_p, vp_au_ep_p, vp_au_wp_p}));
+        // запись (кадры, медиа-FIFO) — метка 101, чтение медиа-FIFO — 100, как у растеризатора
+        assign rd_sub = rd_we;
+        assign rd_wdata2 = '0;
+        assign rd_dl_addr = '0;
+        assign rd_time = vp_aborts;
     end else begin : g_no_render
+        assign vp_au_wp_p = '0; assign vp_au_ep_p = '0; assign vp_au_q = '0; assign vp_au_pause_p = 1'b0;
         assign rd_req = 1'b0; assign rd_we = 1'b0; assign rd_addr = '0; assign rd_len = '0;
-        assign rd_sub = 1'b0; assign rd_wdata = '0; assign rd_dl_addr = '0;
+        assign rd_wdata2 = '0;
+        assign rd_sub = 1'b0; assign rd_wdata = '0; assign rd_dl_addr = '0; assign rd_wmask = 4'hF;
         assign ft_pub_v = 1'b0; assign ft_pub_buf = 2'd0; assign ft_pub_words = '0;
         assign ft_pub_w = '0; assign ft_pub_h = '0; assign rd_status = '0; assign rd_time = '0;
     end endgenerate
@@ -1280,18 +1400,45 @@ module ts_fb_core #(
     // поле (картинки TS-Config в нём нет), испытательная таблица — всегда. Калибровка выборки
     // SDRAM (после каждой загрузки ядра, ~0,4 с) сверяет таблицу по чтению, а на выход — чёрное
     // поле (с 1.23): с загрузкой слота 0,2 с таблица мигала при каждом старте
-    wire sc_ft    = HAS_FT && SCALE && (HAS_EVO ? blank : !p_pattern_on);
-    wire sc_blank = cal_busy ||
-                    (!HAS_FT ? blank : HAS_EVO ? (SCALE ? 1'b0 : blank) : (!p_pattern_on && !blank));
+    //
+    // Ядро FT812 (с 1.38): после загрузки — чёрное поле, пока ESP не запишет CTRL. Своих настроек из
+    // flash у него нет (fb_flash убран в 1.31 ради места): оно стартует с DEF_ASPECT/DEF_SIZE, а
+    // ASPECT и SIZE слота 0 ему пишет ESP, заметив загрузку на очередном опросе LINK — до ~2 с спустя.
+    // Программа, что рисует сразу (заставка погоды WC), показывала эти секунды 4:3 и затем
+    // перескакивала в 16:9. Если ESP настроек не знает и не пишет — картинка через 2^FMT_WAIT_LOG2
+    // кадров вывода (счёт кадров, а не тактов: короче счётчик — ядро на пределе по месту).
+    localparam bit FMT_WAIT = HAS_FT && !HAS_EVO && !HAS_VIDEO;
+    wire fmt_wait;
+    generate if (FMT_WAIT) begin : g_fmt_wait
+        reg              fmt_got, fmt_vs;
+        reg [FMT_WAIT_LOG2:0] fmt_cnt;
+        always_ff @(posedge pixel_clk or negedge rst_pix_n)
+            if (!rst_pix_n) begin
+                fmt_got <= 1'b0; fmt_vs <= 1'b0; fmt_cnt <= '0;
+            end else begin
+                if (lk_wr_stb && lk_wr_addr == 8'h10) fmt_got <= 1'b1;
+                fmt_vs <= s_vs ^ VS_NEG;
+                if ((s_vs ^ VS_NEG) && !fmt_vs && !fmt_cnt[FMT_WAIT_LOG2]) fmt_cnt <= fmt_cnt + 1'b1;
+            end
+        assign fmt_wait = !fmt_got && !fmt_cnt[FMT_WAIT_LOG2];
+    end else begin : g_no_fmt_wait
+        assign fmt_wait = 1'b0;
+    end endgenerate
+    wire sc_ft    = (HAS_FT || HAS_VIDEO) && SCALE && (HAS_EVO ? blank : !p_pattern_on);
+    wire sc_blank = cal_busy || fmt_wait ||
+                    (!(HAS_FT || HAS_VIDEO) ? blank : HAS_EVO ? (SCALE ? 1'b0 : blank) : (!p_pattern_on && !blank));
 
     fb_scanout #(
         .H_ACTIVE(H_ACTIVE), .V_ACTIVE(V_ACTIVE),
         .OUT_W(OUT_W), .OUT_H(OUT_H), .IMG_X(IMG_X), .IMG_Y(IMG_Y),
         .H_FP(H_FP), .H_SYNC(H_SYNC), .H_BP(H_BP),
         .V_FP(V_FP), .V_SYNC(V_SYNC), .V_BP(V_BP),
-        .HS_NEG(HS_NEG), .VS_NEG(VS_NEG), .SCALE(SCALE)
+        .HS_NEG(HS_NEG), .VS_NEG(VS_NEG), .SCALE(SCALE), .OUT768(OUT768), .FT_W512(HAS_VIDEO),
+        .HAS_CHK(HAS_PAT)
     ) scanout (
         .pixel_clk(pixel_clk), .rst_n(rst_pix_n), .blank(sc_blank),
+        // ядро видео (1.39): окно — ASPECT и SIZE слота 0, холст ролика растягивается на него, как
+        // кадр FT812 (в 1.37–1.38 ASPECT не брался: ролик 512×384 с широкой картинкой выходил узким)
         .aspect(cfg_aspect), .size(cfg_size),
         .ft(sc_ft), .src_w(p_rd_w), .src_h(p_rd_h),
         .req_toggle(req_toggle), .req_line(req_line), .req_first(req_first),
@@ -1302,6 +1449,22 @@ module ts_fb_core #(
         .out_de(s_de), .out_hs(s_hs), .out_vs(s_vs),
         .chk_err(chk_err), .chk_tick(chk_tick)
     );
+
+    // Ядро видео: начало кадровой синхронизации вывода — в домен clk_mem (темп кадров vp_pace)
+    generate if (HAS_VIDEO) begin : g_vtick
+        reg        vt_tg, vs_prev;
+        reg  [2:0] vt_s;
+        always_ff @(posedge pixel_clk or negedge rst_pix_n)
+            if (!rst_pix_n) begin vt_tg <= 1'b0; vs_prev <= 1'b0; end
+            else begin
+                vs_prev <= s_vs ^ VS_NEG;
+                if ((s_vs ^ VS_NEG) && !vs_prev) vt_tg <= !vt_tg;
+            end
+        always_ff @(posedge clk_mem) vt_s <= {vt_s[1:0], vt_tg};
+        assign vp_vtick = vt_s[2] ^ vt_s[1];
+    end else begin : g_no_vtick
+        assign vp_vtick = 1'b0;
+    end endgenerate
 
     // Растеризатор — в домен пикселей (LINK и размер кадра FT для развёртки; меняется редко)
     cdc_view #(.W(69)) rd_to_pix (
@@ -1334,9 +1497,10 @@ module ts_fb_core #(
         assign pclk_khz = '0;
     end endgenerate
 
-    // Оверлеи ESP поверх картинки (меню настроек, обложка, спектр) — fb_ovl; только в ядре с
-    // Evo: ядру FT812 меню и оверлеи не нужны (решение 2026-10-19), их место — растеризатору
-    generate if (HAS_EVO) begin : g_ovl
+    // Оверлеи ESP поверх картинки (меню настроек, обложка, спектр) — fb_ovl; в ядре с Evo и в
+    // ядре видео (панель плеера рисует ESP): ядру FT812 меню и оверлеи не нужны (решение
+    // 2026-10-19), их место — растеризатору
+    generate if (HAS_EVO || HAS_VIDEO) begin : g_ovl
     fb_ovl #(.N(NOVL), .REGION(OVL_REGION), .HS_NEG(HS_NEG), .VS_NEG(VS_NEG)) ovl (
         .pclk(pixel_clk), .prst_n(rst_pix_n),
         .cfg_on(ovl_on), .cfg_x2(ovl_x2), .cfg_alpha(ovl_alpha), .cfg_x(ovl_x), .cfg_y(ovl_y),
@@ -1361,10 +1525,13 @@ module ts_fb_core #(
         assign ovl_ovf = 1'b0;
     end endgenerate
 
-    // TMDS: DVI или HDMI с AVI InfoFrame; синхроимпульсы — в управляющих битах синего канала
+    // TMDS: DVI или HDMI с AVI InfoFrame; синхроимпульсы — в управляющих битах синего канала.
+    // 1366×768 — не формат CEA-861: VIC 0, пропорции не указаны (так его на плате приняли
+    // телевизор, карта захвата и мониторы, 28.10.2026)
     hdmi_tx #(
         .HDMI(HDMI), .VS_HIGH(!VS_NEG),
-        .VIC(SCALE ? (HAS_EVO ? 8'd19 : 8'd4) : 8'd17), .PIC_AR(SCALE ? 2'b10 : 2'b01)   // 4 — 720p60 (ядро FT812)
+        .VIC(OUT768 ? 8'd0 : SCALE ? ((HAS_EVO || HAS_VIDEO) ? 8'd19 : 8'd4) : 8'd17),   // 4 — 720p60 (ядро FT812 до 1.41)
+        .PIC_AR(OUT768 ? 2'b00 : SCALE ? 2'b10 : 2'b01)
     ) tmds (
         .pixel_clk(pixel_clk), .reset_n(rst_pix_n),
         .r(vid_r), .g(vid_g), .b(vid_b), .de(vid_de), .hs(vid_hs), .vs(vid_vs),

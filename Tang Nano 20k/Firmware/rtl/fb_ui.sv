@@ -42,7 +42,10 @@ module fb_ui #(
     parameter bit         DEF_ASPECT = 1'b0, // 0 — 4:3, 1 — 16:9
     parameter logic [1:0] DEF_SIZE  = 2'd0,  // 0 — 100 %, 1 — 95 %, 2 — 90 %
     parameter bit         DEF_AVG   = 1'b0,  // FRAME BLEND
-    parameter bit         CALIBRATE = 1'b1
+    parameter bit         CALIBRATE = 1'b1,
+    // 0 — калибровки SD READ нет совсем, и по CTRL[9] тоже (ядро FT812 с 1.38: точку выборки
+    // подбирает sdram_train, SD READ ему не нужен) — синтез убирает автомат калибровки
+    parameter bit         HAS_CAL = 1'b1
 ) (
     input  wire              clk,
     input  wire              rst_n,
@@ -134,7 +137,7 @@ module fb_ui #(
             cfg_aspect <= DEF_ASPECT;
             cfg_size  <= DEF_SIZE;
             cfg_avg   <= DEF_AVG;
-            cal_start <= CALIBRATE;
+            cal_start <= CALIBRATE && HAS_CAL;
         end else begin
             cal_start <= 1'b0;
             if (ext_ctrl_we) begin
@@ -146,7 +149,7 @@ module fb_ui #(
                 cfg_aspect <= ext_ctrl[14];
                 cfg_size   <= (ext_ctrl[16:15] == 2'd3) ? 2'd0 : ext_ctrl[16:15];
                 cfg_avg    <= ext_ctrl[17];
-                cal_start <= ext_ctrl[9];
+                cal_start <= ext_ctrl[9] && HAS_CAL;
             end
             // Сброс Evo — выход из испытательной таблицы к картинке TS-Config (Tang при сбросе
             // больше не перезагружается, а источник не хранится и после загрузки — AUTO)

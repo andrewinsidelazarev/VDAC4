@@ -127,9 +127,11 @@ cp() {
 
 ws() {
     mkdir -p sim/ws
-    echo "=== светодиод WS2812 модуля Tang (вывод MISO): «чёрный» после тишины FT_CS, MISO при выборе"
-    "$IV" -g2012 -s tb_ws_dark -o sim/ws/t.vvp rtl/ws_dark.sv tb/tb_ws_dark.sv
-    (cd sim/ws && "$VVP" -n t.vvp | grep -v '^tb/')
+    echo "=== светодиод WS2812 модуля Tang (вывод MISO): чёрный при шуме чтений Evo (R-Type), MISO при выборе"
+    for r in 280000.0 50000.0; do               # порог сброса WS2812B и WS2812
+        "$IV" -g2012 -s tb_ws_dark -Ptb_ws_dark.RST_NS=$r -o sim/ws/t.vvp rtl/ws_dark.sv tb/tb_ws_dark.sv
+        (cd sim/ws && "$VVP" -n t.vvp | grep -v '^tb/')
+    done
 }
 
 if [ "$1" = "flash" ]; then flash; exit 0; fi

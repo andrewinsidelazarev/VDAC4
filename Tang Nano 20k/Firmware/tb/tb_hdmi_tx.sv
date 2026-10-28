@@ -140,6 +140,10 @@ module tb_hdmi_tx;
         end
     endtask
 
+    // После преамбулы видео (8 тактов CTL = 1,0) — защитная полоса видео (2 такта 2CC/133/2CC),
+    // затем первая точка. 1.34 полосу убирала (как ядро ZX Next I) — телевизор пользователя
+    // показывал чёрный экран; с 1.35 она снова есть.
+    integer vpre_n = 0, n00 = 0;                 // длина прошедшей преамбулы видео; символов 00 за ней
     always @(posedge clk) if (rst_n && frames < FRAMES) begin : parse
         integer c0, c1, c2, d0, d1, d2;
         c0 = ctl(t0); c1 = ctl(t1); c2 = ctl(t2);
@@ -149,6 +153,8 @@ module tb_hdmi_tx;
                 if (c0 >= 0 && c1 >= 0 && c2 >= 0) begin
                     // синхроимпульсы в управляющих символах канала 0
                     if (c0 != {ref_now[0], ref_now[1]}) err("HSYNC/VSYNC в управляющем символе");
+                    if (st == S_VPRE && !(c1 == 1 && c2 == 0)) begin vpre_n = run; n00 = 0; end
+                    if (c1 == 0 && c2 == 0) n00 = n00 + 1; else if (!(c1 == 1 && c2 == 0)) vpre_n = 0;
                     if (c1 == prev_c1 && c2 == prev_c2) run = run + 1; else run = 1;
                     prev_c1 = c1; prev_c2 = c2;
                     st = (c1 == 1 && c2 == 0) ? S_VPRE : (c1 == 1 && c2 == 1) ? S_DPRE : S_CTRL;
@@ -156,7 +162,8 @@ module tb_hdmi_tx;
                     else if (!((c1 == 1 && c2 == 0) || (c1 == 1 && c2 == 1))) err("неизвестная преамбула");
                 end else if (st == S_VPRE && run == 8 && t0 == 10'b1011001100 && t1 == 10'b0100110011 &&
                              t2 == 10'b1011001100) begin
-                    st = S_VGB; cnt = 1;
+                    // первая защитная полоса видео — сразу за 8 тактами преамбулы
+                    st = S_VGB; vpre_n = 0; n00 = 0;
                 end else if (st == S_DPRE && run == 8 && d0 >= 12 && t1 == 10'b0100110011 &&
                              t2 == 10'b0100110011) begin
                     if ((d0 & 3) != {ref_now[0], ref_now[1]}) err("HSYNC/VSYNC в защитной полосе");

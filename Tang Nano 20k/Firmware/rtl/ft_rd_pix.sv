@@ -23,6 +23,14 @@
 // f_ready — из регистров: сравнение считается на такт раньше для обоих случаев — исполнитель
 // продвинулся (следующая точка — f_xn) или стоит (точка та же, f_x).
 //
+// UP2 (ядро FT812 с мостом sd_bridge, с 1.40): выгрузка — по два слова за такт clk (мост берёт
+// их парой — w_data и w_data2 — через два такта после своего w_take). Порты цвета буферов — на clk_sd =
+// 2 × clk (тот же PLL, фронт clk — вместе с каждым вторым фронтом clk_sd): выгружаемый буфер за
+// такт clk читается дважды (слова 2k и 2k + 1), фрагменты читают своё слово в такт A по адресу
+// a_x (оба чтения такта — одно слово; данные к концу такта, как прежде) и пишут из B4 (запись
+// повторяется на обоих фронтах — то же слово). Прежде сбор строки в мосте шёл по слову за такт
+// clk: выгрузка кадра (402 тыс. слов) — не меньше 6,6 мс, пустой кадр — 8,4 мс (стенд vsys).
+//
 // Выгрузка плитки — по строке плитки запросом в ширину/16 пакетов sdram_burst (у 128×8 — 8
 // пакетов, 64 слова, как прежде строка кадра), всегда все строки во всю ширину (плитки у
 // правого и нижнего края — тоже: лишнее ложится в тот же
@@ -31,10 +39,12 @@
 // экрана (как REG_DITHER FT812, выход которого — 6 бит на канал).
 module ft_rd_pix #(
     parameter int TW_LOG = 7,               // плитка: 2^TW_LOG × 2^TH_LOG точек (1024)
-    parameter int TH_LOG = 3
+    parameter int TH_LOG = 3,
+    parameter bit UP2    = 1'b0             // выгрузка по два слова за такт (порты цвета — clk_sd)
 ) (
     input  wire         clk,
     input  wire         rst_n,
+    input  wire         clk_sd,         // UP2: 2 × clk, тот же PLL (иначе не нужен)
     input  wire [20:0]  fb_base,        // адрес слова строки 0 кадра в SDRAM, на кадр
     input  wire [20:0]  fb_base_hi,     // адрес слова строки 512 (буфер FT 2 — в другом месте)
     input  wire         dither,
@@ -78,8 +88,10 @@ module ft_rd_pix #(
     output reg  [20:0]  w_addr,
     output reg  [2:0]   w_len,
     input  wire         w_ack,
-    input  wire         w_take,         // слово уходит: w_data в этот такт
-    output wire [31:0]  w_data
+    input  wire         w_take,         // слово уходит: w_data в этот такт (UP2 — пара, w_data и
+                                        // w_data2 — в следующем такте)
+    output wire [31:0]  w_data,
+    output wire [31:0]  w_data2
 );
     // --- память буферов -----------------------------------------------------------------------
     reg  [32:0] ce0 [0:511], co0 [0:511], ce1 [0:511], co1 [0:511];   // {не касались, RGBA}
@@ -94,14 +106,23 @@ module ft_rd_pix #(
     reg  [9:0]  ws;
     reg  [7:0]  wds;
 
-    always_ff @(posedge clk) begin
+    // клок портов цвета: UP2 — clk_sd (адреса и данные записи — из домена clk, держатся такт clk)
+    wire        bclk;
+    generate if (UP2) begin : g_bclk_sd
+        assign bclk = clk_sd;
+    end else begin : g_bclk
+        assign bclk = clk;
+    end endgenerate
+    always_ff @(posedge bclk) begin
         qe0 <= ce0[ra0]; qo0 <= co0[ra0];
         qe1 <= ce1[ra1]; qo1 <= co1[ra1];
-        qs0 <= st0[rs];  qs1 <= st1[rs];
         if (we_e0) ce0[wa0] <= wd0;
         if (we_o0) co0[wa0] <= wdo0;
         if (we_e1) ce1[wa1] <= wd1;
         if (we_o1) co1[wa1] <= wdo1;
+    end
+    always_ff @(posedge clk) begin
+        qs0 <= st0[rs];  qs1 <= st1[rs];
         if (we_s0) st0[ws] <= wds;
         if (we_s1) st1[ws] <= wds;
     end
@@ -390,9 +411,27 @@ module ft_rd_pix #(
     localparam int PB = TW_LOG - 4;            // разрядов пакета в строке плитки
     localparam int KB = TW_LOG - 1;            // разрядов слова в строке плитки
 
+    // UP2: фронт clk_sd посередине такта clk (M) и вместе с фронтом clk (E); u_x2 = 1 от M до E
+    // (по переключателю домена clk). Выгружаемый буфер: адрес {u_head, u_x2} — пара, которую мост
+    // берёт (w_take) в этом такте c: до M слово 2k (его берёт регистр u_lo на E), до E — 2k + 1
+    // (u_hi на следующем M). В такте c + 1 она в u_lo/u_hi (u_hi — со второй его половины), в
+    // RGB565 — в u_w в такте c + 2, мост пишет её тогда же. Пути от выхода BSRAM — только в
+    // регистры (полтакта), преобразование — из регистров (адрес не зависит от w_take).
+    reg         u_tg;                       // clk: переключается каждый такт
+    reg         u_tgs, u_x2;                // clk_sd: копия u_tg; u_x2 — от фронта M до фронта E
+    reg  [65:0] u_lo;                       // clk: {нечётная, чётная} слова 2k
+    reg  [65:0] u_hi;                       // clk_sd: слова 2k + 1
+    reg  [7:0]  u_head;                     // пара, уходящая при следующем w_take
+    reg  [7:0]  u_cp;                       // пара, чьи слова сейчас в u_lo/u_hi
+    reg  [63:0] u_w;                        // её слова в RGB565 — тактом позже
+    reg         u_clr;                      // пара u_ck ушла прошлым тактом: снять «касались»
+    reg  [7:0]  u_ck;
+    wire [7:0]  u_pa = u_head;
+
     assign buf_free   = ~full & {2{ready}};
     assign drain_idle = dst_q == D_IDLE && !lq_v[0] && !lq_v[1] && !tile_go;
-    assign w_data     = d_w;
+    assign w_data     = UP2 ? u_w[31:0] : d_w;
+    assign w_data2    = u_w[63:32];
 
     // RGB565 с дизерингом
     function automatic logic [3:0] bayer(input logic [1:0] x, input logic [1:0] y);
@@ -417,15 +456,36 @@ module ft_rd_pix #(
     // точка экрана: x = TW·d_tx + 2·слово + {0, 1}, y = d_y + строка (d_y, TW·d_tx кратны 4)
     wire [31:0] d_conv = {to565(dc_o, bayer({d_qi[0], 1'b1}, d_qi[KB+1:KB]), dither),
                           to565(dc_e, bayer({d_qi[0], 1'b0}, d_qi[KB+1:KB]), dither)};
+    // UP2: пара u_cp — слова 2k (u_lo) и 2k + 1 (u_hi); строка — u_cp >> (KB − 1)
+    wire [1:0]  u_y = u_cp[KB:KB-1];
+    function automatic logic [31:0] u_px(input logic [32:0] q);
+        u_px = q[32] ? impl_c[d_buf] : q[31:0];
+    endfunction
+    wire [63:0] u_conv = {to565(u_px(u_hi[65:33]), bayer(2'b11, u_y), dither),
+                          to565(u_px(u_hi[32:0]),  bayer(2'b10, u_y), dither),
+                          to565(u_px(u_lo[65:33]), bayer(2'b01, u_y), dither),
+                          to565(u_px(u_lo[32:0]),  bayer(2'b00, u_y), dither)};
+    generate if (UP2) begin : g_up2_sd
+        always_ff @(posedge clk_sd) begin
+            u_tgs <= u_tg;
+            u_x2  <= u_tg != u_tgs;
+            if (!u_x2) u_hi <= d_buf ? {qo1, qe1} : {qo0, qe0};
+        end
+    end else begin : g_up1
+        always_comb begin u_tgs = 1'b0; u_x2 = 1'b0; u_hi = '0; end
+    end endgenerate
 
     // порты памяти: буфер cur_buf — фрагменты, выгружаемый — выгрузка, после сброса — разметка.
     // Выгрузка: q держит слово d_ra; слово ушло (w_take) — читается следующее, так что к
     // следующему w_take в d_w уже его цвет.
     wire        d_on = dst_q != D_IDLE;
     wire [8:0]  d_rnext = d_ra + {8'd0, dst_q == D_RUN && w_take};
+    // UP2: выгружаемый буфер — {u_pa, u_x2}, буфер фрагментов — a_x (слово такта A)
+    wire [8:0]  r_up  = UP2 ? {u_pa, u_x2} : d_rnext;
+    wire [8:0]  r_fr  = UP2 ? a_x[9:1] : f_x[9:1];
     always_comb begin
-        ra0 = (d_on && !d_buf) ? d_rnext : f_x[9:1];
-        ra1 = (d_on && d_buf)  ? d_rnext : f_x[9:1];
+        ra0 = (d_on && !d_buf) ? r_up : r_fr;
+        ra1 = (d_on && d_buf)  ? r_up : r_fr;
         rs  = f_x;
         we_e0 = 1'b0; we_o0 = 1'b0; we_e1 = 1'b0; we_o1 = 1'b0; we_s0 = 1'b0; we_s1 = 1'b0;
         wa0 = b4_x[9:1]; wa1 = b4_x[9:1];
@@ -441,10 +501,16 @@ module ft_rd_pix #(
             // фрагмент
             if (b4_v && !cur_buf) begin we_e0 = !b4_x[0]; we_o0 = b4_x[0] || (b4_p2 && b4_w2); we_s0 = 1'b1; end
             if (b4_v && cur_buf)  begin we_e1 = !b4_x[0]; we_o1 = b4_x[0] || (b4_p2 && b4_w2); we_s1 = 1'b1; end
-            // выгрузка: слово ушло — точки снова «не касались»
-            if (dst_q == D_RUN && w_take) begin
-                if (!d_buf) begin we_e0 = 1'b1; we_o0 = 1'b1; wa0 = d_k; wd0 = {1'b1, 32'd0}; wdo0 = {1'b1, 32'd0}; end
-                else        begin we_e1 = 1'b1; we_o1 = 1'b1; wa1 = d_k; wd1 = {1'b1, 32'd0}; wdo1 = {1'b1, 32'd0}; end
+            // выгрузка: слово ушло — точки снова «не касались» (UP2: пара ушла прошлым тактом —
+            // слова 2k и 2k + 1 на фронтах M и E)
+            if (UP2 ? u_clr : dst_q == D_RUN && w_take) begin
+                if (!d_buf) begin
+                    we_e0 = 1'b1; we_o0 = 1'b1; wa0 = UP2 ? {u_ck, u_x2} : d_k;
+                    wd0 = {1'b1, 32'd0}; wdo0 = {1'b1, 32'd0};
+                end else begin
+                    we_e1 = 1'b1; we_o1 = 1'b1; wa1 = UP2 ? {u_ck, u_x2} : d_k;
+                    wd1 = {1'b1, 32'd0}; wdo1 = {1'b1, 32'd0};
+                end
             end
         end
     end
@@ -458,7 +524,13 @@ module ft_rd_pix #(
             dst_q <= D_IDLE; d_buf <= 1'b0; d_y <= '0; d_tx <= '0; d_ra <= '0; d_qi <= '0; d_k <= '0;
             d_iss <= '0; d_taken <= '0; d_w <= '0;
             w_req <= 1'b0; w_addr <= '0; w_len <= '0;
+            u_tg <= 1'b0; u_head <= '0; u_cp <= '0; u_lo <= '0; u_w <= '0; u_clr <= 1'b0; u_ck <= '0;
         end else begin
+            u_tg  <= !u_tg;
+            u_cp  <= u_pa;
+            u_lo  <= d_buf ? {qo1, qe1} : {qo0, qe0};
+            u_w   <= u_conv;
+            u_clr <= 1'b0;
             if (init_cnt[9])
                 init_cnt <= init_cnt[8:0] == 9'h1FF ? 10'd0 : init_cnt + 10'd1;
             if (clear)
@@ -485,11 +557,12 @@ module ft_rd_pix #(
                 d_k     <= 9'd0;
                 d_iss   <= '0;
                 d_taken <= '0;
+                u_head  <= '0;
                 dst_q   <= D_P1;
             end
-            D_P1: begin                       // читается слово 0
+            D_P1: begin                       // читается слово 0 (UP2: подаётся пара 0)
                 d_ra  <= 9'd1;
-                dst_q <= D_P2;
+                dst_q <= UP2 ? D_RUN : D_P2;
             end
             D_P2: begin                       // q = слово 0, читается слово 1
                 d_w   <= d_conv;
@@ -511,7 +584,15 @@ module ft_rd_pix #(
                     w_req <= 1'b0;
                     d_iss <= d_iss + 7'(w_len) + 7'd1;
                 end
-                if (w_take) begin
+                if (w_take && UP2) begin
+                    // пара u_head ушла (её слова — в u_w через такт); подаётся следующая
+                    u_head  <= u_head + 8'd1;
+                    u_clr   <= 1'b1;
+                    u_ck    <= u_head;
+                    d_taken <= d_taken + 10'd2;
+                    if (d_taken + 10'd2 == {D_BURSTS, 3'b000})
+                        dst_q <= D_END;
+                end else if (w_take) begin
                     // q держит слово d_k + 1
                     d_w     <= d_conv;
                     d_ra    <= d_ra + 9'd1;

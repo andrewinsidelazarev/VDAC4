@@ -48,7 +48,11 @@
 // плитки по умолчанию (impl_*) держит ft_rd_pix, а точки, которых не касались, берут его.
 module ft_rd_exec #(
     parameter int TW_LOG = 7,               // плитка: 2^TW_LOG × 2^TH_LOG точек (1024)
-    parameter int TH_LOG = 3
+    parameter int TH_LOG = 3,
+    parameter int FS_N   = 4,               // заполнений кэша в полёте (степень двойки, ≥ 2)
+    parameter int PF_N   = 1                // предвыборка вперёд по строкам: L + 1 … L + PF_N (1…3;
+                                            // стенд vsys, 1.39: 2 — HMM2 −4 %, R-Type +4 %: лишние
+                                            // строки отнимают шину SDRAM у выгрузки плиток)
 ) (
     input  wire         clk,
     input  wire         rst_n,
@@ -424,28 +428,33 @@ module ft_rd_exec #(
     // строка палитры заказа: первой точки, если у неё промах, иначе второй
     wire [16:0] q6_pl  = (q6_v && k_bmp && k_pal && q6_inok && !q6_hit) ? q6_pw[19:3] : q6_pw2[19:3];
 
-    // Заполнение: пакет из SDRAM. Мест два: заявки подаются по порядку мест, слова приходят в
-    // том же порядке (мост SDRAM, своя очередь текселей), так что слова — старшему месту. Пока
-    // одна строка едет, вторая уже заказана (предвыборка или промах). Порядок: промах палитры
-    // (Q6), промах текселя (P4), предвыборка. Строку не заказать, если она уже едет или только
-    // что пришла (метка BSRAM читается на такт позже), и если её индекс кэша занят другой едущей
-    // строкой (метку и слова индекса пишет одно заполнение).
-    reg         fs_v   [0:1];           // место занято (данные ещё не все)
-    reg         fs_pal [0:1];           // строка палитры
-    reg  [17:0] fs_line [0:1];          // адрес строки (слово >> 3)
-    reg         fs_d;                   // место, чьи слова придут следующими
-    reg         fs_s;                   // место, чья заявка подаётся (tx_req)
-    reg         fs_a;                   // место для следующей заявки
-    reg  [1:0]  fs_ns;                  // заказано и не подано
+    // Заполнение: пакет из SDRAM. Мест FS_N (кольцо): заявки подаются по порядку мест, слова
+    // приходят в том же порядке (мост SDRAM, своя очередь текселей), так что слова — старшему
+    // месту. Пока одни строки едут, следующие уже заказаны (предвыборка или промах): заполнение
+    // идёт ~20 тактов, а пара точек проходит строку кэша за 8 — с двумя местами строки не
+    // успевали (с 1.39 — четыре). Порядок: промах палитры (Q6), промах текселя (P4),
+    // предвыборка. Строку не заказать, если она уже едет или только что пришла (метка BSRAM
+    // читается на такт позже), и если её индекс кэша занят другой едущей строкой (метку и слова
+    // индекса пишет одно заполнение).
+    localparam int FS_W = $clog2(FS_N);
+    reg         fs_v   [0:FS_N-1];      // место занято (данные ещё не все)
+    reg         fs_pal [0:FS_N-1];      // строка палитры
+    reg  [17:0] fs_line [0:FS_N-1];     // адрес строки (слово >> 3)
+    reg  [FS_W-1:0] fs_d;               // место, чьи слова придут следующими
+    reg  [FS_W-1:0] fs_s;               // место, чья заявка подаётся (tx_req)
+    reg  [FS_W-1:0] fs_a;               // место для следующей заявки
+    reg  [FS_W:0]   fs_ns;              // заказано и не подано
     reg  [17:0] rc_line;                // пришедшая в последние три такта (у палитры — тоже):
     reg  [1:0]  rc_n;                   // строки приходят не чаще раза в 8 тактов — хватает одной
     // строка пришла (последнее слово записано) — метка пишется тактом позже: память палитры
     // (и слово 7 текселей) к чтению в такт метки уже записана, как у прежнего F_DONE
     reg         dn_v, dn_pal;
     reg  [17:0] dn_line;
-    // предвыборка: точка P4 попала в новую строку L — строку L + 1 загрузить заранее, если её нет
+    // предвыборка: точка P4 попала в новую строку L — строки L + 1 … L + PF_N загрузить заранее,
+    // если их нет (по одной: кандидат снят — следующая)
     reg         pf_v;
     reg  [17:0] pf_line, pf_src;        // адрес строки (слово >> 3)
+    reg  [1:0]  pf_k;                   // pf_line = pf_src + pf_k
     reg         sp_v;                   // заявка начала пролёта (от подготовки)
     reg  [17:0] sp_line;
     reg         nr_v;                   // строка той же точки строкой плитки ниже (P2N)
@@ -459,7 +468,7 @@ module ft_rd_exec #(
     // строка ln: едет / пришла только что / её индекс занят другой едущей строкой
     function automatic logic f_busy(input logic [17:0] ln, input logic pal);
         f_busy = 1'b0;
-        for (int k = 0; k < 2; k++) begin
+        for (int k = 0; k < FS_N; k++) begin
             if (fs_v[k] && fs_pal[k] == pal && fs_line[k] == ln) f_busy = 1'b1;
             if (fs_v[k] && !fs_pal[k] && !pal && cidx(fs_line[k]) == cidx(ln)) f_busy = 1'b1;
         end
@@ -467,6 +476,11 @@ module ft_rd_exec #(
     endfunction
     wire [17:0] p4_line  = p4_wa[20:3];
     wire        fs_free  = !fs_v[fs_a];
+    reg         fs_any;                 // хоть одно место занято (отвод стенда vsys)
+    always_comb begin
+        fs_any = 1'b0;
+        for (int k = 0; k < FS_N; k++) fs_any = fs_any | fs_v[k];
+    end
     wire        fs_done  = tx_rd_valid && tx_rd_idx == 3'd7;        // последнее слово старшего места
     // заказ в этом такте: палитра, промах текселя, предвыборка (не в такт метки пришедшей
     // строки — у меток один порт)
@@ -483,10 +497,12 @@ module ft_rd_exec #(
     wire        fc_busy  = q6_miss ? fb_pal : p4_miss ? fb_dem : fb_t2;
     wire        f_go_pal = f_ok_any && q6_miss && !fc_busy;
     wire        f_go_dem = f_ok_any && !q6_miss && p4_miss && !fc_busy;
-    // решение о предвыборке: метка в следующем такте свободна (строка не приходит — fs_done)
+    // решение о предвыборке: метка в следующем такте свободна (строка не приходит — fs_done).
+    // Кандидат снимается и без заказа, если строка уже в кэше, едет или её индекс занят едущей
+    // (fb_t2; без промахов fc_busy = fb_t2): ждать её — держать следующие кандидаты
     wire        f_go_pfq = !abort && !clr_on && !q6_miss && !p4_miss && !pf_q && (sp_v || nr_v || pf_v) && t2_ok &&
-                           (t2_hit || (fs_free && !dn_v && !(fs_done && fs_v[fs_d]) && !fc_busy));
-    wire        f_pf_dec = f_go_pfq && !t2_hit;
+                           (t2_hit || fb_t2 || (fs_free && !dn_v && !(fs_done && fs_v[fs_d])));
+    wire        f_pf_dec = f_go_pfq && !t2_hit && !fb_t2;
     wire        f_go_pf  = pf_q && !abort && !clr_on;   // заказ — тактом позже решения
     wire        f_dpal   = fs_pal[fs_d];
     wire [17:0] f_dline  = fs_line[fs_d];
@@ -1715,11 +1731,11 @@ module ft_rd_exec #(
         if (!rst_n) begin
             tx_req <= 1'b0; tx_addr <= '0; clr_n <= 10'd512;
             pf_v <= 1'b0; pf_line <= '0; pf_src <= '0; sp_v <= 1'b0; sp_line <= '0;
-            nr_v <= 1'b0; nr_line <= '0; pf_q <= 1'b0; pf_lq <= '0;
-            for (int k = 0; k < 2; k++) begin
+            nr_v <= 1'b0; nr_line <= '0; pf_q <= 1'b0; pf_lq <= '0; pf_k <= 2'd1;
+            for (int k = 0; k < FS_N; k++) begin
                 fs_v[k] <= 1'b0; fs_pal[k] <= 1'b0; fs_line[k] <= '0;
             end
-            fs_d <= 1'b0; fs_s <= 1'b0; fs_a <= 1'b0; fs_ns <= '0; rc_n <= '0; rc_line <= '0;
+            fs_d <= '0; fs_s <= '0; fs_a <= '0; fs_ns <= '0; rc_n <= '0; rc_line <= '0;
             dn_v <= 1'b0; dn_pal <= 1'b0; dn_line <= '0;
         end else begin
             if (clr_on) clr_n <= clr_n - 10'd1;
@@ -1735,25 +1751,28 @@ module ft_rd_exec #(
             if (f_go_pfq) begin
                 if (sp_v)      sp_v <= 1'b0;
                 else if (nr_v) nr_v <= 1'b0;
-                else           pf_v <= 1'b0;
+                else if (pf_k != 2'(PF_N)) begin       // следующая строка вперёд
+                    pf_line <= pf_line + 18'd1;
+                    pf_k    <= pf_k + 2'd1;
+                end else       pf_v <= 1'b0;
             end
             // заказ: место fs_a, метка строки-цели сброшена в этот такт (t_we), заявка — в очередь
             if (f_go_pal || f_go_dem || f_go_pf) begin
                 fs_v[fs_a]    <= 1'b1;
                 fs_pal[fs_a]  <= f_go_pal;
                 fs_line[fs_a] <= f_go_pal ? {1'b0, q6_pl} : f_go_dem ? p4_line : pf_lq;
-                fs_a          <= !fs_a;
+                fs_a          <= fs_a + 1'b1;
             end
             // заявки — по порядку мест; tx_req держится, пока есть неподанные
             begin : fs_send
-                logic [1:0] ns;
-                ns = fs_ns + {1'b0, f_go_pal || f_go_dem || f_go_pf} - {1'b0, tx_req && tx_ack};
+                logic [FS_W:0] ns;
+                ns = fs_ns + (FS_W+1)'(f_go_pal || f_go_dem || f_go_pf) - (FS_W+1)'(tx_req && tx_ack);
                 fs_ns <= ns;
-                if (tx_req && tx_ack) fs_s <= !fs_s;
+                if (tx_req && tx_ack) fs_s <= fs_s + 1'b1;
                 begin : nxt
-                    logic s;
-                    s = (tx_req && tx_ack) ? !fs_s : fs_s;
-                    tx_req <= ns != 2'd0;
+                    logic [FS_W-1:0] s;
+                    s = (tx_req && tx_ack) ? fs_s + 1'b1 : fs_s;
+                    tx_req <= ns != '0;
                     // адрес следующей заявки: место s (если оно заказано в этот же такт — его строка)
                     if (s == fs_a && (f_go_pal || f_go_dem || f_go_pf))
                         tx_addr <= {f_go_pal ? {1'b0, q6_pl} : f_go_dem ? p4_line : pf_lq, 3'd0};
@@ -1766,7 +1785,7 @@ module ft_rd_exec #(
             dn_v       <= 1'b0;
             if (fs_done && fs_v[fs_d]) begin
                 fs_v[fs_d] <= 1'b0;
-                fs_d       <= !fs_d;
+                fs_d       <= fs_d + 1'b1;
                 rc_line    <= f_dline;
                 rc_n       <= 2'd3;
                 dn_v       <= 1'b1;
@@ -1786,6 +1805,7 @@ module ft_rd_exec #(
             if (p4_need && c_hit && p4_wa[20:3] != pf_src) begin
                 pf_src  <= p4_wa[20:3];
                 pf_line <= p4_wa[20:3] + 18'd1;
+                pf_k    <= 2'd1;
                 pf_v    <= 1'b1;
             end
         end

@@ -9,13 +9,19 @@
 //   576p50: 27 × 5 / 1 = 135 МГц (VCO 540, ODIV 4); SDRAM 135 / 2 = 67,5 МГц; пиксели 27 МГц.
 //   720p50: 27 × 55 / 4 = 371,25 МГц (VCO 742,5, ODIV 2); SDRAM 371,25 / 6 = 61,875 МГц;
 //           пиксели 74,25 МГц.
+//   1366×768 (OUT768, ядро FT812 с 1.41): 27 × 40 / 3 = 360,0 МГц (ФД 9 МГц, VCO 720, ODIV 2);
+//           пиксели 72,000 МГц — ровно VESA DMT 1366×768 с сокращённым гашением. CLKOUTD и
+//           CLKOUTD3 ядру FT812 не нужны: его SDRAM и clk_mem — от fb_pll_sd.
 //
-// Вторая PLL (захват, ×2 от PCLK Evo) — ts_pll_capture из ts_clocking.sv.
+// Вторая PLL: в ядре с Evo — захват (×2 от PCLK Evo, ts_pll_capture из ts_clocking.sv), в ядре
+// FT812 (с 1.38) — вся SDRAM и логика clk_mem от кварца: clk_sd, clk_mem и клок микросхемы со
+// сдвигом фазы (fb_pll_sd ниже); первая PLL у него — только HDMI.
 // Под `ifdef SIMULATION (ключ -DSIMULATION) — поведенческие заглушки для симуляции;
 // синтезу макрос не нужен: по умолчанию собираются примитивы Gowin.
 //
 module fb_pll_xtal #(
-    parameter bit HD = 1'b0          // 0 — 576p50, 1 — 720p50
+    parameter bit HD = 1'b0,         // 0 — 576p50, 1 — 720p50
+    parameter bit OUT768 = 1'b0      // с HD: 1366×768, точка 72 МГц
 ) (
     input  wire clkin,        // 27 МГц
     input  wire reset,
@@ -24,8 +30,8 @@ module fb_pll_xtal #(
     output wire clk_sd,       // CLKOUT ÷ 3: 45 / 123,75 МГц — 2 × clk_mem (SDRAM ядра FT812)
     output wire lock
 );
-    localparam int IDIV_SEL  = HD ? 3  : 0;     // IDIV − 1
-    localparam int FBDIV_SEL = HD ? 54 : 4;     // FBDIV − 1
+    localparam int IDIV_SEL  = HD ? (OUT768 ? 2  : 3)  : 0;     // IDIV − 1
+    localparam int FBDIV_SEL = HD ? (OUT768 ? 39 : 54) : 4;     // FBDIV − 1
     localparam int ODIV_SEL  = HD ? 2  : 4;     // ODIV
     localparam int SDIV      = HD ? 6  : 2;
 `ifndef SIMULATION
@@ -77,6 +83,75 @@ module fb_pll_xtal #(
     assign clk_serial = s;
     assign clk_mem = m;
     assign clk_sd = d3;
+    assign lock = (period != 0);
+`endif
+endmodule
+
+// SDRAM ядра FT812 (SD_FAST, с 1.38): вторая rPLL (в ядре FT812 PLL захвата Evo нет) от кварца,
+// как у ядер ZX Next и NES на этой же SDRAM: CLKOUT — клок контроллера (clk_sd, 121,5 МГц),
+// CLKOUTD — clk_mem (÷2, 60,75 МГц; мост sd_bridge требует фронт clk_mem на каждом втором фронте
+// clk_sd — делитель той же PLL его даёт), CLKOUTP — клок микросхемы, тот же такт со сдвигом
+// phase/16 периода (шаг 22,5°, ~0,51 нс). Сдвиг между CLKOUT и CLKOUTP задаёт сама PLL — он не
+// зависит от разводки (у 1.33–1.34 CLKOUTP давала третья PLL от clk_sd, и к сдвигу добавлялась
+// неизвестная задержка подвода clk_sd к ней). Сдвиг меняется на ходу (DYN_DA_EN, PSDA): его после
+// включения подбирает sdram_train. Скважность 50 %: DUTYDA = PSDA + 8 (UG286).
+// 27 × 9 / 2 = 121,5 МГц: IDIV 2 (ФД 13,5 МГц), FBDIV 9, ODIV 8 — VCO 972 МГц. 123,75 МГц (как у
+// 1.24–1.34, 371,25 / 3) от 27 МГц одной PLL — только 27 × 55 / 12, ФД 2,25 МГц, ниже 3 МГц.
+// В симуляции — те же частоты от входа и сдвиг CLKOUTP задержкой.
+module fb_pll_sd (
+    input  wire       clkin,      // кварц 27 МГц
+    input  wire [3:0] phase,      // сдвиг CLKOUTP, 1/16 периода
+    output wire       clk_sd,     // 121,5 МГц
+    output wire       clk_mem,    // 60,75 МГц
+    output wire       clkoutp,    // клок микросхемы SDRAM
+    output wire       lock
+);
+`ifndef SIMULATION
+    wire gnd = 1'b0;
+    wire unused_d3;
+    rPLL pll (
+        .CLKOUT(clk_sd), .LOCK(lock), .CLKOUTP(clkoutp),
+        .CLKOUTD(clk_mem), .CLKOUTD3(unused_d3),
+        .RESET(gnd), .RESET_P(gnd), .CLKIN(clkin), .CLKFB(gnd),
+        .FBDSEL(6'b0), .IDSEL(6'b0), .ODSEL(6'b0), .PSDA(phase),
+        .DUTYDA(phase + 4'd8), .FDLY(4'b1111)        // FDLY 1111 — без тонкой задержки
+    );
+    defparam pll.FCLKIN = "27";
+    defparam pll.IDIV_SEL = 1;
+    defparam pll.FBDIV_SEL = 8;
+    defparam pll.ODIV_SEL = 8;
+    defparam pll.DYN_SDIV_SEL = 2;
+    defparam pll.CLKOUTD_SRC = "CLKOUT";
+    defparam pll.CLKOUTD3_SRC = "CLKOUT";
+    defparam pll.DYN_IDIV_SEL = "false";
+    defparam pll.DYN_FBDIV_SEL = "false";
+    defparam pll.DYN_ODIV_SEL = "false";
+    defparam pll.PSDA_SEL = "0000";
+    defparam pll.DYN_DA_EN = "true";
+    defparam pll.DUTYDA_SEL = "1000";
+    defparam pll.CLKFB_SEL = "internal";
+    defparam pll.CLKOUT_BYPASS = "false";
+    defparam pll.CLKOUTP_BYPASS = "false";
+    defparam pll.CLKOUTD_BYPASS = "false";
+    defparam pll.DEVICE = "GW2AR-18C";
+`else
+    reg s = 1'b0, m = 1'b0, p = 1'b0;
+    realtime last_edge = 0, period = 0;
+    always @(posedge clkin) begin
+        if (last_edge != 0) period = $realtime - last_edge;
+        last_edge = $realtime;
+    end
+    always begin
+        if (period == 0) #1 s = 1'b0;
+        else begin
+            #(period / 9.0) s = ~s;               // полпериода 121,5 МГц: 37,037 × 2 / 9 / 2
+            if (s) m = ~m;
+        end
+    end
+    always @(s) p <= #(phase * period / 72.0) s;  // сдвиг phase/16 периода clk_sd
+    assign clk_sd = s;
+    assign clk_mem = m;
+    assign clkoutp = p;
     assign lock = (period != 0);
 `endif
 endmodule

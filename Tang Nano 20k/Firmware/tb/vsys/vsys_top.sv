@@ -46,7 +46,15 @@ module vsys_top #(
     output reg  [31:0] rc [0:47]
 );
     assign sd_fast = SD_FAST;
+    // VSYS_768 (run_vsys.sh, если fb_scanout дерева знает OUT768) — вывод ядра с 1.41: 1366×768 RB,
+    // 72 МГц (строка 1500, кадр 800); иначе — 720p60 (H_FP 110) или 720p50 (H_FP 440)
+`ifdef VSYS_768
+    localparam int OUT_W = 1366, OUT_H = 768;
+    localparam int HFP = 14, HSY = 56, HBP = 64, VFP = 1, VSY = 3, VBP = 28, PKHZ = 72_000;
+`else
     localparam int OUT_W = 1280, OUT_H = 720;
+    localparam int HFP = H_FP, HSY = 40, HBP = 220, VFP = 5, VSY = 5, VBP = 20, PKHZ = 74_250;
+`endif
 
     wire        sd_cs_n, sd_ras_n, sd_cas_n, sd_we_n, sd_dq_oe;
     wire [10:0] sd_a;
@@ -56,13 +64,16 @@ module vsys_top #(
 
     ts_fb_core #(
         .OUT_W(OUT_W), .OUT_H(OUT_H), .IMG_X((OUT_W - 720) / 2), .IMG_Y((OUT_H - 576) / 2),
-        .H_FP(H_FP), .H_SYNC(40), .H_BP(220), .V_FP(5), .V_SYNC(5), .V_BP(20),
-        .HS_NEG(1'b0), .VS_NEG(1'b0), .PIX_KHZ(74_250), .MEM_KHZ(61_875),
+        .H_FP(HFP), .H_SYNC(HSY), .H_BP(HBP), .V_FP(VFP), .V_SYNC(VSY), .V_BP(VBP),
+        .HS_NEG(1'b0), .VS_NEG(1'b0), .PIX_KHZ(PKHZ), .MEM_KHZ(61_875),
         .SDRAM_INIT_US(20), .DEF_SRC(2'd0), .DEF_RD(2'd1), .CALIBRATE(1'b0),
         .SCALE(1'b1), .HDMI(1'b1), .FLASH_BOOT_US(20),
         .BOOT_SLOT(8'd1), .BOOT_NEXT(8'd0), .HAS_EVO(1'b0), .HAS_FT(1'b1)
 `ifdef VSYS_SD
         , .SD_FAST(SD_FAST)
+`endif
+`ifdef VSYS_768
+        , .OUT768(1'b1)
 `endif
     ) core (
         .clk_cap(1'b0), .rst_cap_n(1'b0),
@@ -117,10 +128,10 @@ module vsys_top #(
         always @(posedge clk_sd)
             if (core.g_sd_fast.bridge.c_ack)
                 tag_q <= core.g_sd_fast.bridge.c_tx ? 3'b100 : core.g_sd_fast.bridge.head[2:0];
-        assign sd_state = 4'(core.g_sd_fast.sdram.state);
+        assign sd_state = 4'(core.g_sd_fast.sdram.ctl.state);
         assign sd_tag   = tag_q;
-        assign sd_ref   = !core.g_sd_fast.sdram.sdram_ras_n && !core.g_sd_fast.sdram.sdram_cas_n &&
-                          core.g_sd_fast.sdram.sdram_we_n;
+        assign sd_ref   = !core.g_sd_fast.sdram.ctl.sdram_ras_n && !core.g_sd_fast.sdram.ctl.sdram_cas_n &&
+                          core.g_sd_fast.sdram.ctl.sdram_we_n;
     end else begin : g_tap
         assign sd_state = 4'(core.g_sd.sdram.state);
         assign sd_tag   = core.g_sd.sdram.op_tag;
@@ -252,12 +263,12 @@ module vsys_top #(
         if (core.g_render.render.tx_ack)  rc[20] <= rc[20] + 32'd1;
         // заполнение кэша: 30 — заявка ждёт приёма, 31 — хоть одно место заполнения занято
         if (core.g_render.render.exec.tx_req && !core.g_render.render.exec.tx_ack) rc[30] <= rc[30] + 32'd1;
-        if (core.g_render.render.exec.fs_v[0] || core.g_render.render.exec.fs_v[1]) rc[31] <= rc[31] + 32'd1;
+        if (core.g_render.render.exec.fs_any) rc[31] <= rc[31] + 32'd1;
         // выгрузка плиток: 32 — идёт (ft_rd_pix не в D_IDLE), 33 — запрос ждёт приёма, 34 — слов
         // отдано; мост: 35 — очередь команд полна, 36 — запись ждёт места или конца сбора прошлой
         if (3'(core.g_render.render.pix.dst_q) != 3'd0) rc[32] <= rc[32] + 32'd1;
         if (core.g_render.render.w_req && !core.g_render.render.w_ack) rc[33] <= rc[33] + 32'd1;
-        if (core.g_render.render.pix.w_take) rc[34] <= rc[34] + 32'd1;
+        if (core.g_render.render.pix.w_take) rc[34] <= rc[34] + (SD_FAST ? 32'd2 : 32'd1);
         if (!br_cq_room) rc[35] <= rc[35] + 32'd1;
         if (br_req && br_we && !br_ack &&
             !(br_wf_room && !br_w_pend && !br_wr_take))

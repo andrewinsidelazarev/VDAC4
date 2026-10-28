@@ -30,10 +30,12 @@ module ft_render #(
     parameter logic [20:0] FB_BASE      = 21'h120000,   // адрес слова кадра FT 0
     parameter logic [20:0] FT_BUF_WORDS = 21'h060000,   // кадр: 768 строк × 512 слов
     parameter logic [20:0] T_LO         = 21'h080000,   // кадр FT 2: строки 0…511 (RAM_G 2…3 МБ)
-    parameter logic [20:0] T_HI         = 21'h0C9000    //            строки 512…767 (образ ПЗУ)
+    parameter logic [20:0] T_HI         = 21'h0C9000,   //            строки 512…767 (образ ПЗУ)
+    parameter bit          UP2          = 1'b0          // выгрузка плиток по два слова за такт (мост)
 ) (
     input  wire         clk,
     input  wire         rst_n,
+    input  wire         clk_sd,         // UP2: 2 × clk, тот же PLL
     input  wire         enable,         // режим FT (M_SEL) и развёртка FT812 идёт
     input  wire [11:0]  hsize,          // REG_HSIZE, REG_VSIZE
     input  wire [11:0]  vsize,
@@ -57,6 +59,7 @@ module ft_render #(
     input  wire         s_wr_take,      // слово записи плитки (sub 1) — снаружи уже отобрано
 
     output wire [31:0]  s_wdata,
+    output wire [31:0]  s_wdata2,       // UP2: второе слово пары (s_wr_take — сразу два слова)
     input  wire         s_rd_valid,     // слово чтения текселей (sub 0) — тоже
     input  wire [2:0]   s_rd_idx,
     input  wire [31:0]  s_rd_data,
@@ -169,8 +172,8 @@ module ft_render #(
     wire [20:0] w_addr;
     wire [2:0]  w_len;
     reg  [20:0] f_base, f_base_hi;
-    ft_rd_pix #(.TW_LOG(TW_LOG), .TH_LOG(TH_LOG)) pix (
-        .clk(clk), .rst_n(rst_n), .fb_base(f_base), .fb_base_hi(f_base_hi), .dither(dither),
+    ft_rd_pix #(.TW_LOG(TW_LOG), .TH_LOG(TH_LOG), .UP2(UP2)) pix (
+        .clk(clk), .rst_n(rst_n), .clk_sd(clk_sd), .fb_base(f_base), .fb_base_hi(f_base_hi), .dither(dither),
         .ready(px_ready), .clear(px_clear),
         .f_v(f_v), .f_x(f_x), .f_rgba(f_rgba), .f_raw(f_raw), .f_slot(f_slot), .f_clr(f_clr), .f_xn(f_xn), .f_adv(f_adv),
         .f_p2(f_p2), .f_w2(f_w2), .f_rgba2(f_rgba2), .f_p2n(f_p2n), .f_ready(f_ready),
@@ -180,7 +183,7 @@ module ft_render #(
         .tile_go(tile_go), .tile_buf(tile_buf), .tile_x(tile_x), .tile_y(tile_y), .buf_free(buf_free),
         .drain_idle(drain_idle),
         .w_req(w_req), .w_addr(w_addr), .w_len(w_len), .w_ack(w_ack),
-        .w_take(s_wr_take), .w_data(s_wdata)
+        .w_take(s_wr_take), .w_data(s_wdata), .w_data2(s_wdata2)
     );
 
     // --- SDRAM: текстуры важнее записи плитки (у записи — двойной буфер) ------------------------

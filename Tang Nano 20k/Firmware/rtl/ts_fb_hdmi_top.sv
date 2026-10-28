@@ -2,7 +2,8 @@
 //
 // Прошивка Tang Nano 20K для carrier A3.1: видео TS-Config / Base Conf → кадровый буфер →
 // HDMI 720p50 (картинка в центре точка в точку) или 576p50 (параметр HD); ядро FT812 (HAS_EVO = 0)
-// — 720p60: кадр FT812 идёт 59 Гц, и вывод 50 Гц брал бы из него не больше 50 кадров в секунду.
+// — 60 Гц: кадр FT812 идёт 59 Гц, и вывод 50 Гц брал бы из него не больше 50 кадров в секунду;
+// с 1.41 — 1366×768 (VESA DMT, сокращённое гашение, 72 МГц), до 1.40 — 720p60.
 //
 // ЧЕМ ОТЛИЧАЕТСЯ ОТ ts_hdmi_top (генлок)
 //   Генлок выводит строки с той же частотой, что приходят: строчная 31,25 кГц стандартна,
@@ -40,7 +41,9 @@ module ts_fb_hdmi_top #(
     // Состав ядра (ts_fb_core): оба — общее ядро; HAS_FT = 0 — TS-Config (слот 0),
     // HAS_EVO = 0 — FT812 (слот 1). Сборки задают их переменной core_kind скриптов.
     parameter bit         HAS_EVO   = 1'b1,
-    parameter bit         HAS_FT    = 1'b1
+    parameter bit         HAS_FT    = 1'b1,
+    // Ядро видео (HAS_EVO = 0, HAS_FT = 0): MJPEG FTVIEW4 декодирует ПЛИС; 720p50, SDRAM на clk_mem
+    parameter bit         HAS_VIDEO = 1'b0
 ) (
     input  wire        clk27,        // вывод 4: кварц Tang 27 МГц
 
@@ -115,33 +118,66 @@ module ts_fb_hdmi_top #(
     // Такты
     // ------------------------------------------------------------------
     wire clk_serial, clk_mem, pixel_clk, clk_cap, clk_sd;
-    wire lock_xtal, lock_cap;
+    wire clk_mem_x, clk_sd_x;          // делители первой PLL (у ядра FT812 не нужны)
+    wire lock_xtal, lock_cap, lock_mem;
     wire [3:0] cap_clk_phase;          // MUX CLOCK из меню (домен пикселей, меняется редко)
     reg  cap_pll_reset;
 
-    fb_pll_xtal #(.HD(HD)) pll_xtal (
+    // Ядро FT812 (с 1.41) — 1366×768 с сокращённым гашением (VESA DMT, 72 МГц, 60,00 Гц): кадр FT
+    // 1024×768 — точка в точку, без масштаба 768 → 720. Ядра с Evo и видео — 720p50, как были.
+    localparam bit OUT768 = HD && !HAS_EVO && !HAS_VIDEO;
+    fb_pll_xtal #(.HD(HD), .OUT768(OUT768)) pll_xtal (
         .clkin(clk27), .reset(1'b0),
-        .clk_serial(clk_serial), .clk_mem(clk_mem), .clk_sd(clk_sd), .lock(lock_xtal)
+        .clk_serial(clk_serial), .clk_mem(clk_mem_x), .clk_sd(clk_sd_x), .lock(lock_xtal)
     );
     ts_clkdiv5 clkdiv (.hclkin(clk_serial), .resetn(lock_xtal), .clkout(pixel_clk));
-    ts_pll_capture pll_capture (
-        .clkin(pclk_in), .reset(cap_pll_reset), .phase(cap_clk_phase),
-        .clkout(clk_cap), .lock(lock_cap)
-    );
+    // Вторая PLL: в ядре с Evo — захват (×2 от PCLK), в ядре FT812 (с 1.38) — SDRAM и clk_mem от
+    // кварца (fb_pll_sd, SD_FAST ниже); захвата там нет
+    wire [3:0] sd_phase;
+    wire       sdram_clk_p;
+    generate if (HAS_EVO) begin : g_pll_cap
+        ts_pll_capture pll_capture (
+            .clkin(pclk_in), .reset(cap_pll_reset), .phase(cap_clk_phase),
+            .clkout(clk_cap), .lock(lock_cap)
+        );
+        assign sdram_clk_p = 1'b0;
+        assign clk_mem = clk_mem_x;
+        assign clk_sd = clk_sd_x;
+        assign lock_mem = lock_xtal;
+    end else if (HAS_VIDEO) begin : g_no_pll2
+        // ядро видео: ни захвата, ни сдвига клока SDRAM (она на clk_mem, как у TS-Config)
+        assign clk_cap = 1'b0;
+        assign lock_cap = 1'b0;
+        assign sdram_clk_p = 1'b0;
+        assign clk_mem = clk_mem_x;
+        assign clk_sd = clk_sd_x;
+        assign lock_mem = lock_xtal;
+    end else begin : g_pll_sd
+        assign clk_cap = 1'b0;
+        assign lock_cap = 1'b0;
+        fb_pll_sd pll_sd (.clkin(clk27), .phase(sd_phase), .clk_sd(clk_sd), .clk_mem(clk_mem),
+                          .clkoutp(sdram_clk_p), .lock(lock_mem));
+    end endgenerate
 
     // Домены кварца и захвата сбрасываются независимо: без PCLK вывод работает.
     reg [3:0] rst_mem_sr, rst_pix_sr, rst_cap_sr;
-    always_ff @(posedge clk_mem or negedge lock_xtal)
-        if (!lock_xtal) rst_mem_sr <= '0; else rst_mem_sr <= {rst_mem_sr[2:0], 1'b1};
-    // SDRAM ядра FT812 на 2 × clk_mem (ts_fb_core SD_FAST, ядра 1.24–1.26) на плате читается с
-    // ошибками: линии DQ17 и DQ19 не попадают ни в одну точку выборки (20.10.2026, чистый замер:
-    // SD READ 2 — 2/16 слов неверно). С 1.27 оба ядра — на clk_mem (61,875 МГц), как 1.23, пока
-    // нет задержек по линиям DQ (IODELAYA, g_dq_dly ниже — только при SD_FAST)
-    localparam bit SD_FAST = 1'b0;
+    always_ff @(posedge clk_mem or negedge lock_mem)
+        if (!lock_mem) rst_mem_sr <= '0; else rst_mem_sr <= {rst_mem_sr[2:0], 1'b1};
+    // SDRAM ядра FT812 на 2 × clk_mem (ts_fb_core SD_FAST, ядра 1.24–1.26) на плате читалась с
+    // ошибками: клок микросхемы был инверсией клока логики, а окно подбиралось только точкой
+    // выборки с шагом полтакта (4 нс) — линии DQ17 и DQ19 не попадали ни в одну (20.10.2026,
+    // чистый замер: SD READ 2 — 2/16 слов неверно). 1.27–1.32 — на clk_mem (61,875 МГц). 1.33–1.34 —
+    // снова 123,75 МГц, клок микросхемы — CLKOUTP ещё одной PLL, которую питал clk_sd (к сдвигу
+    // добавлялась неизвестная задержка подвода clk_sd; сдвиг — вручную; на плате сбоила). С 1.38 —
+    // как у ядер ZX Next и NES на этой же SDRAM: clk_sd (121,5 МГц), clk_mem и клок микросхемы —
+    // выходы одной PLL от кварца (fb_pll_sd), DQ берёт IDDR у вывода, сдвиг и точку выборки
+    // подбирает само ядро после включения (sdram_train). Ядро с Evo (TS-Config) — по-прежнему на
+    // clk_mem. Ядро видео — на clk_mem: шины ему хватает, а этот путь на плате проверен
+    localparam bit SD_FAST = !HAS_EVO && !HAS_VIDEO;
     reg [3:0] rst_sd_sr;
     generate if (SD_FAST) begin : g_rst_sd
-        always_ff @(posedge clk_sd or negedge lock_xtal)
-            if (!lock_xtal) rst_sd_sr <= '0; else rst_sd_sr <= {rst_sd_sr[2:0], 1'b1};
+        always_ff @(posedge clk_sd or negedge lock_mem)
+            if (!lock_mem) rst_sd_sr <= '0; else rst_sd_sr <= {rst_sd_sr[2:0], 1'b1};
     end else begin : g_no_rst_sd
         always_comb rst_sd_sr = '0;
     end endgenerate
@@ -150,8 +186,8 @@ module ts_fb_hdmi_top #(
     always_ff @(posedge clk_cap or negedge lock_cap)
         if (!lock_cap) rst_cap_sr <= '0; else rst_cap_sr <= {rst_cap_sr[2:0], 1'b1};
 
-    // Перезапуск PLL захвата, пока она без захвата: импульс 1024 такта пикселей (14 мкс
-    // при 74,25 МГц) раз в 2^21 тактов (28 мс)
+    // Перезапуск PLL захвата (ядро с Evo), пока она без захвата: импульс 1024 такта пикселей
+    // (14 мкс при 74,25 МГц) раз в 2^21 тактов (28 мс)
     reg [1:0]  lock_cap_s;
     reg [20:0] cap_wd;
     always_ff @(posedge pixel_clk or negedge rst_pix_sr[3]) begin
@@ -177,37 +213,36 @@ module ts_fb_hdmi_top #(
     // ------------------------------------------------------------------
     wire [31:0] dq_out;
     wire        dq_oe;
-    wire [31:0] dq_in;                  // DQ чтения (у ядра FT812 — после IODELAYA)
-    wire [2:0]  sd_dly;                 // {SDTAP, SETN, VALUE} задержки DQ (ts_fb_core, SD_DLY)
-    wire        sd_dly_df;
+    wire [31:0] dq_in;                  // DQ чтения — прямо с выводов
+    wire [2:0]  sd_dly;                 // не используется (задержки DQ с 1.38 нет)
     wire [3:0]  link_io_out;
     wire        link_io_oe;
     wire [9:0]  t_blue, t_green, t_red;
     wire        boot_req;
 
-    // Развёртка выхода (CEA-861)
-    localparam int OUT_W  = HD ? 1280 : 720;
-    localparam int OUT_H  = HD ? 720  : 576;
-    // 720p50 и 720p60 — один пиксельный клок 74,25 МГц, разница — передний порог строки: 1980
-    // тактов в строке (50 Гц) или 1650 (60 Гц). Ядро FT812 — 60 Гц: FT812 рисует 1024×768@59
-    // (16,93 мс), и кадр берётся выводом раз в кадр развёртки.
-    localparam int H_FP   = HD ? (HAS_EVO ? 440 : 110) : 12;
-    localparam int H_SYNC = HD ? 40   : 64;
-    localparam int H_BP   = HD ? 220  : 68;
-    localparam int V_FP   = HD ? 5    : 5;
-    localparam int V_SYNC = HD ? 5    : 5;
-    localparam int V_BP   = HD ? 20   : 39;
-    localparam int PIX_KHZ = HD ? 74_250 : 27_000;
-    localparam int MEM_KHZ = HD ? 61_875 : 67_500;
+    // Развёртка выхода (CEA-861; у ядра FT812 — VESA DMT)
+    localparam int OUT_W  = OUT768 ? 1366 : HD ? 1280 : 720;
+    localparam int OUT_H  = OUT768 ? 768  : HD ? 720  : 576;
+    // 720p50 — 74,25 МГц, 1980 тактов в строке. Ядро FT812 — 60 Гц: FT812 рисует 1024×768@59
+    // (16,93 мс), и кадр берётся выводом раз в кадр развёртки; с 1.41 — 1366×768 RB: строка
+    // 1366 + 14 + 56 + 64 = 1500, кадр 768 + 1 + 3 + 28 = 800, 72 МГц (до 1.40 — 720p60, 1650 × 750).
+    localparam int H_FP   = OUT768 ? 14 : HD ? 440 : 12;
+    localparam int H_SYNC = OUT768 ? 56 : HD ? 40  : 64;
+    localparam int H_BP   = OUT768 ? 64 : HD ? 220 : 68;
+    localparam int V_FP   = OUT768 ? 1  : 5;
+    localparam int V_SYNC = OUT768 ? 3  : 5;
+    localparam int V_BP   = OUT768 ? 28 : HD ? 20  : 39;
+    localparam int PIX_KHZ = OUT768 ? 72_000 : HD ? 74_250 : 27_000;
+    localparam int MEM_KHZ = SD_FAST ? 60_750 : HD ? 61_875 : 67_500;   // FT812 — fb_pll_sd ÷2
 
     ts_fb_core #(
         .OUT_W(OUT_W), .OUT_H(OUT_H), .IMG_X((OUT_W - 720) / 2), .IMG_Y((OUT_H - 576) / 2),
         .H_FP(H_FP), .H_SYNC(H_SYNC), .H_BP(H_BP), .V_FP(V_FP), .V_SYNC(V_SYNC), .V_BP(V_BP),
         .HS_NEG(!HD), .VS_NEG(!HD), .PIX_KHZ(PIX_KHZ), .MEM_KHZ(MEM_KHZ),
         .DEF_SRC(DEF_SRC), .DEF_PHASE(DEF_PHASE), .DEF_DELAY(DEF_DELAY), .DEF_CLOCK(DEF_CLOCK),
-        .DEF_RD(DEF_RD), .CALIBRATE(CALIBRATE), .SCALE(HD), .HDMI(HD),
+        .DEF_RD(DEF_RD), .CALIBRATE(CALIBRATE), .SCALE(HD), .OUT768(OUT768), .HDMI(HD),
         .BOOT_SLOT(BOOT_SLOT), .BOOT_NEXT(BOOT_NEXT), .HAS_EVO(HAS_EVO), .HAS_FT(HAS_FT),
-        .SD_FAST(SD_FAST)
+        .HAS_VIDEO(HAS_VIDEO), .SD_FAST(SD_FAST)
     ) core (
         .clk_cap(clk_cap), .rst_cap_n(rst_cap_sr[3]),
         .clk_mem(clk_mem), .rst_mem_n(rst_mem_sr[3]),
@@ -227,7 +262,7 @@ module ts_fb_hdmi_top #(
         .sdram_cs_n(O_sdram_cs_n), .sdram_ras_n(O_sdram_ras_n), .sdram_cas_n(O_sdram_cas_n),
         .sdram_we_n(O_sdram_wen_n), .sdram_a(O_sdram_addr), .sdram_ba(O_sdram_ba),
         .sdram_dqm(O_sdram_dqm), .sdram_dq_out(dq_out), .sdram_dq_oe(dq_oe),
-        .sdram_dq_in(dq_in), .sdram_dly(sd_dly), .sdram_dly_df(sd_dly_df),
+        .sdram_dq_in(dq_in), .sdram_dly(sd_dly), .sdram_dly_df(1'b0), .sdram_phase(sd_phase),
         .vid_r(), .vid_g(), .vid_b(), .vid_de(), .vid_hs(), .vid_vs(),
         .tmds_blue(t_blue), .tmds_green(t_green), .tmds_red(t_red),
         .cap_overflow(), .frames_written(), .frames_rejected(), .fetch_late(),
@@ -238,31 +273,15 @@ module ts_fb_hdmi_top #(
     );
 
     assign IO_sdram_dq = dq_oe ? dq_out : 32'hzzzz_zzzz;
-    // Чтение DQ: у ядра FT812 (SDRAM на 123,75 МГц) — через IODELAYA с подстройкой из LINK
-    // (ts_fb_core, SD_DLY 0xEC), у TS-Config — прямо
-    generate if (SD_FAST) begin : g_dq_dly
-        wire [31:0] df;
-        genvar gi;
-        for (gi = 0; gi < 32; gi = gi + 1) begin : g_bit
-`ifdef SIMULATION
-            assign dq_in[gi] = IO_sdram_dq[gi];
-            assign df[gi] = 1'b0;
-`else
-            IODELAYA #(.C_STATIC_DLY(0)) dly (
-                .DI(IO_sdram_dq[gi]), .SDTAP(sd_dly[2]), .SETN(sd_dly[1]), .VALUE(sd_dly[0]),
-                .DO(dq_in[gi]), .DF(df[gi]));
-`endif
-        end
-        assign sd_dly_df = df[0];
-    end else begin : g_dq_direct
-        assign dq_in = IO_sdram_dq;
-        assign sd_dly_df = 1'b0;
-    end endgenerate
+    // Чтение DQ — прямо с выводов: у ядра FT812 его берёт IDDR у вывода (sdram_burst IOB_CAP);
+    // IODELAYA 1.33–1.34 нет — тонкую точку выборки задаёт сдвиг клока микросхемы
+    assign dq_in = IO_sdram_dq;
     assign link_io     = link_io_oe ? link_io_out : 4'hz;
     assign O_sdram_cke = 1'b1;
-    // Клок микросхемы — инверсия клока логики: команды и данные меняются на спаде
-    // клока микросхемы и устойчивы на её фронте. Выборку чтения подбирает калибровка.
-    assign O_sdram_clk = SD_FAST ? ~clk_sd : ~clk_mem;
+    // Клок микросхемы: у TS-Config — инверсия клока логики (команды и данные меняются на спаде
+    // клока микросхемы и устойчивы на её фронте); у ядра FT812 — CLKOUTP fb_pll_sd со сдвигом,
+    // который после включения подбирает sdram_train (ts_fb_core).
+    assign O_sdram_clk = SD_FAST ? sdram_clk_p : ~clk_mem;
 
     tmds_serializer_gowin serializer (
         .pixel_clk(pixel_clk), .serial_clk(clk_serial), .reset(~rst_pix_sr[3]),

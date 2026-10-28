@@ -1,5 +1,5 @@
 #!/bin/sh
-# Стенд Verilator ядра FT812 (tb/vsys): ядро слота 1 целиком + SDRAM + вывод 720p60, хост Evo —
+# Стенд Verilator ядра FT812 (tb/vsys): ядро слота 1 целиком + SDRAM + вывод (720p60; с 1.41 — 1366×768), хост Evo —
 # игра в замкнутом цикле по REG_DLSWAP (tb/vsys/vsys_main.cpp).
 #
 #   scripts/run_vsys.sh build [КОРЕНЬ [КАТАЛОГ [ключи Verilator…]]]   — собрать vsys.exe; КОРЕНЬ —
@@ -27,12 +27,14 @@ build)
     [ -n "$src" ] || { echo "нет SRC в $root/scripts/run_fb_sim.sh"; exit 1; }
     sdf=""
     [ -f "$root/rtl/sd_bridge.sv" ] && sdf="-DVSYS_SD"      # ядро с мостом SDRAM (SD_FAST)
+    o768=""
+    grep -q OUT768 "$root/rtl/fb_scanout.sv" && o768="-DVSYS_768"   # вывод 1366×768 (ядро с 1.41)
     mkdir -p "$out"
     rm -rf "$out/obj"
     "$VB" --cc -O3 --x-assign fast --x-initial fast --noassert -Wno-fatal -Wno-lint -Wno-style \
-        -Wno-MULTIDRIVEN -DSIMULATION $sdf -I"$root/rtl" --top-module vsys_top --Mdir "$out/obj" "$@" \
+        -Wno-MULTIDRIVEN -DSIMULATION $sdf $o768 -I"$root/rtl" --top-module vsys_top --Mdir "$out/obj" "$@" \
         $src tb/vsys/sdram_cyc.sv tb/vsys/vsys_top.sv
-    "$CXX" -O2 -std=c++20 -w -D_CRT_SECURE_NO_WARNINGS -I"$out/obj" -I"$VR/include" -I"$VR/include/vltstd" \
+    "$CXX" -O2 -std=c++20 -w -D_CRT_SECURE_NO_WARNINGS $o768 -I"$out/obj" -I"$VR/include" -I"$VR/include/vltstd" \
         "$out"/obj/*.cpp "$VR/include/verilated.cpp" "$VR/include/verilated_threads.cpp" \
         tb/vsys/vsys_main.cpp -o "$out/vsys.exe"
     echo "собран $out/vsys.exe ($root)"

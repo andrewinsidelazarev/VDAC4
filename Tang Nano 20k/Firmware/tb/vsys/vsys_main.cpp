@@ -50,7 +50,11 @@ double sc_time_stamp() { return 0.0; }        // время ведёт стен�
 namespace {
 
 constexpr double PS_MEM = 1e6 / 61.875;     // период clk_mem, пс
+#ifdef VSYS_768
+constexpr double PS_PIX = 1e6 / 72.0;       // период pixel_clk, пс: 1366×768 RB (ядро с 1.41)
+#else
 constexpr double PS_PIX = 1e6 / 74.25;      // период pixel_clk, пс
+#endif
 constexpr double SPI_HP = 1e6 / 28.0 / 2;   // полупериод SCK 28 МГц, пс
 constexpr double MS = 1e9;                  // пс в мс
 

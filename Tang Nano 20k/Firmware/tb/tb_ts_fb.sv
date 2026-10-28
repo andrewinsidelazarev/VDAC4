@@ -66,9 +66,9 @@ module tb_ts_fb #(
     parameter bit PATTERN     = 1'b0,
     parameter bit CAL         = PATTERN,
     parameter logic [3:0] CAL_MAP = 4'b0011,  // годные точки при tAC 6 нс, tOH 2,5 нс
-    // то же для SDRAM на 2 × clk_mem (SD_FAST, ядро без Evo; CL 3, 135 МГц): фронты логики
-    // попадают в переход между словами, годна только точка 1 (спад, dq_neg)
-    parameter logic [3:0] CAL_MAP_SD = 4'b0010,
+    // то же для SDRAM на 2 × clk_mem (SD_FAST, ядро без Evo; CL 3, 135 МГц): с 1.38 точку выборки
+    // выбирает подбор sdram_train, SD READ ни на что не влияет — годны все четыре
+    parameter logic [3:0] CAL_MAP_SD = 4'b1111,
     parameter int RD_EXPECT   = 1,
     parameter int RD_FIXED    = 1,             // точка выборки без калибровки
     parameter bit LINK_TEST   = PATTERN,       // обмен с регистрами по LINK, как его ведёт ESP
@@ -133,9 +133,15 @@ module tb_ts_fb #(
     always #8.9285 if (pclk_run) clk_cap = ~clk_cap;
     always @(posedge clk_cap) src_clk <= ~src_clk;
     initial begin #3.1; forever #(T_PIX/2) pixel_clk = ~pixel_clk; end
-    initial begin #1.7; forever #(T_MEM/2) clk_mem = ~clk_mem; end
+    // clk_mem и clk_sd — от одной четверти периода в целых пикосекундах: T_MEM/2 и T_MEM/4 по
+    // отдельности округляются по-разному (1000/61,875 нс), и фаза clk_sd к clk_mem плыла бы
+    // (2 пс за такт), а у PLL она жёсткая — выгрузка плиток ядра FT812 (с 1.40) на это опирается
+    localparam real T_Q = $rtoi(T_MEM * 250.0 + 0.5) / 1000.0;
+    initial begin #1.7; forever #(2 * T_Q) clk_mem = ~clk_mem; end
     // SDRAM ядра FT812 — на 2 × clk_mem (SD_FAST); фронт clk_sd — на каждом фронте clk_mem
     localparam bit SDF = HAS_FT && !HAS_EVO;
+    // калибровка SD READ: у ядра FT812 (SD_FAST) с 1.38 её нет — точку выборки подбирает sdram_train
+    localparam bit CAL_ON = CAL && !SDF;
     localparam bit OVL_ON = OVL_TEST && HAS_EVO;     // у ядра FT812 оверлеев нет
     // начало кадра оверлея — проводом: у ядра без Evo экземпляра fb_ovl нет (g_no_ovl)
     wire ovl_frame_start;
@@ -145,8 +151,9 @@ module tb_ts_fb #(
         assign ovl_frame_start = 1'b0;
     end endgenerate
     localparam logic [3:0] CAL_EXP = SDF ? CAL_MAP_SD : CAL_MAP;
-    reg clk_sd = 1'b1;
-    initial begin #1.7; forever #(T_MEM/4) clk_sd = ~clk_sd; end
+    // фронт clk_sd — вместе с каждым фронтом clk_mem и посередине (как CLKOUT/CLKOUTD fb_pll_sd)
+    reg clk_sd = 1'b0;
+    initial begin #1.7; forever #(T_Q) clk_sd = ~clk_sd; end
 
     reg rst_n = 1'b1;                           // спад в начале — асинхронный сброс всех доменов
     initial #1 rst_n = 1'b0;
@@ -460,9 +467,18 @@ module tb_ts_fb #(
     end
 
 
-    // Клок микросхемы — инверсия клока логики, как в ts_fb_hdmi_top
+    // Клок микросхемы — как в ts_fb_hdmi_top: инверсия клока логики, у ядра FT812 (SD_FAST, с 1.38) —
+    // clk_sd со сдвигом PLL, который подбирает sdram_train (задержек корпуса здесь нет — их
+    // проверяет tb/tb_sd_train.sv)
+    reg sd_clk_sh = 1'b0;
+    always @(clk_sd) sd_clk_sh <= #(dut.sdram_phase * T_MEM / 32.0) clk_sd;
+    integer sd_err_train = 0;            // нарушений протокола модели к концу подбора (SDF)
+    initial if (SDF) begin
+        wait (rst_n && dut.mem_ready);
+        sd_err_train = sdram.errors;
+    end
     sdram_model #(.TCK_NS(SDF ? T_MEM / 2 : T_MEM), .CL(SDF ? 3 : 2)) sdram (
-        .clk(SDF ? ~clk_sd : ~clk_mem), .cs_n(sd_cs_n), .ras_n(sd_ras_n), .cas_n(sd_cas_n), .we_n(sd_we_n),
+        .clk(SDF ? sd_clk_sh : ~clk_mem), .cs_n(sd_cs_n), .ras_n(sd_ras_n), .cas_n(sd_cas_n), .we_n(sd_we_n),
         .a(sd_a), .ba(sd_ba), .dqm(sd_dqm),
         .dq_from_ctrl(sd_dq_out), .dq_oe(sd_dq_oe), .dq_to_ctrl(sd_dq_in)
     );
@@ -728,8 +744,10 @@ module tb_ts_fb #(
                     end
                     if (ppm != 0) begin $fclose(ppm); ppm = 0; end
                 end
-                // Сверяются кадры со второго после конца калибровки и при показе таблицы
-                if ((!CAL || dut.ui.cal_done) && pattern_on && dut.have_frame) cal_frames = cal_frames + 1;
+                // Сверяются кадры со второго после конца калибровки и при показе таблицы (у ядра FT812
+                // с 1.38 — и после записи CTRL: до неё вывод нарочно чёрный, fmt_wait)
+                if ((!CAL_ON || dut.ui.cal_done) && pattern_on && dut.have_frame && !dut.fmt_wait)
+                    cal_frames = cal_frames + 1;
                 pat_check = cal_frames >= 2;
                 ovl_chk   = ovl_live;
                 pat_frame_err = 0;
@@ -1010,6 +1028,9 @@ module tb_ts_fb #(
         #(1000);
         // хост начал обмен ещё в слоте TS-Config (его ACTIVE туда и ушёл): ядро — сразу ACTIVE
         if (dut.g_ft.ft.pmode !== 2'd0) err("ядро FT812 без Evo: после загрузки не ACTIVE");
+        // отсчёт — с готовности SDRAM (с 1.38 её на ~0,4 мс отодвигает подбор сдвига), как у проверки
+        // LINK ниже: иначе её чтение BOOT попадает на момент автовозврата
+        wait (dut.mem_ready);
         for (i = 0; i < 8; i = i + 1) begin           // 2 мс обмена — дольше SWITCH_MS
             ft_burst;
             #(250_000);
@@ -1023,12 +1044,24 @@ module tb_ts_fb #(
 
     initial if (LINK_TEST) begin
         wait (rst_n && dut.mem_ready);
-        if (CAL) wait (dut.ui.cal_done);
+        if (CAL_ON) wait (dut.ui.cal_done);
         repeat (3) @(posedge chk_tick);
         // ID и версия одним чтением двух слов
         link_xfer(8'h02, 32'h0000_0000, 2);
         link_expect("ID", lk_words[0], 32'h5644_4334);
-        link_expect("VERSION", lk_words[1], {HAS_EVO ? 8'h01 : 8'h02, 8'h01, 16'h0120});
+        link_expect("VERSION", lk_words[1], {HAS_EVO ? 8'h01 : 8'h02, 8'h01, 16'h0129});
+        // Подбор сдвига клока SDRAM (ядро FT812, с 1.38): SD_TRAIN — закончен, годные пары есть, сверка
+        // на выбранной сошлась, сдвиг — тот, что на выходе ядра
+        if (SDF) begin : sd_train_reg
+            reg [31:0] st;
+            link_xfer(8'h02, 32'h0000_00EC, 1);
+            st = lk_words[0];
+            $display("подбор SDRAM: сдвиг %0d, такт %0d, участок %0d пар, середина k=%0d",
+                     st[3:0], st[5:4], st[16:10], st[22:17]);
+            link_expect("SD_TRAIN: закончен, годные есть, сверка сошлась", st & 32'h0000_03C0, 32'h0000_0080);
+            if (dut.sdram_phase !== st[3:0]) err($sformatf("sdram_phase %0d, в SD_TRAIN %0d", dut.sdram_phase, st[3:0]));
+            if (st[16:10] == 0) err("SD_TRAIN: годный участок пуст");
+        end
         // Оверлеи ESP: холсты — окном 0x80000…, по 16 слов за транзакцию, затем регистры
         if (OVL_ON) begin : ovl
             integer k, cy, w, n, words;
@@ -1081,11 +1114,15 @@ module tb_ts_fb #(
         #(200);
         link_xfer(8'h02, 32'h0000_003C, 1);
         link_expect("SCRATCH", lk_words[0], 32'hA5C3_0F96);
+        // Ядро FT812 (с 1.38): до первой записи CTRL (её делает ESP: ASPECT и SIZE слота 0) вывод —
+        // чёрное поле, после неё — картинка
+        if (SDF && dut.fmt_wait !== 1'b1) err("ядро FT812: вывод не погашен до записи CTRL");
         // FRAME BLEND (1.32): CTRL 17 пишется и читается; на таблице кадры не смешиваются (CHECK 18)
         link_xfer(8'h02, 32'h0000_0040, 1);
         lk_words[0] = (lk_words[0] & ~32'h0000_0200) | 32'h0002_0000;
         link_xfer(8'h01, 32'h0000_0040, 1);
         #(200);
+        if (SDF && dut.fmt_wait !== 1'b0) err("ядро FT812: вывод погашен и после записи CTRL");
         link_xfer(8'h02, 32'h0000_0040, 1);
         link_expect("CTRL: FRAME BLEND", lk_words[0] & 32'h0002_0000, 32'h0002_0000);
         if (HAS_EVO) begin
@@ -1345,8 +1382,9 @@ module tb_ts_fb #(
         end
         // Состояние: таблица в SDRAM, SDRAM готова, есть кадр; регистры подряд 0x08…0x24
         link_xfer(8'h02, 32'h0000_0008, 8);
-        link_expect("STATUS: таблица/SDRAM/кадр", lk_words[0] & 32'h0E00, 32'h0E00);
-        link_expect("SYNC: карта калибровки", (lk_words[2] >> 16) & 32'hF, CAL ? CAL_EXP : 4'd0);
+        // у ядра FT812 (SD_FAST) таблицы нет: в SDRAM ни таблицы, ни кадра Evo — только «готова»
+        link_expect("STATUS: таблица/SDRAM/кадр", lk_words[0] & 32'h0E00, SDF ? 32'h0400 : 32'h0E00);
+        link_expect("SYNC: карта калибровки", (lk_words[2] >> 16) & 32'hF, CAL_ON ? CAL_EXP : 4'd0);
         link_expect("CHECK: расхождений нет", lk_words[7] & 32'hFFFF, 32'd0);
         $display("[%0t] LINK: ID %08h, STATUS %08h, проверок %0d", $time, 32'h5644_4334,
                  lk_words[0], link_checks);
@@ -1400,7 +1438,11 @@ module tb_ts_fb #(
             if (dut.ui.cfg_avg !== 1'b1) err("FRAME BLEND: настройка из flash не взята");
             if (avg_frames < 2) err("FRAME BLEND: мало кадров со смешением");
         end
-        if (sdram.errors != 0) err("модель SDRAM нашла нарушения протокола");
+        // у ядра FT812 (с 1.38) — только после подбора сдвига: на негодных сдвигах модель видит
+        // команды не в том такте, это и отбраковывает подбор
+        if (sdram.errors != sd_err_train) err("модель SDRAM нашла нарушения протокола");
+        if (SDF && sd_err_train != 0)
+            $display("(нарушений протокола во время подбора сдвига: %0d — ожидаемо)", sd_err_train);
         if (cap_overflow)      err("FIFO захвата переполнялся");
         if (fetch_late)        err("выборка строки не успела");
         if (PATTERN) begin
@@ -1408,7 +1450,7 @@ module tb_ts_fb #(
                      dut.ui.cal_ok, CAL_EXP, dut.ui.cfg_rd, dut.ui.cal_fail);
             $display("кадров таблицы сверено: %0d, расхождений: %0d; сверка в прошивке за последний кадр: %0d",
                      pat_frames, pat_errs, chk_err);
-            if (CAL) begin
+            if (CAL_ON) begin
                 if (!dut.ui.cal_done || dut.ui.cal_fail) err("калибровка не завершилась");
                 if (dut.ui.cal_ok !== CAL_EXP)          err("карта годных точек не та");
                 if (dut.ui.cfg_rd !== RD_EXPECT[1:0])   err("выбрана не та точка выборки");
@@ -1421,7 +1463,8 @@ module tb_ts_fb #(
                 $display("оверлеи: сверено точек оверлея 0 — %0d", ovl_px_n);
                 if (ovl_px_n < 100) err("оверлеи: мало сверенных точек (оверлей не показан?)");
             end
-            if (pat_frames < 3) err("мало сверенных кадров таблицы");
+            // у ядра FT812 (SD_FAST) с 1.38 таблицы нет — сверять нечего, проверяются растр и LINK
+            if (pat_frames < 3 && !SDF) err("мало сверенных кадров таблицы");
             if (chk_err != 0)   err("сверка таблицы в прошивке нашла расхождения");
             $display("ошибок: %0d", errors);
             if (errors == 0) $display("ТЕСТ ПРОЙДЕН");

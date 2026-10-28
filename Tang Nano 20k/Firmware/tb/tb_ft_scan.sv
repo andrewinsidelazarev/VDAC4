@@ -5,16 +5,20 @@
 // RGB. Кадр RGB565 — из растеризатора (tb_ft_render: ft_frame.hex) в модели SDRAM с
 // FB_BASE. Выход третьего кадра — в scan_out.hex (строка: 1280 точек RRGGBB); сверка с
 // эталоном развёртки — scripts/ft_scan_check.py.
+// OUT768 = 1 — вывод ядра FT812 с 1.41: 1366×768 с сокращённым гашением (72 МГц, строка 1500,
+// кадр 800), строка scan_out.hex — 1366 точек.
 //
 //   +frame=ft_frame.hex
 module tb_ft_scan;
     parameter bit ASPECT = 1'b0;
     parameter int SIZE = 0;
     parameter int SRC_W = 1024, SRC_H = 768;
+    parameter bit FT_W512 = (SRC_W <= 512);        // кадр видео 512×384 (ядро видео)
+    parameter bit OUT768 = 1'b0;                   // вывод 1366×768 (ядро FT812 с 1.41)
 
     reg clk_mem = 1'b0, pix = 1'b0, rst_n = 1'b0;
     always #(16.16 / 2) clk_mem = ~clk_mem;        // 61,875 МГц
-    always #(13.468 / 2) pix = ~pix;               // 74,25 МГц
+    always #((OUT768 ? 13.889 : 13.468) / 2) pix = ~pix;   // 72 / 74,25 МГц
 
     localparam logic [20:0] FB_BASE = 21'h120000;
 
@@ -56,10 +60,12 @@ module tb_ft_scan;
 
     wire [7:0] r, g, b;
     wire       de, hs, vs;
+    localparam int OUT_W = OUT768 ? 1366 : 1280, OUT_H = OUT768 ? 768 : 720;
     fb_scanout #(
-        .H_ACTIVE(720), .V_ACTIVE(576), .OUT_W(1280), .OUT_H(720), .IMG_X(280), .IMG_Y(72),
-        .H_FP(440), .H_SYNC(40), .H_BP(220), .V_FP(5), .V_SYNC(5), .V_BP(20),
-        .HS_NEG(1'b0), .VS_NEG(1'b0), .SCALE(1'b1)
+        .H_ACTIVE(720), .V_ACTIVE(576), .OUT_W(OUT_W), .OUT_H(OUT_H), .IMG_X(280), .IMG_Y(72),
+        .H_FP(OUT768 ? 14 : 440), .H_SYNC(OUT768 ? 56 : 40), .H_BP(OUT768 ? 64 : 220),
+        .V_FP(OUT768 ? 1 : 5), .V_SYNC(OUT768 ? 3 : 5), .V_BP(OUT768 ? 28 : 20),
+        .HS_NEG(1'b0), .VS_NEG(1'b0), .SCALE(1'b1), .OUT768(OUT768), .FT_W512(FT_W512)
     ) scan (
         .pixel_clk(pix), .rst_n(rst_n), .blank(1'b0), .aspect(ASPECT), .size(2'(SIZE)),
         .ft(1'b1), .src_w(11'(SRC_W)), .src_h(10'(SRC_H)),
@@ -113,7 +119,7 @@ module tb_ft_scan;
                 $fclose(fo);
                 $display("кадр выведен: строк %0d; запрос строки опоздал: %0d; ошибок SDRAM: %0d",
                          lines, fetch_late, mem.errors);
-                if (lines == 720 && !fetch_late && mem.errors == 0)
+                if (lines == OUT_H && !fetch_late && mem.errors == 0)
                     $display("ТЕСТ ПРОЙДЕН (сверка — ft_scan_check.py)");
                 else
                     $display("ТЕСТ НЕ ПРОЙДЕН");
