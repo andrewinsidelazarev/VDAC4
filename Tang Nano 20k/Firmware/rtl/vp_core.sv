@@ -62,7 +62,15 @@ module vp_core #(
     parameter int FIFO_AW   = 19,              // FIFO: 2^FIFO_AW слов SDRAM по 4 байта (19 — 2 МБ)
     parameter logic [20:0] FIFO_BASE = 21'h000000,  // его начало в SDRAM (адрес слова)
     parameter int OUT_US    = 20_000,          // выходной кадр, мкс (720p50)
-    parameter int WD_CYCLES = 1 << 22          // сторож, тактов clk (~68 мс на 61,875 МГц)
+    parameter int WD_CYCLES = 1 << 22,         // сторож, тактов clk (~68 мс на 61,875 МГц)
+`ifdef VP_PLAIN     // стенды, чей эталон — кадр декодера как есть (run_vvid.sh): без деблокера и зерна
+    parameter int DEBLOCK   = 0,
+    parameter int DITHER    = 0,
+`else
+    parameter int DEBLOCK   = 2,               // vp_fbwrite: деблокер (0 — нет, 1 — верт. края, 2 — все)
+    parameter int DITHER    = 1,               //             зерно при сведении к RGB565
+`endif
+    parameter int DB_HALF   = 1                //             деблокер и у уменьшенной картинки (HD)
 ) (
     input  wire         clk,
     input  wire         rst_n,
@@ -302,9 +310,12 @@ module vp_core #(
     end
 
     // --- поток ---------------------------------------------------------------------------------
-    wire        j_valid, j_accept;
+    wire        j_valid, j_accept;                      // слово в декодер (регистр ниже)
     wire [31:0] j_data;
     wire [3:0]  j_strb;
+    wire        a_jvalid, a_jaccept;                    // слово от разбора vp_avi
+    wire [31:0] a_jdata;
+    wire [3:0]  a_jstrb;
     wire        frame_start, frame_fed, slot_req, slot_go;
     wire        au_valid, au_ready;                     // звук из разбора (ниже)
     wire [7:0]  au_byte;
@@ -317,11 +328,44 @@ module vp_core #(
     vp_avi avi (
         .clk(clk), .rst_n(rst_n), .clr(creset), .skip(wd_abort),
         .in_valid(a_valid), .in_byte(a_byte), .in_ready(a_ready),
-        .j_valid(j_valid), .j_data(j_data), .j_strb(j_strb), .j_accept(j_accept),
+        .j_valid(a_jvalid), .j_data(a_jdata), .j_strb(a_jstrb), .j_accept(a_jaccept),
         .wr_busy(wr_busy || dec_rst != 3'd0), .frame_start(frame_start), .frame_fed(frame_fed),
         .slot_req(slot_req), .slot_go(slot_go), .us_frame(us_frame), .n_dht(n_dht),
         .aud_en(au_en), .au_valid(au_valid), .au_byte(au_byte), .au_ready(au_ready)
     );
+
+    // слово в декодер — через регистр на два слова (выход и запасной): вход декодера — прямо с
+    // триггеров, приём разбора — от запасного. Путь «очередь vp_avi → разбор маркеров jpeg_input →
+    // bitbuffer» не укладывался в такт в пробной сборке с деблокером (−1,9 нс). Отмена кадра и
+    // сброс потока его опустошают, как и очередь vp_avi
+    reg         js_v, jb_v;
+    reg  [35:0] js, jb;                                  // {strb, data}
+    assign a_jaccept = !jb_v;
+    assign j_valid   = js_v;
+    assign j_data    = js[31:0];
+    assign j_strb    = js[35:32];
+    wire        a_jtake = a_jvalid && a_jaccept;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            js_v <= 1'b0; jb_v <= 1'b0; js <= '0; jb <= '0;
+        end else if (creset || wd_abort) begin
+            js_v <= 1'b0; jb_v <= 1'b0;
+        end else begin
+            // запасной берёт каждое принятое слово (данные — без условия от приёма декодера: путь
+            // «приём jpeg_input → разрешение записи запасного» не укладывался в такт); нужно ли
+            // оно — решает jb_v
+            if (a_jtake) jb <= {a_jstrb, a_jdata};
+            if (!js_v || (j_valid && j_accept)) begin
+                if (jb_v) begin
+                    js <= jb; js_v <= 1'b1; jb_v <= 1'b0;
+                end else begin
+                    js <= {a_jstrb, a_jdata}; js_v <= a_jtake;
+                end
+            end else if (a_jtake) begin
+                jb_v <= 1'b1;
+            end
+        end
+    end
 
     // --- звук: упаковка в слова и FIFO для ESP -----------------------------------------------------
     reg  [23:0] au_acc;
@@ -355,6 +399,7 @@ module vp_core #(
     wire [15:0] d_x, d_y, img_w, img_h;
     wire [7:0]  d_r, d_g, d_b;
     wire [1:0]  img_mode;
+    wire [7:0]  img_qy;                                  // шаг квантования яркости — сила деблокера
     reg  [1:0]  sk_n;                                    // точек в очереди (ниже)
     // объявлен до декодера: Gowin иначе берёт неявный провод без драйвера и выбрасывает декодер
     wire        sk_flush = wd_abort || creset || dec_rst != 3'd0;
@@ -367,7 +412,7 @@ module vp_core #(
         .outport_width_o(img_w), .outport_height_o(img_h),
         .outport_pixel_x_o(d_x), .outport_pixel_y_o(d_y),
         .outport_pixel_r_o(d_r), .outport_pixel_g_o(d_g), .outport_pixel_b_o(d_b),
-        .idle_o(dec_idle), .outport_mode_o(img_mode)
+        .idle_o(dec_idle), .outport_mode_o(img_mode), .outport_qy_o(img_qy)
     );
 
     // точки декодера → запись кадра через очередь на 2 точки (1.38): приём декодера — от счётчика
@@ -405,10 +450,10 @@ module vp_core #(
         end
     end
 
-    vp_fbwrite wr (
+    vp_fbwrite #(.DEBLOCK(DEBLOCK), .DITHER(DITHER), .DB_HALF(DB_HALF)) wr (
         .clk(clk), .rst_n(rst_n),
         .frame_start(frame_start), .frame_end(dec_idle && dec_rst == 3'd0), .abort(wd_abort || creset),
-        .mode(img_mode), .img_w(img_w), .img_h(img_h),
+        .mode(img_mode), .img_w(img_w), .img_h(img_h), .qy(img_qy),
         .px_valid(px_valid), .px_ready(px_ready), .px_x(px_x), .px_y(px_y),
         .px_r(px_r), .px_g(px_g), .px_b(px_b),
         .s_req(f_req), .s_we(), .s_addr(f_addr), .s_len(), .s_ack(s_ack && p_own == P_F && !p_data),

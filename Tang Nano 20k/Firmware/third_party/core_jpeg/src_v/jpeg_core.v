@@ -61,6 +61,7 @@ module jpeg_core
     ,output [  7:0]  outport_pixel_b_o
     ,output          idle_o
     ,output [  1:0]  outport_mode_o     // VDAC4: 0 серый, 1 4:4:4, 2 4:2:0, 3 4:2:2 (высота MCU)
+    ,output [  7:0]  outport_qy_o       // VDAC4: шаг квантования таблицы яркости — сила деблокера
 );
 
 wire  [ 15:0]  idct_outport_data_w;
@@ -112,6 +113,13 @@ wire  [ 31:0]  bb_outport_data_w;
 wire           dqt_cfg_last_w;
 
 
+// VDAC4: регистр байтов таблиц DHT (ниже, у jpeg_dht) — объявлен до подключения разбора
+reg        dhq_v_q, dhb_v_q;
+reg [8:0]  dhq_q, dhb_q;                 // {last, байт}
+wire       dhq_in_accept_w = !dhb_v_q;
+wire       dhq_in_take_w   = dht_cfg_valid_w && dhq_in_accept_w;
+wire       dhq_out_take_w  = dhq_v_q && dht_cfg_accept_w;
+
 jpeg_input
 u_jpeg_input
 (
@@ -123,7 +131,7 @@ u_jpeg_input
     ,.inport_strb_i(inport_strb_i)
     ,.inport_last_i(inport_last_i)
     ,.dqt_cfg_accept_i(dqt_cfg_accept_w)
-    ,.dht_cfg_accept_i(dht_cfg_accept_w)
+    ,.dht_cfg_accept_i(dhq_in_accept_w)
     ,.data_accept_i(bb_inport_accept_w)
 
     // Outputs
@@ -148,6 +156,35 @@ u_jpeg_input
 );
 
 
+//-----------------------------------------------------------------
+// VDAC4: байты таблиц DHT — через регистр на два байта (выход и запасной): таблицы получают байт
+// с триггеров, разбор — готовность от запасного. Путь «слово входа → разбор маркеров jpeg_input →
+// построение таблиц jpeg_dht» не укладывался в такт 61,875 МГц в пробной сборке ядра видео с
+// деблокером записи кадра (−1,8 нс). Таблицы отстают от разбора не больше чем на 2 байта, а до
+// первого поиска кода — заголовок SOS (десяток байтов и больше)
+//-----------------------------------------------------------------
+
+always @ (posedge clk_i )
+if (rst_i)
+begin
+    dhq_v_q <= 1'b0; dhb_v_q <= 1'b0; dhq_q <= 9'd0; dhb_q <= 9'd0;
+end
+else if (!dhq_v_q || dhq_out_take_w)
+begin
+    if (dhb_v_q)
+    begin
+        dhq_q <= dhb_q; dhq_v_q <= 1'b1; dhb_v_q <= 1'b0;
+    end
+    else
+    begin
+        dhq_q <= {dht_cfg_last_w, dht_cfg_data_w}; dhq_v_q <= dhq_in_take_w;
+    end
+end
+else if (dhq_in_take_w)
+begin
+    dhb_q <= {dht_cfg_last_w, dht_cfg_data_w}; dhb_v_q <= 1'b1;
+end
+
 jpeg_dht
 #(
      .SUPPORT_WRITABLE_DHT(SUPPORT_WRITABLE_DHT)
@@ -157,9 +194,9 @@ u_jpeg_dht
     // Inputs
      .clk_i(clk_i)
     ,.rst_i(rst_i)
-    ,.cfg_valid_i(dht_cfg_valid_w)
-    ,.cfg_data_i(dht_cfg_data_w)
-    ,.cfg_last_i(dht_cfg_last_w)
+    ,.cfg_valid_i(dhq_v_q)
+    ,.cfg_data_i(dhq_q[7:0])
+    ,.cfg_last_i(dhq_q[8])
     ,.lookup_req_i(lookup_req_w)
     ,.lookup_table_i(lookup_table_w)
     ,.lookup_input_i(lookup_input_w)
@@ -225,6 +262,7 @@ u_jpeg_dqt
     ,.outport_idx_o(idct_inport_idx_w)
     ,.outport_id_o(idct_inport_id_w)
     ,.outport_eob_o(idct_inport_eob_w)
+    ,.qs_y_o(outport_qy_o)
 );
 
 

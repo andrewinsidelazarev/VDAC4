@@ -7,7 +7,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 |---|---|---|---|
 | **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.32 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
 | **FT812** — видеоускоритель для программ Evo, вывод 1366×768 | flash Tang, слот 1 | 1.41 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
-| **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Evo, `/WC/ESP` | 1.42, слой ESP 0.9 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`VIDEO/esp/dist/VIDEO.ELF`](VIDEO/esp/dist/VIDEO.ELF) |
+| **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Evo, `/WC/ESP` | 1.43, слой ESP 0.9 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`VIDEO/esp/dist/VIDEO.ELF`](VIDEO/esp/dist/VIDEO.ELF) |
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.9 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
 
@@ -87,6 +87,11 @@ Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит �
 Джойстик Kempston работает в обоих ядрах. Мышь Kempston работает в Next.
 
 ## Проверено на плате
+
+2026-10-29, ESP 0.1.104, BL616 35, TS-Config 1.32, FTVIEW4 bb34, VIDEO.ELF 0.9:
+- **Видео 1.43** — деблокер и зерно: квадраты сжатия на ролике с малым потоком сглажены (фильтр
+  окна края блока, решение по яркости — уходят и цветовые квадраты 16×16), тёмные заливки — без
+  ступеней RGB565 (синий шум, каждый кадр на новом месте). Описание — [`../Docs/video-core.md`](../Docs/video-core.md).
 
 2026-10-28, ESP 0.1.104, BL616 35, TS-Config 1.32, FTVIEW4 bb34:
 - **Видео 1.42**, VIDEO.ELF 0.8–0.9: меню файлов и панель плеера — в точках 720p, шрифты чёткие;

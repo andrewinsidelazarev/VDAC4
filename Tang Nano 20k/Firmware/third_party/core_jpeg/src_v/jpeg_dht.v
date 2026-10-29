@@ -480,161 +480,81 @@ begin
     // Lookup: Match shortest bit sequence
     //-----------------------------------------------------------------
 
-    reg [3:0] y_dc_width_r;
-    always @ *
+    //-----------------------------------------------------------------
+    // VDAC4: длина кода — сравнения префиксов параллельно (lt[i]: префикс из i+1 бит меньше
+    // max_code[i]; lt[15] = 1 — «иначе 15») и первая единица — приоритетным шифратором деревом.
+    // Прежняя цепочка if/else из 16 условий давала 8 уровней LUT после сравнений, и путь «буфер
+    // битов → длина кода» не укладывался в такт 61,875 МГц в пробной сборке ядра видео с
+    // деблокером (−0,2 нс). Итог тот же: наименьшее i с lt[i] = 1.
+    //-----------------------------------------------------------------
+    function [3:0] first_lt;
+        input [15:0] lt;
+        reg   [7:0]  s8;
+        reg   [3:0]  s4;
+        reg   [1:0]  s2;
     begin
-        y_dc_width_r = 4'b0;
-
-        if ({15'b0, lookup_input_i[15]} < y_dc_max_code_q[0])
-            y_dc_width_r = 4'd0;
-        else if ({14'b0, lookup_input_i[15:14]} < y_dc_max_code_q[1])
-            y_dc_width_r = 4'd1;
-        else if ({13'b0, lookup_input_i[15:13]} < y_dc_max_code_q[2])
-            y_dc_width_r = 4'd2;
-        else if ({12'b0, lookup_input_i[15:12]} < y_dc_max_code_q[3])
-            y_dc_width_r = 4'd3;
-        else if ({11'b0, lookup_input_i[15:11]} < y_dc_max_code_q[4])
-            y_dc_width_r = 4'd4;
-        else if ({10'b0, lookup_input_i[15:10]} < y_dc_max_code_q[5])
-            y_dc_width_r = 4'd5;
-        else if ({9'b0, lookup_input_i[15:9]} < y_dc_max_code_q[6])
-            y_dc_width_r = 4'd6;
-        else if ({8'b0, lookup_input_i[15:8]} < y_dc_max_code_q[7])
-            y_dc_width_r = 4'd7;
-        else if ({7'b0, lookup_input_i[15:7]} < y_dc_max_code_q[8])
-            y_dc_width_r = 4'd8;
-        else if ({6'b0, lookup_input_i[15:6]} < y_dc_max_code_q[9])
-            y_dc_width_r = 4'd9;
-        else if ({5'b0, lookup_input_i[15:5]} < y_dc_max_code_q[10])
-            y_dc_width_r = 4'd10;
-        else if ({4'b0, lookup_input_i[15:4]} < y_dc_max_code_q[11])
-            y_dc_width_r = 4'd11;
-        else if ({3'b0, lookup_input_i[15:3]} < y_dc_max_code_q[12])
-            y_dc_width_r = 4'd12;
-        else if ({2'b0, lookup_input_i[15:2]} < y_dc_max_code_q[13])
-            y_dc_width_r = 4'd13;
-        else if ({1'b0, lookup_input_i[15:1]} < y_dc_max_code_q[14])
-            y_dc_width_r = 4'd14;
-        else
-            y_dc_width_r = 4'd15;
+        first_lt[3] = ~|lt[7:0];
+        s8          = first_lt[3] ? lt[15:8] : lt[7:0];
+        first_lt[2] = ~|s8[3:0];
+        s4          = first_lt[2] ? s8[7:4] : s8[3:0];
+        first_lt[1] = ~|s4[1:0];
+        s2          = first_lt[1] ? s4[3:2] : s4[1:0];
+        first_lt[0] = ~s2[0];
     end
+    endfunction
 
-    reg [3:0] y_ac_width_r;
-    always @ *
-    begin
-        y_ac_width_r = 4'b0;
-
-        if ({15'b0, lookup_input_i[15]} < y_ac_max_code_q[0])
-            y_ac_width_r = 4'd0;
-        else if ({14'b0, lookup_input_i[15:14]} < y_ac_max_code_q[1])
-            y_ac_width_r = 4'd1;
-        else if ({13'b0, lookup_input_i[15:13]} < y_ac_max_code_q[2])
-            y_ac_width_r = 4'd2;
-        else if ({12'b0, lookup_input_i[15:12]} < y_ac_max_code_q[3])
-            y_ac_width_r = 4'd3;
-        else if ({11'b0, lookup_input_i[15:11]} < y_ac_max_code_q[4])
-            y_ac_width_r = 4'd4;
-        else if ({10'b0, lookup_input_i[15:10]} < y_ac_max_code_q[5])
-            y_ac_width_r = 4'd5;
-        else if ({9'b0, lookup_input_i[15:9]} < y_ac_max_code_q[6])
-            y_ac_width_r = 4'd6;
-        else if ({8'b0, lookup_input_i[15:8]} < y_ac_max_code_q[7])
-            y_ac_width_r = 4'd7;
-        else if ({7'b0, lookup_input_i[15:7]} < y_ac_max_code_q[8])
-            y_ac_width_r = 4'd8;
-        else if ({6'b0, lookup_input_i[15:6]} < y_ac_max_code_q[9])
-            y_ac_width_r = 4'd9;
-        else if ({5'b0, lookup_input_i[15:5]} < y_ac_max_code_q[10])
-            y_ac_width_r = 4'd10;
-        else if ({4'b0, lookup_input_i[15:4]} < y_ac_max_code_q[11])
-            y_ac_width_r = 4'd11;
-        else if ({3'b0, lookup_input_i[15:3]} < y_ac_max_code_q[12])
-            y_ac_width_r = 4'd12;
-        else if ({2'b0, lookup_input_i[15:2]} < y_ac_max_code_q[13])
-            y_ac_width_r = 4'd13;
-        else if ({1'b0, lookup_input_i[15:1]} < y_ac_max_code_q[14])
-            y_ac_width_r = 4'd14;
-        else
-            y_ac_width_r = 4'd15;
-    end
-
-    reg [3:0] cx_dc_width_r;
-    always @ *
-    begin
-        cx_dc_width_r = 4'b0;
-
-        if ({15'b0, lookup_input_i[15]} < cx_dc_max_code_q[0])
-            cx_dc_width_r = 4'd0;
-        else if ({14'b0, lookup_input_i[15:14]} < cx_dc_max_code_q[1])
-            cx_dc_width_r = 4'd1;
-        else if ({13'b0, lookup_input_i[15:13]} < cx_dc_max_code_q[2])
-            cx_dc_width_r = 4'd2;
-        else if ({12'b0, lookup_input_i[15:12]} < cx_dc_max_code_q[3])
-            cx_dc_width_r = 4'd3;
-        else if ({11'b0, lookup_input_i[15:11]} < cx_dc_max_code_q[4])
-            cx_dc_width_r = 4'd4;
-        else if ({10'b0, lookup_input_i[15:10]} < cx_dc_max_code_q[5])
-            cx_dc_width_r = 4'd5;
-        else if ({9'b0, lookup_input_i[15:9]} < cx_dc_max_code_q[6])
-            cx_dc_width_r = 4'd6;
-        else if ({8'b0, lookup_input_i[15:8]} < cx_dc_max_code_q[7])
-            cx_dc_width_r = 4'd7;
-        else if ({7'b0, lookup_input_i[15:7]} < cx_dc_max_code_q[8])
-            cx_dc_width_r = 4'd8;
-        else if ({6'b0, lookup_input_i[15:6]} < cx_dc_max_code_q[9])
-            cx_dc_width_r = 4'd9;
-        else if ({5'b0, lookup_input_i[15:5]} < cx_dc_max_code_q[10])
-            cx_dc_width_r = 4'd10;
-        else if ({4'b0, lookup_input_i[15:4]} < cx_dc_max_code_q[11])
-            cx_dc_width_r = 4'd11;
-        else if ({3'b0, lookup_input_i[15:3]} < cx_dc_max_code_q[12])
-            cx_dc_width_r = 4'd12;
-        else if ({2'b0, lookup_input_i[15:2]} < cx_dc_max_code_q[13])
-            cx_dc_width_r = 4'd13;
-        else if ({1'b0, lookup_input_i[15:1]} < cx_dc_max_code_q[14])
-            cx_dc_width_r = 4'd14;
-        else
-            cx_dc_width_r = 4'd15;
-    end
-
-    reg [3:0] cx_ac_width_r;
-    always @ *
-    begin
-        cx_ac_width_r = 4'b0;
-
-        if ({15'b0, lookup_input_i[15]} < cx_ac_max_code_q[0])
-            cx_ac_width_r = 4'd0;
-        else if ({14'b0, lookup_input_i[15:14]} < cx_ac_max_code_q[1])
-            cx_ac_width_r = 4'd1;
-        else if ({13'b0, lookup_input_i[15:13]} < cx_ac_max_code_q[2])
-            cx_ac_width_r = 4'd2;
-        else if ({12'b0, lookup_input_i[15:12]} < cx_ac_max_code_q[3])
-            cx_ac_width_r = 4'd3;
-        else if ({11'b0, lookup_input_i[15:11]} < cx_ac_max_code_q[4])
-            cx_ac_width_r = 4'd4;
-        else if ({10'b0, lookup_input_i[15:10]} < cx_ac_max_code_q[5])
-            cx_ac_width_r = 4'd5;
-        else if ({9'b0, lookup_input_i[15:9]} < cx_ac_max_code_q[6])
-            cx_ac_width_r = 4'd6;
-        else if ({8'b0, lookup_input_i[15:8]} < cx_ac_max_code_q[7])
-            cx_ac_width_r = 4'd7;
-        else if ({7'b0, lookup_input_i[15:7]} < cx_ac_max_code_q[8])
-            cx_ac_width_r = 4'd8;
-        else if ({6'b0, lookup_input_i[15:6]} < cx_ac_max_code_q[9])
-            cx_ac_width_r = 4'd9;
-        else if ({5'b0, lookup_input_i[15:5]} < cx_ac_max_code_q[10])
-            cx_ac_width_r = 4'd10;
-        else if ({4'b0, lookup_input_i[15:4]} < cx_ac_max_code_q[11])
-            cx_ac_width_r = 4'd11;
-        else if ({3'b0, lookup_input_i[15:3]} < cx_ac_max_code_q[12])
-            cx_ac_width_r = 4'd12;
-        else if ({2'b0, lookup_input_i[15:2]} < cx_ac_max_code_q[13])
-            cx_ac_width_r = 4'd13;
-        else if ({1'b0, lookup_input_i[15:1]} < cx_ac_max_code_q[14])
-            cx_ac_width_r = 4'd14;
-        else
-            cx_ac_width_r = 4'd15;
-    end
+    // VDAC4: max_code нужной таблицы выбирается до сравнений: номер таблицы — от регистров
+    // mcu_proc (раньше данных буфера битов), сравнений 16 вместо 64, выбора итога в конце нет
+    wire [15:0] sel_max_code_w [0:15];
+    wire [15:0] sel_lt_w;
+    assign sel_max_code_w[0] = lookup_table_i == 2'd0 ? y_dc_max_code_q[0] : lookup_table_i == 2'd1 ? y_ac_max_code_q[0] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[0] : cx_ac_max_code_q[0];
+    assign sel_max_code_w[1] = lookup_table_i == 2'd0 ? y_dc_max_code_q[1] : lookup_table_i == 2'd1 ? y_ac_max_code_q[1] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[1] : cx_ac_max_code_q[1];
+    assign sel_max_code_w[2] = lookup_table_i == 2'd0 ? y_dc_max_code_q[2] : lookup_table_i == 2'd1 ? y_ac_max_code_q[2] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[2] : cx_ac_max_code_q[2];
+    assign sel_max_code_w[3] = lookup_table_i == 2'd0 ? y_dc_max_code_q[3] : lookup_table_i == 2'd1 ? y_ac_max_code_q[3] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[3] : cx_ac_max_code_q[3];
+    assign sel_max_code_w[4] = lookup_table_i == 2'd0 ? y_dc_max_code_q[4] : lookup_table_i == 2'd1 ? y_ac_max_code_q[4] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[4] : cx_ac_max_code_q[4];
+    assign sel_max_code_w[5] = lookup_table_i == 2'd0 ? y_dc_max_code_q[5] : lookup_table_i == 2'd1 ? y_ac_max_code_q[5] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[5] : cx_ac_max_code_q[5];
+    assign sel_max_code_w[6] = lookup_table_i == 2'd0 ? y_dc_max_code_q[6] : lookup_table_i == 2'd1 ? y_ac_max_code_q[6] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[6] : cx_ac_max_code_q[6];
+    assign sel_max_code_w[7] = lookup_table_i == 2'd0 ? y_dc_max_code_q[7] : lookup_table_i == 2'd1 ? y_ac_max_code_q[7] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[7] : cx_ac_max_code_q[7];
+    assign sel_max_code_w[8] = lookup_table_i == 2'd0 ? y_dc_max_code_q[8] : lookup_table_i == 2'd1 ? y_ac_max_code_q[8] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[8] : cx_ac_max_code_q[8];
+    assign sel_max_code_w[9] = lookup_table_i == 2'd0 ? y_dc_max_code_q[9] : lookup_table_i == 2'd1 ? y_ac_max_code_q[9] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[9] : cx_ac_max_code_q[9];
+    assign sel_max_code_w[10] = lookup_table_i == 2'd0 ? y_dc_max_code_q[10] : lookup_table_i == 2'd1 ? y_ac_max_code_q[10] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[10] : cx_ac_max_code_q[10];
+    assign sel_max_code_w[11] = lookup_table_i == 2'd0 ? y_dc_max_code_q[11] : lookup_table_i == 2'd1 ? y_ac_max_code_q[11] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[11] : cx_ac_max_code_q[11];
+    assign sel_max_code_w[12] = lookup_table_i == 2'd0 ? y_dc_max_code_q[12] : lookup_table_i == 2'd1 ? y_ac_max_code_q[12] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[12] : cx_ac_max_code_q[12];
+    assign sel_max_code_w[13] = lookup_table_i == 2'd0 ? y_dc_max_code_q[13] : lookup_table_i == 2'd1 ? y_ac_max_code_q[13] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[13] : cx_ac_max_code_q[13];
+    assign sel_max_code_w[14] = lookup_table_i == 2'd0 ? y_dc_max_code_q[14] : lookup_table_i == 2'd1 ? y_ac_max_code_q[14] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[14] : cx_ac_max_code_q[14];
+    assign sel_max_code_w[15] = lookup_table_i == 2'd0 ? y_dc_max_code_q[15] : lookup_table_i == 2'd1 ? y_ac_max_code_q[15] :
+                                lookup_table_i == 2'd2 ? cx_dc_max_code_q[15] : cx_ac_max_code_q[15];
+    assign sel_lt_w[0] = {15'b0, lookup_input_i[15:15]} < sel_max_code_w[0];
+    assign sel_lt_w[1] = {14'b0, lookup_input_i[15:14]} < sel_max_code_w[1];
+    assign sel_lt_w[2] = {13'b0, lookup_input_i[15:13]} < sel_max_code_w[2];
+    assign sel_lt_w[3] = {12'b0, lookup_input_i[15:12]} < sel_max_code_w[3];
+    assign sel_lt_w[4] = {11'b0, lookup_input_i[15:11]} < sel_max_code_w[4];
+    assign sel_lt_w[5] = {10'b0, lookup_input_i[15:10]} < sel_max_code_w[5];
+    assign sel_lt_w[6] = {9'b0, lookup_input_i[15:9]} < sel_max_code_w[6];
+    assign sel_lt_w[7] = {8'b0, lookup_input_i[15:8]} < sel_max_code_w[7];
+    assign sel_lt_w[8] = {7'b0, lookup_input_i[15:7]} < sel_max_code_w[8];
+    assign sel_lt_w[9] = {6'b0, lookup_input_i[15:6]} < sel_max_code_w[9];
+    assign sel_lt_w[10] = {5'b0, lookup_input_i[15:5]} < sel_max_code_w[10];
+    assign sel_lt_w[11] = {4'b0, lookup_input_i[15:4]} < sel_max_code_w[11];
+    assign sel_lt_w[12] = {3'b0, lookup_input_i[15:3]} < sel_max_code_w[12];
+    assign sel_lt_w[13] = {2'b0, lookup_input_i[15:2]} < sel_max_code_w[13];
+    assign sel_lt_w[14] = {1'b0, lookup_input_i[15:1]} < sel_max_code_w[14];
+    assign sel_lt_w[15] = 1'b1;
 
     //-----------------------------------------------------------------
     // Lookup: Register lookup width
@@ -645,12 +565,7 @@ begin
     begin
         lookup_width_r = 4'b0;
 
-        case (lookup_table_i)
-        2'd0:    lookup_width_r = y_dc_width_r;
-        2'd1:    lookup_width_r = y_ac_width_r;
-        2'd2:    lookup_width_r = cx_dc_width_r;
-        default: lookup_width_r = cx_ac_width_r;
-        endcase
+        lookup_width_r = first_lt(sel_lt_w);
     end
 
     reg [3:0]  lookup_width_q;

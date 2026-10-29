@@ -57,6 +57,7 @@ module jpeg_dqt
     ,output [  5:0]  outport_idx_o
     ,output [ 31:0]  outport_id_o
     ,output          outport_eob_o
+    ,output [  7:0]  qs_y_o             // VDAC4: шаг квантования таблицы яркости (сила деблокера)
 );
 
 
@@ -106,6 +107,48 @@ wire [7:0] table_rd_idx_w   = {table_src_w[inport_id_i[31:30]], inport_idx_i};
 
 wire       dqt_write_w      = cfg_valid_i && cfg_accept_o && idx_q != 8'hFF;
 wire [7:0] dqt_table_addr_w = dqt_write_w ? cfg_table_addr_w : table_rd_idx_w;
+
+// VDAC4: шаг квантования таблицы для деблокера записи кадра — наибольший из шагов DC и первого
+// AC (значения 0 и 1 таблицы): у MJPEG ffmpeg шаг DC всегда 8 и о качестве не говорит, как и в
+// H.263 (там сила фильтра — от шага AC). Наружу — у таблицы яркости (SOF). Таблица в DQT — по
+// одной на сегмент, как и у записи таблиц выше
+// Входы — регистром тактом позже: сравнение прямо с байтом разбора jpeg_input не укладывалось в такт
+// (пробная сборка с деблокером: byte_idx_q → qs_q −0,9 нс)
+reg [7:0] qs_q0, qs_q1, qs_q2, qs_q3;
+reg       qs_w_q;
+reg [7:0] qs_d_q;
+reg [5:0] qs_i_q;
+reg [1:0] qs_t_q;
+
+always @ (posedge clk_i )
+begin
+    qs_w_q <= dqt_write_w;
+    qs_d_q <= cfg_data_i;
+    qs_i_q <= idx_q[5:0];
+    qs_t_q <= cfg_table_q;
+end
+
+wire [7:0] qs_cur_w = qs_t_q == 2'd0 ? qs_q0 : qs_t_q == 2'd1 ? qs_q1 :
+                      qs_t_q == 2'd2 ? qs_q2 : qs_q3;
+wire       qs_wr_w  = qs_w_q && (qs_i_q == 6'd0 || (qs_i_q == 6'd1 && qs_d_q > qs_cur_w));
+
+always @ (posedge clk_i )
+if (rst_i)
+begin
+    qs_q0 <= 8'd0; qs_q1 <= 8'd0; qs_q2 <= 8'd0; qs_q3 <= 8'd0;
+end
+else if (qs_wr_w)
+begin
+    case (qs_t_q)
+    2'd0: qs_q0 <= qs_d_q;
+    2'd1: qs_q1 <= qs_d_q;
+    2'd2: qs_q2 <= qs_d_q;
+    default: qs_q3 <= qs_d_q;
+    endcase
+end
+
+assign qs_y_o = img_dqt_table_y_i == 2'd0 ? qs_q0 : img_dqt_table_y_i == 2'd1 ? qs_q1 :
+                img_dqt_table_y_i == 2'd2 ? qs_q2 : qs_q3;
 
 reg [7:0] dqt_entry_q;
 

@@ -1049,7 +1049,7 @@ module tb_ts_fb #(
         // ID и версия одним чтением двух слов
         link_xfer(8'h02, 32'h0000_0000, 2);
         link_expect("ID", lk_words[0], 32'h5644_4334);
-        link_expect("VERSION", lk_words[1], {HAS_EVO ? 8'h01 : 8'h02, 8'h01, 16'h012A});
+        link_expect("VERSION", lk_words[1], {HAS_EVO ? 8'h01 : 8'h02, 8'h01, 16'h012B});
         // Подбор сдвига клока SDRAM (ядро FT812, с 1.38): SD_TRAIN — закончен, годные пары есть, сверка
         // на выбранной сошлась, сдвиг — тот, что на выходе ядра
         if (SDF) begin : sd_train_reg

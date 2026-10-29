@@ -6,7 +6,8 @@
 #   КАТАЛОГ/vvid.exe поток.avi ожидание.txt [--dump КАТАЛОГ]  — прогон (поток — make_vp_avi.py)
 #
 # Нужны Verilator 5 (verilator_bin; VERILATOR_ROOT) и clang++ (CXX). Список RTL — из SRC
-# scripts/run_fb_sim.sh (без tb/) и файлы ядра видео.
+# scripts/run_fb_sim.sh (без tb/) и файлы ядра видео. Деблокер и зерно выключены (-DVP_PLAIN: эталон
+# стенда — кадр декодера как есть); VVID_VFLAGS — ещё ключи Verilator.
 set -e
 VR=${VERILATOR_ROOT:-E:/zx/tools/rtl/ucrt64/share/verilator}
 VB=${VERILATOR_BIN:-/e/zx/tools/rtl/ucrt64/bin/verilator_bin.exe}
@@ -21,8 +22,8 @@ jpeg=third_party/core_jpeg/src_v
 mkdir -p "$out"
 rm -rf "$out/obj"
 "$VB" --cc -O3 --x-assign fast --x-initial fast --noassert -Wno-fatal -Wno-lint -Wno-style \
-    -Wno-MULTIDRIVEN -DSIMULATION -Irtl -I"$jpeg" --top-module vvid_top --Mdir "$out/obj" \
-    $src rtl/vp_core.sv rtl/vp_avi.sv rtl/vp_pace.sv rtl/vp_fbwrite.sv "$jpeg"/*.v \
+    -Wno-MULTIDRIVEN -DSIMULATION -DVP_PLAIN $VVID_VFLAGS -Irtl -I"$jpeg" --top-module vvid_top --Mdir "$out/obj" \
+    $src rtl/vp_core.sv rtl/vp_avi.sv rtl/vp_pace.sv rtl/vp_fbwrite.sv rtl/vp_dbk_lp.sv rtl/vp_noise_rom.sv "$jpeg"/*.v \
     tb/vsys/sdram_cyc.sv tb/vsys/vvid_top.sv
 "$CXX" -O2 -std=c++20 -w -D_CRT_SECURE_NO_WARNINGS -I"$out/obj" -I"$VR/include" -I"$VR/include/vltstd" \
     "$out"/obj/*.cpp "$VR/include/verilated.cpp" "$VR/include/verilated_threads.cpp" \

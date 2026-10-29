@@ -34,7 +34,7 @@ set_device GW2AR-LV18QN88C8/I7 -name GW2AR-18C -device_version C
 foreach f {ts_fb_hdmi_top fb_clocking ts_clocking ts_fb_core ts_mux_capture raster_detect active_bbox fb_capture
            async_fifo sdram_burst sd_bridge fb_core fb_avg_rom fb_line_ram fb_scanout fb_pattern fb_cdc fb_ui fb_ovl fb_link fb_flash fb_sdspi
            ft_ram ft_ramg ft_spi ft_core ft_port_arb cp_spi cp_link ft_mul9 ft_rd_walk ft_rd_exec ft_rd_pix ft_render ws_dark
-           legacy_palette tmds_encoder hdmi_tx tmds_serializer_gowin vp_core vp_avi vp_pace vp_fbwrite} {
+           legacy_palette tmds_encoder hdmi_tx tmds_serializer_gowin vp_core vp_avi vp_pace vp_fbwrite vp_dbk_lp vp_noise_rom} {
     if {$f eq "ts_fb_hdmi_top" && ($boot_slot != 0 || $core_kind ne "both")} {
         # Копия верхнего модуля с другими значениями параметров (параметров верхнего модуля
         # gw_sh не задаёт); имена и иерархия те же — .cst и .sdc подходят как есть

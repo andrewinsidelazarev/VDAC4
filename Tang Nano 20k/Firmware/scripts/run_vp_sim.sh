@@ -1,6 +1,8 @@
 #!/bin/sh
-# Стенд Verilator ядра видео: декодер JPEG (third_party/core_jpeg) → запись кадра (rtl/vp_fbwrite.sv)
-# → модель SDRAM (tb/jpeg/vp_tb_top.sv, tb/jpeg/tb_vp.cpp).
+# Стенд Verilator ядра видео: декодер JPEG (third_party/core_jpeg) → запись кадра (rtl/vp_fbwrite.sv,
+# с 1.43 — деблокер и зерно, как в ядре) → модель SDRAM (tb/jpeg/vp_tb_top.sv, tb/jpeg/tb_vp.cpp).
+# Таблица зерна — tb/jpeg/vp_noise64.bin в рабочем каталоге прогона (или путь в VP_NOISE). Все
+# варианты деблокера и зерна — scripts/run_vpd_sim.sh.
 #
 #   scripts/run_vp_sim.sh [КАТАЛОГ]  — собрать КАТАЛОГ/tb_vp.exe (по умолчанию E:/zx/cache/tmp/vp_sim)
 #
@@ -16,7 +18,7 @@ src=third_party/core_jpeg/src_v
 mkdir -p "$out"
 rm -rf "$out/obj"
 "$VB" --cc -O3 --x-assign fast --x-initial fast --noassert -Wno-fatal -Wno-lint -Wno-style \
-    -I"$src" -Irtl --top-module vp_tb_top --Mdir "$out/obj" "$src"/*.v rtl/vp_fbwrite.sv tb/jpeg/vp_tb_top.sv
+    -I"$src" -Irtl --top-module vp_tb_top --Mdir "$out/obj" "$src"/*.v rtl/vp_dbk_lp.sv rtl/vp_noise_rom.sv rtl/vp_fbwrite.sv tb/jpeg/vp_tb_top.sv
 "$CXX" -O2 -std=c++20 -w -D_CRT_SECURE_NO_WARNINGS -I"$out/obj" -I"$VR/include" -I"$VR/include/vltstd" \
     "$out"/obj/*.cpp "$VR/include/verilated.cpp" "$VR/include/verilated_threads.cpp" \
     tb/jpeg/tb_vp.cpp -o "$out/tb_vp.exe"
