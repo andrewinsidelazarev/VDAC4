@@ -1004,6 +1004,9 @@ void dropDelivery() {
 
 void stopApp();
 int startApp(const char* name);
+// Последняя команда приложению (или запуск); столько без команд — приложение брошено (handleQuery)
+uint32_t appCommandMs = 0;
+constexpr uint32_t kAbandonedMs = 5000;
 
 // Место под доставку, как ModuleApp::allocateDelivery: не нашлось — приложение
 // прочь (ресурс — потом запустить снова), другие ресурсы — по одному, сначала
@@ -1157,8 +1160,17 @@ void handleQuery(const PacketView& packet) {
     replyQuery(0);
     return;
   }
+  // Как прошивка (0.1.105): брошенное приложение (kAbandonedMs без его команд) кэш не держит
+  if (!resource && size <= kMaxModuleBytes && app != nullptr && !cache->canFit(size, appName) &&
+      cache->canFit(size, nullptr) && coreMillis() - appCommandMs >= kAbandonedMs) {
+    hostLog("zifi-zm", "module %s: the cache is held by app %s, no command for it for %u ms: stopping it",
+            name, appName, static_cast<unsigned>(coreMillis() - appCommandMs));
+    stopApp();
+  }
   if (size > (resource ? kMaxResourceBytes : kMaxModuleBytes) ||
       (!resource && !cache->canFit(size, app != nullptr ? appName : nullptr))) {
+    hostLog("zifi-zm", "module %s, %u bytes: no room (app %s holds its ELF)", name,
+            static_cast<unsigned>(size), app != nullptr ? appName : "-");
     replyQuery(2);
     return;
   }
@@ -1272,6 +1284,7 @@ int startApp(const char* name) {
     stopApp();
     return start;
   }
+  appCommandMs = coreMillis();
   hostLog("zifi-zm", "app %s %s %s started in %u us, commands %02X..%02X", name,
           app->name != nullptr ? app->name : "?", app->version != nullptr ? app->version : "",
           static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1337,6 +1350,7 @@ bool moduleCommand(const PacketView& packet) {
       packet.command > app->command_last || app->command == nullptr) {
     return false;
   }
+  appCommandMs = coreMillis();
   inCommand = true;
   const int result = app->command(packet.command, packet.data, packet.length);
   inCommand = false;

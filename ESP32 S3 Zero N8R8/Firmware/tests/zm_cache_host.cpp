@@ -175,6 +175,24 @@ int main() {
   }
   end();
 
+  begin("abandoned_app_holds_the_room");
+  {
+    // 29.10.2026 на плате: кэш 1664 КБ, в нём HMM2.ELF приложения, которое осталось после сбоя
+    // игры. Пока его ELF держится (busy), VIDEO.ELF не ложится — FTVIEW4 получал «нет места»; без
+    // busy (ModuleApp 0.1.105 останавливает брошенное приложение) ложится, HMM2.ELF вытесняется.
+    MemoryStorage storage(1664 * 1024);
+    ZmCache cache(storage);
+    cache.load();
+    const auto hmm = module(1551136, 9);
+    const auto video = module(145944, 10);
+    check(cache.store("HMM2.ELF", 1, hmm.data(), 1551136, nullptr), "store HMM2");
+    check(!cache.canFit(145944, "HMM2.ELF"), "no room while HMM2 is busy");
+    check(cache.canFit(145944, nullptr), "room once it is not");
+    check(cache.store("VIDEO.ELF", 1, video.data(), 145944, nullptr), "store VIDEO");
+    check(cache.find("HMM2.ELF") == nullptr, "HMM2 evicted");
+  }
+  end();
+
   begin("failed_write_leaves_no_entry");
   {
     MemoryStorage storage(1664 * 1024);

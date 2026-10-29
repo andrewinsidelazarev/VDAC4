@@ -10,6 +10,7 @@
 #include <freertos/task.h>
 
 #include "zifi/zm_cache.hpp"
+#include "zifi/ft_detach_guard.hpp"
 #include "zm_app.h"
 
 namespace zifi {
@@ -39,6 +40,8 @@ class ModuleApp : public App {
   void begin() override;
   bool handleCommand(const PacketView& packet) override;
   void pollNetworkCore(uint32_t now) override;
+  // Codex: владельцу канала разрешено выгрузить ELF, даже когда Z80 уже ушёл.
+  void pollCore1(uint32_t now);
   // Приложение качает поток (net_open, интернет-радио): Wi-Fi без энергосбережения.
   bool keepsWifiAwake() const override;
   // Кристалл ESP, десятые доли °C (раз в секунду); INT16_MIN — датчика нет.
@@ -120,6 +123,7 @@ class ModuleApp : public App {
   static int coreFtHostCmd(uint8_t command, uint8_t parameter);
   static void coreFtClose();
   bool ftOpened_ = false;
+  FtDetachGuard ftDetach_;
   // ABI 1.4: ядра ПЛИС из кэша BL616, LINK, сокеты
   static int coreCoreLoad(const char* name, uint32_t* version);
   static int coreCoreBack(uint32_t timeoutMs);
@@ -207,6 +211,7 @@ class ModuleApp : public App {
   SemaphoreHandle_t appLock_ = nullptr;   // выгрузка против poll на сетевом ядре
   bool inCommand_ = false;
   bool appDone_ = false;                  // приложение в command позвало app_done: выгрузить
+  uint32_t appCommandMs_ = 0;             // последняя команда приложению (или запуск): не брошено ли
 
   // Что приложение завело: освобождается при выгрузке.
   portMUX_TYPE allocLock_ = portMUX_INITIALIZER_UNLOCKED;

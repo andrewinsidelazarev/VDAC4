@@ -7,7 +7,8 @@ tests/zm_cache_host.cpp: хранилище в памяти с заданной 
 - модуль кладётся, читается, переживает перезагрузку указателя; другая длина
   или время — промах; то же имя заменяет прежнюю копию;
 - вытесняется давно не бравшийся модуль, активное приложение — никогда;
-- не помещающийся даже после вытеснения — отказ без вытеснения; неудачная
+- не помещающийся даже после вытеснения — отказ без вытеснения; ELF брошенного
+  приложения (HMM2.ELF, 29.10.2026) держит место VIDEO.ELF, пока он busy; неудачная
   запись не оставляет записи; имена — только 8.3 заглавными.
 Без Visual Studio Build Tools тест пропускается.
 """
@@ -21,6 +22,7 @@ SCENARIOS = [
     'footprint_counts_whole_blocks', 'empty_cache_has_its_capacity',
     'modules_are_stored_read_and_survive_reload', 'same_name_replaces_the_old_copy',
     'least_recently_used_goes_first_busy_stays', 'too_big_is_refused_without_evicting',
+    'abandoned_app_holds_the_room',
     'failed_write_leaves_no_entry', 'names_are_8_3', 'no_capacity_no_store',
 ]
 

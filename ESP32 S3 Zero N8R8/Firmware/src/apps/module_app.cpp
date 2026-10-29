@@ -138,6 +138,8 @@ constexpr uint32_t kMaxResourceBytes = 7 * 1024 * 1024;
 // Временные буферы прошивки (Wi-Fi и LwIP, FTP, журнал) ложатся в PSRAM куда
 // придётся: доставке, которой не нашлось места, — подождать, пока уйдут.
 constexpr uint32_t kRoomWaitMs = 2000;
+// Приложению столько не шлют его команд — его программа Z80 ушла (handleQuery)
+constexpr uint32_t kAbandonedMs = 5000;
 constexpr uint32_t kRoomStepMs = 50;
 
 // Заголовок каждого блока, выделенного приложением: весь список освобождается
@@ -327,6 +329,7 @@ bool ModuleApp::handleCommand(const PacketView& packet) {
       packet.command > app_->command_last || app_->command == nullptr) {
     return false;
   }
+  appCommandMs_ = coreMillis();
   inCommand_ = true;
   const int result = app_->command(packet.command, packet.data, packet.length);
   inCommand_ = false;
@@ -337,6 +340,20 @@ bool ModuleApp::handleCommand(const PacketView& packet) {
     stopApp();
   }
   return result == ZM_OK;
+}
+
+// Codex: только владелец канала; appLock_ в stopApp исключает одновременный poll ELF.
+void ModuleApp::pollCore1(uint32_t now) {
+#if ZIFI_HAS_SPI_LINK
+  if (app_ == nullptr || !ftDetach_.due(now)) return;
+  uint32_t state[3] = {};
+  if (!tang::ready() || !tang::read(0, state, 3) ||
+      !ftDetach_.observe(state[0], state[1], state[2])) return;
+  bringupLog(kTag, "app %s: M_SEL=0, slot0, unloading", appName_);
+  stopApp();
+#else
+  (void)now;
+#endif
 }
 
 void ModuleApp::pollNetworkCore(uint32_t now) {
@@ -397,8 +414,23 @@ void ModuleApp::handleQuery(const PacketView& packet) {
     replyQuery(0);
     return;
   }
+  // Модуль не ляжет лишь потому, что кэш держит ELF приложения, которому давно никто не шлёт его
+  // команд (kAbandonedMs): его программа Z80 ушла, не выгрузив его (упала, Evo сброшен) — живое
+  // приложение плагин опрашивает постоянно. 29.10.2026 так остался HMM2 после сбоя игры: HMM2.ELF
+  // (1,5 МБ из 1664 КБ кэша) не давал места VIDEO.ELF, и FTVIEW4 на «нет места» молча уходил на
+  // путь FT812. Брошенное приложение останавливается — его ELF кэш вытеснит.
+  if (!resource && size <= kMaxModuleBytes && app_ != nullptr && !cache_->canFit(size, appName_) &&
+      cache_->canFit(size, nullptr) && coreMillis() - appCommandMs_ >= kAbandonedMs) {
+    bringupLog(kTag, "module %s: the cache is held by app %s, no command for it for %u ms: stopping it",
+               name, appName_, static_cast<unsigned>(coreMillis() - appCommandMs_));
+    stopApp();
+  }
   if (size > (resource ? kMaxResourceBytes : kMaxModuleBytes) ||
       (!resource && !cache_->canFit(size, app_ != nullptr ? appName_ : nullptr))) {
+    // Отказ — в журнал: плагин на него уходит молча (FTVIEW4 — на путь FT812)
+    bringupLog(kTag, "module %s, %u bytes: no room (cache %u KB free, app %s holds its ELF)", name,
+               static_cast<unsigned>(size), static_cast<unsigned>(cache_->freeBytes() / 1024),
+               app_ != nullptr ? appName_ : "-");
     replyQuery(2);                             // не передавать того, что не ляжет
     return;
   }
@@ -779,6 +811,7 @@ int ModuleApp::startBuiltin(const zm_app_t* app, const char* name) {
   }
   xSemaphoreTake(appLock_, portMAX_DELAY);
   appStarted_ = true;
+  appCommandMs_ = coreMillis();
   xSemaphoreGive(appLock_);
   bringupLog(kTag, "built-in app %s %s started, commands %02X..%02X", name, app->version,
              app->command_first, app->command_last);
@@ -925,6 +958,7 @@ int ModuleApp::startApp(const char* name) {
   }
   xSemaphoreTake(appLock_, portMAX_DELAY);
   appStarted_ = true;
+  appCommandMs_ = coreMillis();
   xSemaphoreGive(appLock_);
   bringupLog(kTag, "app %s %s %s started in %u us, commands %02X..%02X", name,
              app->name != nullptr ? app->name : "?", app->version != nullptr ? app->version : "",
@@ -1003,6 +1037,7 @@ void ModuleApp::stopApp() {
   player_.pcmClose();
   freeAllocations();
   unloadElf(appElf_);
+  ftDetach_.reset();
   appElf_ = nullptr;
   bringupLog(kTag, "app %s stopped", appName_);
   appName_[0] = 0;
@@ -1341,6 +1376,10 @@ int ModuleApp::coreFtOpen(uint32_t timeoutMs) {
     return ZM_ERROR;
   }
   instance_->ftOpened_ = true;
+  uint32_t ftState[3] = {};
+  const bool selected = tang::read(0, ftState, 3) && ftState[0] == 0x56444334u &&
+                        (ftState[1] >> 24) == 2 && (ftState[2] & (1u << 12));
+  instance_->ftDetach_.opened(selected);
   return ft_host::boot1024x768() ? ZM_OK : ZM_ERROR;
 #else
   (void)timeoutMs;

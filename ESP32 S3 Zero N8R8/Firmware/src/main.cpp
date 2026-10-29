@@ -1952,6 +1952,10 @@ void Application::handle(const PacketView& packet) {
 }
 
 void Application::pollLink() {
+#if ZIFI_HAS_AUDIO
+  // Codex: проверять потерю FT до VFS и без ожидания новой команды Z80.
+  moduleApp_.pollCore1(millis());
+#endif
   // Сначала обслуживаем запрос ядра 0 к файловой системе. Внутри VfsClient
   // канал остаётся под единственным владельцем ядра 1 до получения ответа Z80.
 #if ZIFI_HAS_SPI_LINK
