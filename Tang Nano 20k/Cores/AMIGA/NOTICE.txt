@@ -1,0 +1,23 @@
+VDAC4 Amiga adaptation, 2026.
+
+The new VDAC4 adapter RTL and AMIGA.ELF application are GPL-3.0-or-later.
+NanoMig source: https://github.com/MiSTle-Dev/NanoMig
+Pinned revision: acebbd9e3709ee5d7ca34f1a6b491a4cad369494
+Minimig/AGA includes work by Dennis van Weeren and contributors (GPLv3+).
+TG68K includes work by Tobias Gubener (LGPLv3+).
+Upstream source headers and notices remain in upstream/ without modification.
+fpga/hid.v is generated from upstream/src/misc/hid.v with FIFO availability and
+reset-initialization additions. fpga/serializer.sv is a VDAC4 Gowin adapter.
+fpga/nanomig.v and fpga/Amber.v are generated local RGB888 adaptations of
+upstream/src/nanomig.v and upstream/src/minimig/Amber.v. Original notices are kept.
+
+Common board modules (next_qspi, cp_spi, next_cp, next_evo_reset, fb_sdspi) and
+ESP host ABI/PS2 translation files are copied from the existing VDAC4 project.
+Their original source headers and licenses apply; fb_sdspi is Apache-2.0.
+The GPL text in COPYING is copied from the adjacent VDAC4 NES core.
+
+The user's Kickstart ROM is an external input, not part of the adapter source
+or the release binary packages and is not published here.
+../SD/AMIGA/DF0.ADF is Amiga Test Kit 1.21 by Keir Fraser and contributors (public domain /
+Unlicense), see disks/AmigaTestKit-1.21/COPYING and disks/README.txt.
+upstream/ holds only the NanoMig files this build needs, without modification.

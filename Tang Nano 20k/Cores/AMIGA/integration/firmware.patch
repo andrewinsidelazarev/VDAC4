@@ -1,0 +1,50 @@
+diff --git a/ESP32 S3 Zero N8R8/Firmware/CMakeLists.txt b/ESP32 S3 Zero N8R8/Firmware/CMakeLists.txt
+index 2b1d4fe..c037b0d 100644
+--- a/ESP32 S3 Zero N8R8/Firmware/CMakeLists.txt	
++++ b/ESP32 S3 Zero N8R8/Firmware/CMakeLists.txt	
+@@ -13,7 +13,7 @@ cmake_minimum_required(VERSION 3.22)
+ # Версию прошивки видит и main/CMakeLists.txt (ZIFI_BUILD_VERSION), и упаковщик
+ # (через CMakeCache.txt). FORCE: значение в кэше уже настроенной сборки всегда
+ # повторяет записанное здесь, иначе правка версии не дошла бы до прошивки.
+-set(ZIFI_VDAC4_VERSION "vdac4-0.1.105" CACHE STRING "Версия прошивки для платы VDAC4" FORCE)
++set(ZIFI_VDAC4_VERSION "vdac4-0.1.106" CACHE STRING "Версия прошивки для платы VDAC4" FORCE)
+ 
+ # Собирать только main и то, от чего он зависит, а не все компоненты ESP-IDF подряд.
+ set(COMPONENTS main)
+diff --git a/ESP32 S3 Zero N8R8/Firmware/src/tang_sd.cpp b/ESP32 S3 Zero N8R8/Firmware/src/tang_sd.cpp
+index 27f95d6..5f4fec5 100644
+--- a/ESP32 S3 Zero N8R8/Firmware/src/tang_sd.cpp	
++++ b/ESP32 S3 Zero N8R8/Firmware/src/tang_sd.cpp	
+@@ -27,6 +27,9 @@ constexpr uint32_t kPersonalityTs = 0x01;      // VERSION[31:24]: TS-Config (к
+ // образа и снимки во время игры (nes-vdac4/fpga/nes_link.sv). Мост проверяется и по метке SD_STAT.
+ constexpr uint32_t kPersonalityNes = 0x04;
+ constexpr uint32_t kMinNes = 0x0007;
++// Amiga 0.1+: the same fb_sdspi LINK registers, checked by SD_STAT below.
++constexpr uint32_t kPersonalityAmiga = 0x05;
++constexpr uint32_t kMinAmiga = 0x0001;
+ 
+ bool linkRead(void*, uint32_t address, uint32_t* words, size_t count) {
+   return tang::read(address, words, count);
+@@ -136,17 +139,18 @@ const char* mount() {
+   const uint32_t version = tang::coreVersion();
+   const bool ts = (version >> 24) == kPersonalityTs && (version & 0xFFFF) >= kMinCore;
+   const bool nes = (version >> 24) == kPersonalityNes && (version & 0xFFFF) >= kMinNes;
+-  if (!ts && !nes) {
+-    return "the Tang core has no SD bridge (TS-Config 1.30+ in slot 0 or NES 0.7+ needed)";
++  const bool amiga = (version >> 24) == kPersonalityAmiga && (version & 0xFFFF) >= kMinAmiga;
++  if (!ts && !nes && !amiga) {
++    return "the Tang core has no SD bridge (TS-Config 1.30+, NES 0.7+ or Amiga 0.1+ needed)";
+   }
+-  if (nes) {
++  if (nes || amiga) {
+     bool present = false;
+     {
+       tang::LinkGuard guard;
+       present = g_card.present();
+     }
+     if (!present) {
+-      return "the NES core does not answer as an SD bridge";
++      return "the Tang core does not answer as an SD bridge";
+     }
+   }
+   g_reloads = tang::reloads();

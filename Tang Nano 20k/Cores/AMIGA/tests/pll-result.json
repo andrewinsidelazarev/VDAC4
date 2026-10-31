@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "hardware": false,
+  "vendor_model": "C:\\Gowin\\Gowin_V1.9.11.03_Education_x64\\IDE\\simlib\\gw2a\\prim_sim.v",
+  "vendor_model_sha256": "797e52271b149b650f4ed6ae0ef2794a853c6ef19973f957abc4f576fa48b7a1",
+  "result": "PASS 2850 CLKOUTD3 edges aligned to CLKOUT falling edge; SDRAM clock CLKOUTP 270 degrees\nperiod85_ns=11.696000 period28_ns=35.088000 sdram_phase_ns=8.772000 sdram_high_ns=5.848000 video_lock=1\nE:\\zx\\Tang Nano 20k VDAC\\VDAC4\\Tang Nano 20k\\Cores\\AMIGA\\tests\\pll-build\\pll_tb.sv:32: $finish called at 300000000 (1ps)\n",
+  "source_sha256": {
+    "fpga/amigaclks.v": "ce1b6674b597791abb31450361317dc4626fa67def0baef7c9b246726c2d5b08",
+    "fpga/amigaVdac4.sdc": "510a0533dd11436d4b020a8c6f5286237bcd43438a4be86656e3b9736b763e22",
+    "tests/run_pll.py": "f37a66772bfe1448e817dbc034223343196676cf8de32c6bc7bb4129bb24c6e6"
+  },
+  "clock28_phase_ns": 5.847953216374269,
+  "scope": "Vendor behavioral PLL and SDC correspondence; no routed clock skew or analog jitter measurement"
+}

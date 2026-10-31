@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "cases": [
+    "normal",
+    "off",
+    "wrong-core",
+    "wrong-capability",
+    "lost-write-reply",
+    "f12-during-probe"
+  ],
+  "hardware": false,
+  "source_sha256": {
+    "board_video_probe.py": "2e9dcd07522ae590f3236bff1aff139c8eb4abdc4927fbb9a7ea1adf53cfda32",
+    "tests/test_board_video_probe.py": "bc77398fc61aee0891a6fac1e5da567e1b79c853edcf5b573b226e97aadb0bd8"
+  }
+}

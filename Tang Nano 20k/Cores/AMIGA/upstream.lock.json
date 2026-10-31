@@ -1,0 +1,7 @@
+{
+  "url": "https://github.com/MiSTle-Dev/NanoMig",
+  "commit": "acebbd9e3709ee5d7ca34f1a6b491a4cad369494",
+  "board": "Tang Nano 20K / VDAC4",
+  "target": "68020, AGA, 2 MiB chip + 4 MiB fast",
+  "upstream_modified": false
+}

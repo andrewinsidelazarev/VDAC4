@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "result": "QSPI period 855 phase 0: 0 mismatching SDRAM words\nQSPI period 855 phase 173: 0 mismatching SDRAM words\nQSPI period 855 phase 599: 0 mismatching SDRAM words\nQSPI period 3420 phase 0: 0 mismatching SDRAM words\nQSPI period 3420 phase 173: 0 mismatching SDRAM words\nQSPI period 3420 phase 599: 0 mismatching SDRAM words\nPASS 6 complete 512 KiB transfers through QSPI writer and SDRAM controller; all 131072 physical 32-bit words match ROM\n",
+  "hardware": false,
+  "electrical_timing": false,
+  "source_sha256": {
+    "fpga/amiga_link.sv": "1733aab72ad732ab0af2f65418d2ef1313d10e3f777d8c6a1331bc79947691e7",
+    "fpga/amiga_disk.sv": "64867045ac33c0a07da6e1f1d558d09c692924336da0ef76f29443eb5ab3bcd5",
+    "fpga/next_qspi.sv": "b35652a1d94791cf4bab893e4b2c32b06d71a28f46ff555d7805355992c938fd",
+    "fpga/fb_sdspi.sv": "0e88acadae5293981c81a84518f0a95d0c6be50e65652d75d1589687b1c7cc73",
+    "fpga/sdram.sv": "de96bed219af5b0656d7c5fbb918479c5ea34ba89eb5808e579ff3c1fd1a5dd8",
+    "fpga/amiga_vdac4.sv": "2cf79f34e6ba67267af871d2cd38baa44d2becfb59cf66503b1a2e479640b977",
+    "upstream/sim/sdr_chip_model.v": "dc5bbaa9296d99d5c72358dd7f3532929c39426a2c7b7e65b40b9739c3158a4f",
+    "tests/link_test.cpp": "64d9fe29ae93c877fdfcb4a6d920973b59353968b83acb22c5997b845dbf0a89",
+    "tests/run_rom_sdram.py": "709d69367634194102628ca54c58f977ca570ee93b2312ad4b4497c14cd1a7e2"
+  },
+  "rom_sha256": "8c8a0cf04f91b88eaf0c4f1126041987067e2286a8ee590bdbae447a8000c5ee"
+}

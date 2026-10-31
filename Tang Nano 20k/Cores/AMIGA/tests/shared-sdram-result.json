@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "result": "PASS phase 0: CPU 16384 writes/16384 burst reads, concurrent chipset 32767 writes/21844 burst reads, 1680 refresh requests; no mismatches\nPASS phase 180: CPU 16384 writes/16384 burst reads, concurrent chipset 32767 writes/21844 burst reads, 1680 refresh requests; no mismatches\n",
+  "hardware": false,
+  "electrical_timing": false,
+  "source_sha256": {
+    "fpga/sdram.sv": "de96bed219af5b0656d7c5fbb918479c5ea34ba89eb5808e579ff3c1fd1a5dd8",
+    "upstream/sim/sdr_chip_model.v": "dc5bbaa9296d99d5c72358dd7f3532929c39426a2c7b7e65b40b9739c3158a4f",
+    "tests/run_shared_sdram.py": "f8234540491a307668fcee551f7a1f45c080fb9d22fb1bb77db316c478e4014c",
+    "tests/shared_memory_test.cpp": "dc1020ca8d2b4014f173cd088669b2d843063ff2a55ea605903b7c534fe7f0ea"
+  }
+}

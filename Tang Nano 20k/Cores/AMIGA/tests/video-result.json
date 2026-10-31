@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "result": "PASS RGB888: 256 palette entries/8 banks, all 256 levels per channel, 24 walking bits, dynamic pixel alignment, all filter/scanline modes, OCS/EHB, blanking, unchanged sync, output probe on/off/colors, 2436057 decoded DVI symbols\r\n",
+  "source_sha256": {
+    "fpga/nanomig.v": "fb77391297417f524732b04f3d10f3b95fe88661e5f320cf793d435453d198b7",
+    "fpga/Amber.v": "5b172970debf3093d697cb1012a03f37c7b67009408b3cdbb12d7afd0c94d9b3",
+    "fpga/amiga_vdac4.sv": "2cf79f34e6ba67267af871d2cd38baa44d2becfb59cf66503b1a2e479640b977",
+    "upstream/src/minimig/Amber.v": "ac5eef7ca5dde2251dc86a2cbc2aa66e6ee114630ae124d5c4ac0ee7ff4d9231",
+    "upstream/src/minimig-aga/denise_colortable.v": "cc2a0d85a46aab1417ce82197c7282ae443cc1fa40d206d7470b025b1abc6557",
+    "upstream/src/minimig-aga/denise_colortable_ram_mf.v": "4c82330a8990c3ed7ed82ff0dad9488c2ed7f69cbfd24688bb1a269b1c727a2b",
+    "upstream/src/hdmi/hdmi.sv": "2b0ecb3a9799d201b5fd175fdb07d5829cc6064d583ed7d78ff2b100c52cbcd6",
+    "upstream/src/hdmi/tmds_channel.sv": "19bc466b1802d094fa32f7d0fe4d1ceca494c7ee85ef05770075ea99414b7bd7",
+    "tests/video_top.sv": "eb94ffede7ef0d4edfd8b85596c3a302d607872e665ec4e8b6f392a7d5e4d398",
+    "tests/video_test.cpp": "786c97c3989b3b948f4f3da6e69e55e7dbd6fc07db82dc53f49f4577d09035ef",
+    "tests/run_video.py": "0136a75c01681b22b630a2767dac531bf4025ee28591232ad284d478cfbd31e2"
+  },
+  "hardware": false,
+  "sdf": false,
+  "serializer": "parallel TMDS symbols only"
+}

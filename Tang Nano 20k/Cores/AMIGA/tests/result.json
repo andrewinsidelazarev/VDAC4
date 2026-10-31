@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "result": "PASS 40 QSPI phase/rate cases, 2 full 512 KiB ROM transfers, byte order, CRC, packet rejection, HID, stereo, reset, SD bridge loopback, DF0 full-sector/partial/stale/cancel/eject, BOOT\r\nPASS actual AMIGA.ELF C sources: ROM checksum/corruption, complete upload, I/O/CRC/length/timeout/error/cancel failures, DF0 absent/size/bounds/readonly/transfer/cancel, WC commands, keyboard backpressure, guest F4 and Ctrl+Alt+F4 reset, modifier recovery\r\n",
+  "hardware": false,
+  "sdf": false,
+  "source_sha256": {
+    "fpga/amiga_link.sv": "1733aab72ad732ab0af2f65418d2ef1313d10e3f777d8c6a1331bc79947691e7",
+    "fpga/amiga_disk.sv": "64867045ac33c0a07da6e1f1d558d09c692924336da0ef76f29443eb5ab3bcd5",
+    "fpga/next_qspi.sv": "b35652a1d94791cf4bab893e4b2c32b06d71a28f46ff555d7805355992c938fd",
+    "fpga/fb_sdspi.sv": "0e88acadae5293981c81a84518f0a95d0c6be50e65652d75d1589687b1c7cc73",
+    "esp/main/app.c": "88b90c9d6dca35d18e795a06518b875fec7cfa84816a32f4ef7a98e666f3d3ef",
+    "esp/main/ps2_hid.c": "adfbbf93742d78fc2379a6f1c7aafb3cdd84c29f5faf5f925616ccaa4734db24",
+    "esp/main/ps2_hid.h": "c7b51660227612206f8b72de635ab548543aecc8e37c1febd4a7c8b3fa6127d5",
+    "esp/main/zm_app.h": "350284c802aa9d06528077116b171d00588f0fddfd83e78cd2b601b40e002819",
+    "tests/link_top.sv": "5781d05ce8827751b5a78984c9893186baf36f6e8af61f269a62e3dc3d590d3d",
+    "tests/link_test.cpp": "64d9fe29ae93c877fdfcb4a6d920973b59353968b83acb22c5997b845dbf0a89",
+    "tests/app_test.c": "9e2b1af64fb15b93b530958a9e8e51aa4267ee65b674e62881463040215e08d8",
+    "tests/run.py": "cb76005e5f2f1cd5dfcf676bee2b3f33454218fbcd72a7f6617f4d5e34bef464"
+  }
+}

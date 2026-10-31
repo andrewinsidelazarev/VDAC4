@@ -1,0 +1,15 @@
+{
+  "title": "Amiga Test Kit 1.21",
+  "author": "Keir Fraser and contributors",
+  "release": "https://github.com/keirf/amiga-stuff/releases/tag/testkit-v1.21",
+  "download": "https://github.com/keirf/amiga-stuff/releases/download/testkit-v1.21/AmigaTestKit-1.21.zip",
+  "source": "https://github.com/keirf/amiga-stuff/tree/testkit-v1.21",
+  "license": "Public domain / Unlicense; COPYING saved with the archive",
+  "archive_sha256": "0c609dc991394ba9f1831496e61ce40c74993a581d8a20541ba291d601fcb959",
+  "adf": "AmigaTestKit-1.21/AmigaTestKit-1.21/AmigaTestKit.adf",
+  "bytes": 901120,
+  "sha256": "abe7426c93619a7bb61ce10e3e66a4747fcaf22acd1d1876310033faa700ad28",
+  "bootblock_sum": "ffffffff",
+  "target": "AMIGA/DF0.ADF",
+  "write_protected": true
+}

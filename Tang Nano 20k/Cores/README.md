@@ -10,10 +10,11 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 | **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Evo, `/WC/ESP` | 1.43, слой ESP 0.9 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`VIDEO/esp/dist/VIDEO.ELF`](VIDEO/esp/dist/VIDEO.ELF) |
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.9 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
+| **Amiga / AGA** (на основе NanoMig) — 68020, 2 МиБ chip + 4 МиБ fast, дискета DF0 | карта Tang, `CORES` | 0.4-debug5 | [`SD/CORES/AMIGA.BIN`](SD/CORES/AMIGA.BIN), [`AMIGA.ELF`](SD/CORES/AMIGA.ELF) |
 
 `.BIN` — само ядро. `.ELF` — его слой на ESP: клавиатура и мышь Evo, звук на ЦАП ESP, сохранения на
-карты, выход в WC. Исходники TS-Config, FT812 и ядра видео — в [`../Firmware`](../Firmware), Next и
-NES — здесь, в [`Next`](Next) и [`NES`](NES), слой ESP ядра видео — в [`VIDEO/esp`](VIDEO/esp)
+карты, выход в WC. Исходники TS-Config, FT812 и ядра видео — в [`../Firmware`](../Firmware), Next,
+NES и Amiga — здесь, в [`Next`](Next), [`NES`](NES) и [`AMIGA`](AMIGA), слой ESP ядра видео — в [`VIDEO/esp`](VIDEO/esp)
 (описание ядра — [`../Docs/video-core.md`](../Docs/video-core.md)). Слой ядра видео — не на карте
 Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит в `/WC/ESP` карты Evo рядом с модулями плеера,
 в ESP его отдаёт плагин [FTVIEW4](../FTVIEW4).
@@ -32,6 +33,8 @@ Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит �
   часы Evo для Next, сектора карты Evo для Next, NES из меню — сразу в меню F1 ядра.
 - Для ядра видео — плагин Wild Commander **FTVIEW4** (сборка bb34) — [`../FTVIEW4`](../FTVIEW4):
   `build/FTVIEW4.WMF` — в `/WC` карты Evo, `VIDEO.ELF` — в `/WC/ESP`.
+- Для Amiga — свой Kickstart на карте Tang: `AMIGA/KICK31.ROM`, 512 КиБ. ROM не выкладывается. Подробности —
+  в [`AMIGA/README.md`](AMIGA/README.md).
 - Для Next — NextZXOS на той же карте Tang (дистрибутив `sn-complete-24.11`) и правленые ROM
   (ниже, шаг 3).
 
@@ -87,9 +90,18 @@ Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит �
 | F8 (в меню F1) | размер картинки: AUTO (как SIZE в TS-Config) → 100 → 95 → 90 % |
 | F12 | выход в WC; сохранения battery — в `.sav` рядом с картриджем |
 
-Джойстик Kempston работает в обоих ядрах. Мышь Kempston работает в Next.
+| Amiga | |
+|---|---|
+| Ctrl+Alt+F4 | тёплый сброс |
+| F12 | выход в WC |
+
+Джойстик Kempston работает в Next и NES. Мышь Kempston работает в Next.
 
 ## Проверено на плате
+
+2026-10-31, ESP 0.1.105-heat2, BL616 35:
+- **Amiga 0.4-debug5**: Test Kit 1.21 загружается с DF0 (108 секторов), F1 Memory — 3 круга без ошибок,
+  картинка под нагрузкой чистая. Мышь, джойстик, звук, игры и Workbench ещё не проверены.
 
 2026-10-29, ESP 0.1.104, BL616 35, TS-Config 1.32, FTVIEW4 bb34, VIDEO.ELF 0.9:
 - **Видео 1.43** — деблокер и зерно: квадраты сжатия на ролике с малым потоком сглажены (фильтр
@@ -127,7 +139,7 @@ Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит �
 
 ## Лицензии
 
-Next и NES основаны на проектах под GPL-3.0: [NextNano](https://github.com/RetroSilicon/NextNano) и
-[NESTang](https://github.com/nand2mario/nestang). Их исходники с изменениями для VDAC4 лежат здесь же,
-текст лицензии — [`Next/LICENSE`](Next/LICENSE), [`NES/COPYING`](NES/COPYING). ROM NextZXOS не
-выкладываются: правка накладывается на исходные файлы дистрибутива.
+Next, NES и Amiga основаны на проектах под GPL: [NextNano](https://github.com/RetroSilicon/NextNano),
+[NESTang](https://github.com/nand2mario/nestang) и [NanoMig](https://github.com/MiSTle-Dev/NanoMig). Их исходники с изменениями для VDAC4 лежат здесь же,
+текст лицензии — [`Next/LICENSE`](Next/LICENSE), [`NES/COPYING`](NES/COPYING), [`AMIGA/COPYING`](AMIGA/COPYING). ROM NextZXOS не
+выкладываются: правка накладывается на исходные файлы дистрибутива. Kickstart тоже не выкладывается.

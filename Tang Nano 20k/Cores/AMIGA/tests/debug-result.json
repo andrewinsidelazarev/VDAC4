@@ -1,0 +1,5 @@
+{
+  "passed": true,
+  "result": "PASS passive CPU capture: reset/stall gating, first boot reads retained, latest cycle, external reset; 512-entry block RAM trace, delayed capture, frozen contents, synchronous indexed read and valid metadata\r\n",
+  "hardware": false
+}

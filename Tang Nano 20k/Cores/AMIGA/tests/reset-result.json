@@ -1,0 +1,11 @@
+{
+  "passed": true,
+  "result": "PASS actual generated reset logic: idle-low boot, S2 active-high reset, S1 ignored, synchronized release, ROM gate, software/keyboard/power reset\r\n",
+  "hardware": false,
+  "source_sha256": {
+    "fpga/amiga_vdac4.sv": "2cf79f34e6ba67267af871d2cd38baa44d2becfb59cf66503b1a2e479640b977",
+    "fpga/amigaVdac4.cst": "6bbe63e805e76df6ce1b944898fd9beda4825dbcec08c612e4cf88f7b5fa7cf8",
+    "tests/run_reset.py": "084932428467a79cfbdf89f364300dc4977a20f36cd9699490678a9105c8a3f8",
+    "tests/reset_test.cpp": "c3853e5a3d2ef38074fc820da6eeb8c549c4893cc333aad56cf5c86d158cc362"
+  }
+}

@@ -1,0 +1,36 @@
+--- a/src/tang_sd.cpp
++++ b/src/tang_sd.cpp
+@@ -27,6 +27,9 @@
+ // образа и снимки во время игры (nes-vdac4/fpga/nes_link.sv). Мост проверяется и по метке SD_STAT.
+ constexpr uint32_t kPersonalityNes = 0x04;
+ constexpr uint32_t kMinNes = 0x0007;
++// Amiga 0.1+: the same fb_sdspi LINK registers, checked by SD_STAT below.
++constexpr uint32_t kPersonalityAmiga = 0x05;
++constexpr uint32_t kMinAmiga = 0x0001;
+ 
+ bool linkRead(void*, uint32_t address, uint32_t* words, size_t count) {
+   return tang::read(address, words, count);
+@@ -136,17 +139,18 @@
+   const uint32_t version = tang::coreVersion();
+   const bool ts = (version >> 24) == kPersonalityTs && (version & 0xFFFF) >= kMinCore;
+   const bool nes = (version >> 24) == kPersonalityNes && (version & 0xFFFF) >= kMinNes;
+-  if (!ts && !nes) {
+-    return "the Tang core has no SD bridge (TS-Config 1.30+ in slot 0 or NES 0.7+ needed)";
+-  }
+-  if (nes) {
++  const bool amiga = (version >> 24) == kPersonalityAmiga && (version & 0xFFFF) >= kMinAmiga;
++  if (!ts && !nes && !amiga) {
++    return "the Tang core has no SD bridge (TS-Config 1.30+, NES 0.7+ or Amiga 0.1+ needed)";
++  }
++  if (nes || amiga) {
+     bool present = false;
+     {
+       tang::LinkGuard guard;
+       present = g_card.present();
+     }
+     if (!present) {
+-      return "the NES core does not answer as an SD bridge";
++      return "the Tang core does not answer as an SD bridge";
+     }
+   }
+   g_reloads = tang::reloads();
