@@ -85,6 +85,7 @@ module fb_scanout #(
     parameter bit SCALE    = 1'b0,   // 1 — на всю высоту (только 720×576 → 1280×720)
     parameter bit OUT768   = 1'b0,   // с SCALE: вывод 1366×768, только кадр FT (ядро FT812)
     parameter bit FT_W512  = 1'b0,   // кадр FT шириной ≤ 512 — как 512×384 (ядро видео)
+    parameter bit PIPE_SCALE_ROM = 1'b0, // слот 1: редко меняющийся 1/N — через регистр перед умножителем
     parameter bit HAS_CHK  = 1'b1    // 0 — без сверки с таблицей (у ядра FT812 таблицы нет)
 ) (
     input  wire        pixel_clk,
@@ -545,6 +546,15 @@ module fb_scanout #(
     // ------------------------------------------------------------------
     // Ступень 2: цвета четырёх точек
     // ------------------------------------------------------------------
+    wire [16:0] grx_weight;
+    generate if (PIPE_SCALE_ROM) begin : g_scale_reg
+        reg [16:0] value;
+        // Геометрия меняется в кадровом гашении, до первых точек; задержка тракта та же.
+        always @(posedge pixel_clk) value <= grx;
+        assign grx_weight=value;
+    end else begin : g_scale_direct
+        assign grx_weight=grx;
+    end endgenerate
     reg de2, img2, hs2, vs2;
     reg [4:0] wx2;
     reg [7:0] c_tl [0:2], c_tr [0:2], c_bl [0:2], c_br [0:2];
@@ -555,7 +565,7 @@ module fb_scanout #(
                 c_tl[c] <= '0; c_tr[c] <= '0; c_bl[c] <= '0; c_br[c] <= '0;
             end
         end else begin
-            de2 <= de1; img2 <= img1; hs2 <= hs1; vs2 <= vs1; wx2 <= weight(px1, grx);
+            de2 <= de1; img2 <= img1; hs2 <= hs1; vs2 <= vs1; wx2 <= weight(px1, grx_weight);
             c_tl[0] <= tl_r; c_tl[1] <= tl_g; c_tl[2] <= tl_b;
             c_tr[0] <= tr_r; c_tr[1] <= tr_g; c_tr[2] <= tr_b;
             c_bl[0] <= bl_r; c_bl[1] <= bl_g; c_bl[2] <= bl_b;

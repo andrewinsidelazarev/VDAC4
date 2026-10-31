@@ -43,6 +43,8 @@ module ft_render #(
     input  wire         dither,
 
     // RAM_DL показываемого банка (ft_core)
+    input wire dl_epoch,
+    input wire texture_write, // запись хоста в RAM_G дошла до моста памяти
     output wire [10:0]  dl_addr,
     input  wire [31:0]  dl_q,
     output reg          swap_hold,
@@ -108,7 +110,8 @@ module ft_render #(
     reg  [2:0]  q_wp, q_rp;
     reg  [3:0]  q_cnt;
     wire        q_pop;
-    wire        it_full = q_cnt == 4'd8;   // обходчик пишет в этот же такт — места 8
+    reg q_full;
+    wire        it_full = UP2 ? q_full : q_cnt == 4'd8;   // обходчик пишет в этот же такт — места 8
     wire [2:0]  q_rn = abort ? 3'd0 : q_rp + {2'd0, q_pop};
     always_ff @(posedge clk) begin
         if (it_v) q_mem[q_wp] <= it_data;
@@ -116,19 +119,56 @@ module ft_render #(
     end
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            q_wp <= '0; q_rp <= '0; q_cnt <= '0;
+            q_wp <= '0; q_rp <= '0; q_cnt <= '0; q_full<=1'b0;
         end else if (abort) begin
-            q_wp <= '0; q_rp <= '0; q_cnt <= '0;
+            q_wp <= '0; q_rp <= '0; q_cnt <= '0; q_full<=1'b0;
         end else begin
             if (it_v) q_wp <= q_wp + 3'd1;
             if (q_pop) q_rp <= q_rp + 3'd1;
             q_cnt <= q_cnt + {3'd0, it_v} - {3'd0, q_pop};
+            q_full <= !q_pop && (q_full || (q_cnt == 4'd7 && it_v));
         end
     end
 
-    ft_rd_walk #(.TW_LOG(TW_LOG), .TH_LOG(TH_LOG)) walk (
+    typedef enum logic [1:0] { R_IDLE, R_RUN, R_PUB } rstate_t;
+    rstate_t rst_q;
+
+    wire [10:0] wk_dl_addr;
+    wire [31:0] wk_dl_q;
+    wire snap_ready, seed_we;
+    wire [4:0] seed_addr;
+    wire [23:0] seed_data;
+    wire [2:0] seed_field;
+    wire snap_overrun;
+    reg dl_epoch_q;
+    wire logical_swap=dl_epoch!=dl_epoch_q;
+    reg image_stale;
+    // Одна отмена на картинку: иначе при кадре дольше периода смен и записи в RAM_G на каждый кадр
+    // кадры отменялись бы подряд и экран стоял (стенд: 1 кадр за 0,15 с вместо 6). Следующая картинка
+    // дорисовывается; текстуры в ней могут быть и новее — настоящий FT812 тоже рисует из живой RAM_G.
+    reg abort_used;
+    wire stale_write_abort=UP2 && !abort_used && texture_write && (image_stale || logical_swap);
+    always @(posedge clk or negedge rst_n)
+        if(!rst_n) begin dl_epoch_q<=0;image_stale<=0;end
+        else begin
+            dl_epoch_q<=dl_epoch;
+            if(start) image_stale<=0;
+            else if(logical_swap) image_stale<=1;
+        end
+    generate if(UP2) begin : g_snapshot
+        ft_dl_snapshot snapshot (
+            .clk(clk), .rst_n(rst_n), .epoch(dl_epoch),
+            .request(rst_q == R_IDLE && !abort && !wk_busy), .take(start), .ready(snap_ready),
+            .live_addr(dl_addr), .live_q(dl_q), .draw_addr(wk_dl_addr), .draw_q(wk_dl_q),
+            .seed_we(seed_we), .seed_addr(seed_addr), .seed_data(seed_data), .seed_field(seed_field), .overrun(snap_overrun));
+    end else begin : g_live_list
+        assign dl_addr=wk_dl_addr; assign wk_dl_q=dl_q; assign snap_ready=1'b1;
+        assign seed_field='0; assign seed_we=1'b0; assign seed_addr='0; assign seed_data='0; assign snap_overrun=1'b0;
+    end endgenerate
+    ft_rd_walk #(.TW_LOG(TW_LOG), .TH_LOG(TH_LOG), .SEED_HANDLES(UP2)) walk (
         .clk(clk), .rst_n(rst_n), .abort(abort), .start(start), .lines(f_lines), .hsize(f_hsize),
-        .ready(wk_ready), .dl_addr(dl_addr), .dl_q(dl_q),
+        .ready(wk_ready), .dl_addr(wk_dl_addr), .dl_q(wk_dl_q),
+        .seed_we(seed_we), .seed_addr(seed_addr), .seed_data(seed_data), .seed_field(seed_field),
         .it_v(it_v), .it_data(it_data), .it_full(it_full), .busy(wk_busy), .unsup(wk_unsup)
     );
 
@@ -150,7 +190,8 @@ module ft_render #(
     wire        ex_busy;
     wire [3:0]  ex_unsup;
 
-    ft_rd_exec #(.TW_LOG(TW_LOG), .TH_LOG(TH_LOG)) exec (
+    // UP2 включён только у SLOT1 (FT812 с отдельной PLL SDRAM).
+    ft_rd_exec #(.TW_LOG(TW_LOG), .TH_LOG(TH_LOG), .SHORT_DECODE(UP2), .EARLY_RESTART(UP2), .PAIR_EXT(UP2)) exec (
         .clk(clk), .rst_n(rst_n), .abort(abort), .start(start), .lines(f_lines),
         .hsize(f_hsize), .ramg_3mb(ramg_3mb),
         .q_v(q_cnt != 4'd0), .q_data(q_mem[q_rp]), .q_head(q_head), .q_pop(q_pop),
@@ -196,8 +237,6 @@ module ft_render #(
     assign w_ack  = s_ack && s_op_sub;
 
     // --- кадр ------------------------------------------------------------------------------------
-    typedef enum logic [1:0] { R_IDLE, R_RUN, R_PUB } rstate_t;
-    rstate_t rst_q;
     reg  [15:0] frames;
     reg  [25:0] f_timer;
     // повтор листа: кадр начат без смены листа после начала прошлого (RAM_G могла измениться —
@@ -213,7 +252,7 @@ module ft_render #(
             w_buf <= 2'd0; f_tri <= 1'b0; f_base <= FB_BASE; f_base_hi <= FB_BASE + 21'h040000;
             swap_hold <= 1'b0;
             pub_v <= 1'b0; pub_buf <= 2'd0; pub_words <= 10'd512; pub_w <= 11'd1024; pub_h <= 10'd768;
-            frames <= '0; f_timer <= '0; frame_time <= '0;
+            frames <= '0; f_timer <= '0; frame_time <= '0; abort_used <= 1'b0;
             fresh <= 1'b1; f_redo <= 1'b0; swap_wait_q <= 1'b0; need_clr <= 1'b0; px_clear <= 1'b0;
         end else begin
             start <= 1'b0;
@@ -245,7 +284,7 @@ module ft_render #(
                     px_clear <= 1'b1;
                     need_clr <= 1'b0;
                 end
-                else if (!abort && !need_clr && !px_clear && !swap_wait && wk_ready && px_ready && drain_idle && be_empty && !wk_busy && !ex_busy &&
+                else if (!abort && !need_clr && !px_clear && (UP2 || !swap_wait) && snap_ready && wk_ready && px_ready && drain_idle && be_empty && !wk_busy && !ex_busy &&
                     !(fb_showing && fb_front == w_buf) && hs_c != 11'd0 && vs_c != 10'd0) begin
                     f_hsize   <= hs_c;
                     f_lines   <= vs_c;
@@ -262,15 +301,19 @@ module ft_render #(
             end
             // повтор, а хост просит смену листа: кадр не нужен — его буфер не выводится и не
             // объявлен; бросить (как при выключении), смена проходит, следующий кадр — с новым листом
-            R_RUN: if (f_redo && swap_wait && !start) begin
+            R_RUN: if (stale_write_abort || (f_redo && swap_wait && !start)) begin
+                // Копия листа у растеризатора своя и смене не мешает. Отмена — только если хост
+                // после смены пишет в RAM_G: старый кадр не должен выйти с чужими текстурами.
                 abort     <= 1'b1;
                 swap_hold <= 1'b0;
                 rst_q     <= R_IDLE;
+                if (stale_write_abort) abort_used <= 1'b1;
             end else begin
                 if (!start && !wk_busy)
                     swap_hold <= 1'b0;                // лист прочитан: DLSWAP можно
                 if (!start && !wk_busy && !ex_busy && drain_idle) begin
                     pub_v      <= 1'b1;
+                    abort_used <= 1'b0;
                     pub_buf    <= w_buf;
                     pub_words  <= 10'((f_hsize + 11'd1) >> 1);
                     pub_w      <= f_hsize;
@@ -297,4 +340,234 @@ module ft_render #(
     end
 
     assign status = {1'b0, w_buf[0], pub_v, enable, f_tri, w_buf[1], rst_q, ex_unsup, wk_unsup, frames};
+endmodule
+
+
+// Неизменяемая копия RAM_DL для растеризатора ядра FT812 (слот 1, с 1.44): хост получает смену
+// листа по событию кадра и сразу пишет в освободившийся банк, а незаконченный кадр дорисовывается
+// из копии. Младшие 32 бита блоков — копия листа; четыре запасных бита на слово хранят две таблицы
+// ручек 32 × 80 бит (до и после текущей смены): после смены автомат проходит лист как обходчик
+// (CALL, JUMP, RETURN, SAVE/RESTORE) и собирает значения ручек, потом ими заполняет таблицу обходчика
+// (seed_*). Так ручки, заданные в пропущенном кадре, сохраняются. Проход ограничен 16384 командами.
+module ft_dl_snapshot (
+    input wire clk, rst_n, epoch,
+    input wire request, take,
+    output wire ready,
+    output reg overrun,
+    output wire [10:0] live_addr,
+    input wire [31:0] live_q,
+    input wire [10:0] draw_addr,
+    output reg [31:0] draw_q,
+    output reg seed_we,
+    output reg [4:0] seed_addr,
+    output reg [2:0] seed_field,
+    output reg [23:0] seed_data
+);
+    localparam [4:0] INIT=0, IDLE=1, PRE_RD=2, PRE_GET=3, PRE_WR=4,
+        FETCH=5, EXEC=6, FIELD_RD=7, FIELD_WR=8,
+        CAP_RD=9, CAP_WR=10, SEED_RD=11, SEED_GET=12;
+    reg [4:0] state;
+    reg epoch_q, pending, valid, have_list, rendered;
+    wire changed = epoch != epoch_q;
+    assign ready = valid && !changed;
+    reg [10:0] index, pc;
+    reg [14:0] steps;
+    reg [4:0] handle;
+    reg [10:0] calls [0:3];
+    reg [2:0] call_n, save_n;
+    reg [1:0] save_sp;
+    reg [4:0] saves [0:3];
+    reg [3:0] nibble;
+    reg [23:0] field_value;
+    reg [2:0] field_left;
+    reg finish_after_field;
+    wire [4:0] seed_nibble=index[4:0];
+    reg [19:0] seed_shift;
+    function automatic logic [66:0] rom_font(input logic [4:0] hnd);   // {source, layout, size}
+        logic [4:0] fmt; logic [9:0] st; logic [8:0] fw, fh; logic [21:0] src;
+        case (hnd)
+            5'd16: begin fmt = 5'd1; st = 10'd1;  fw = 9'd8;  fh = 9'd8;  src = 22'h2FF7FC; end
+            5'd17: begin fmt = 5'd1; st = 10'd1;  fw = 9'd8;  fh = 9'd8;  src = 22'h2FFBFC; end
+            5'd18: begin fmt = 5'd1; st = 10'd1;  fw = 9'd8;  fh = 9'd16; src = 22'h2FE7FC; end
+            5'd19: begin fmt = 5'd1; st = 10'd1;  fw = 9'd8;  fh = 9'd16; src = 22'h2FEFFC; end
+            5'd20: begin fmt = 5'd1; st = 10'd2;  fw = 9'd10; fh = 9'd13; src = 22'h2FDAFC; end
+            5'd21: begin fmt = 5'd1; st = 10'd2;  fw = 9'd13; fh = 9'd17; src = 22'h2FCD3C; end
+            5'd22: begin fmt = 5'd1; st = 10'd2;  fw = 9'd14; fh = 9'd20; src = 22'h2FBD7C; end
+            5'd23: begin fmt = 5'd1; st = 10'd3;  fw = 9'd17; fh = 9'd22; src = 22'h2FA17C; end
+            5'd24: begin fmt = 5'd1; st = 10'd3;  fw = 9'd24; fh = 9'd29; src = 22'h2F7E3C; end
+            5'd25: begin fmt = 5'd1; st = 10'd4;  fw = 9'd30; fh = 9'd38; src = 22'h2F3D1C; end
+            5'd26: begin fmt = 5'd2; st = 10'd7;  fw = 9'd14; fh = 9'd16; src = 22'h2F181C; end
+            5'd27: begin fmt = 5'd2; st = 10'd8;  fw = 9'd16; fh = 9'd20; src = 22'h2ED61C; end
+            5'd28: begin fmt = 5'd2; st = 10'd9;  fw = 9'd18; fh = 9'd25; src = 22'h2E799C; end
+            5'd29: begin fmt = 5'd2; st = 10'd11; fw = 9'd22; fh = 9'd28; src = 22'h2DFBBC; end
+            5'd30: begin fmt = 5'd2; st = 10'd14; fw = 9'd28; fh = 9'd36; src = 22'h2D263C; end
+            5'd31: begin fmt = 5'd2; st = 10'd18; fw = 9'd36; fh = 9'd49; src = 22'h2BAC3C; end
+            default: begin fmt = '0; st = '0; fw = '0; fh = '0; src = '0; end
+        endcase
+        rom_font = {src, fmt, st, fh, 3'b000, fw, fh};
+    endfunction
+
+
+
+    wire [66:0] init_font=rom_font(index[9:5]);
+    reg [3:0] init_nibble;
+    always @* begin
+        init_nibble=0;
+        case(index[4:0])
+            5'd0:init_nibble=init_font[48:45];
+            5'd1:init_nibble=init_font[52:49];
+            5'd2:init_nibble=init_font[56:53];
+            5'd3:init_nibble=init_font[60:57];
+            5'd4:init_nibble=init_font[64:61];
+            5'd5:init_nibble={2'd0,init_font[66:65]};
+            5'd6:init_nibble=init_font[24:21];
+            5'd7:init_nibble=init_font[28:25];
+            5'd8:init_nibble=init_font[32:29];
+            5'd9:init_nibble=init_font[36:33];
+            5'd10:init_nibble=init_font[40:37];
+            5'd11:init_nibble=init_font[44:41];
+            5'd12:init_nibble=init_font[3:0];
+            5'd13:init_nibble=init_font[7:4];
+            5'd14:init_nibble=init_font[11:8];
+            5'd15:init_nibble=init_font[15:12];
+            5'd16:init_nibble=init_font[19:16];
+            5'd17:init_nibble={3'd0,init_font[20:20]};
+            default:;
+        endcase
+    end
+    wire in_pass = state >= PRE_RD && state <= FIELD_WR;
+    wire [7:0] op = live_q[31:24];
+    wire vertex = live_q[31:30] == 2'b01 || live_q[31:30] == 2'b10;
+    wire terminal = steps == 15'h4000 || (!vertex &&
+        (op == 8'h00 || (op == 8'h1D && call_n == 4) || (op == 8'h24 && call_n == 0)));
+    wire field_op = !vertex && (op == 8'h01 || op == 8'h07 || op == 8'h08 || op == 8'h28 || op == 8'h29);
+    wire [10:0] handle_base = {1'b0,handle,5'd0};
+
+    reg [35:0] mem [0:2047];
+    reg [35:0] mq;
+    reg [10:0] ma;
+    reg mw;
+    reg [35:0] md;
+    assign live_addr = (state == CAP_RD || state == CAP_WR) ? index : pc;
+    always @* begin
+        ma=index; mw=0; md=0;
+        case(state)
+            INIT: begin mw=1; md={init_nibble,32'd0}; end
+            PRE_RD: ma={1'b1,index[9:0]};
+            PRE_GET: ma=index;
+            PRE_WR: begin mw=1; md={nibble,mq[31:0]}; end
+            FIELD_RD: ma=index;
+            FIELD_WR: begin mw=1; md={field_value[3:0],mq[31:0]}; end
+            CAP_RD: ma=index;
+            CAP_WR: begin mw=1; md={mq[35:32],live_q}; end
+            SEED_RD,SEED_GET: ma={rendered,index[9:0]};
+            default: ;
+        endcase
+    end
+    always @(posedge clk) begin
+        if(!mw) mq <= mem[ma];
+        if(mw) mem[ma] <= md;
+        // Чтение того же адреса при записи определено явно: запись таблиц ручек сохраняет младшее
+        // слово, а копия листа пишется только при стоящем обходчике.
+        draw_q <= mw && ma == draw_addr ? md[31:0] : mem[draw_addr][31:0];
+    end
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin
+            state<=INIT; index<=0; epoch_q<=0; pending<=0; valid<=0; have_list<=0;rendered<=0;
+            overrun<=0; seed_we<=0;seed_field<=0; seed_addr<=0; seed_data<=0; seed_shift<=0;
+            pc<=0; steps<=0; handle<=0; call_n<=0; save_n<=0; save_sp<=0;
+            nibble<=0; field_value<=0; field_left<=0; finish_after_field<=0;
+        end else begin
+            seed_we<=0;
+            epoch_q<=epoch;
+            if(take) begin valid<=0;rendered<=1;end
+            case(state)
+                INIT: begin
+                    if(index==2047) begin state<=IDLE;index<=0;end else index<=index+1'b1;
+                end
+                IDLE: if(pending) begin
+                    pending<=0; valid<=0; index<=0; state<=PRE_RD;
+                end else if(request && !valid && have_list && !take) begin
+                    index<=0; state<=CAP_RD;
+                end
+                PRE_RD: state<=PRE_GET;
+                PRE_GET: begin nibble<=mq[35:32];state<=PRE_WR;end
+                PRE_WR: if(index==1023) begin
+                    pc<=0;steps<=0;handle<=0;call_n<=0;save_n<=0;save_sp<=0;state<=FETCH;
+                end else begin index<=index+1'b1;state<=PRE_RD;end
+                FETCH: state<=EXEC;
+                EXEC: if(terminal) begin state<=IDLE;have_list<=1;end else begin
+                    steps<=steps+1'b1;
+                    pc<=pc+1'b1;
+                    state<=pc==2047 ? IDLE : FETCH;
+                    if(pc==2047) have_list<=1;
+                    if(!vertex) case(op)
+                        8'h05: handle<=live_q[4:0];
+                        8'h1D: begin
+                            calls[call_n[1:0]]<=pc+1'b1;call_n<=call_n+1'b1;
+                            pc<=live_q[10:0];state<=FETCH;
+                        end
+                        8'h1E: begin pc<=live_q[10:0];state<=FETCH;end
+                        8'h24: begin pc<=calls[call_n[1:0]-2'd1];call_n<=call_n-1'b1;state<=FETCH;end
+                        8'h22: begin
+                            saves[save_sp]<=handle;save_sp<=save_sp+1'b1;
+                            save_n<=save_n==4 ? 3'd4 : save_n+1'b1;
+                        end
+                        8'h23: if(save_n!=0) begin
+                            handle<=saves[save_sp-2'd1];save_sp<=save_sp-1'b1;save_n<=save_n-1'b1;
+                        end else handle<=0;
+                        default: ;
+                    endcase
+                    if(field_op) begin
+                        state<=FIELD_RD;finish_after_field<=pc==2047;
+                        field_value<=live_q[23:0];field_left<=6;
+                        case(op)
+                            8'h01: begin index<={1'b1,handle,5'd0};field_value<={2'b0,live_q[21:0]};end
+                            8'h07: index<={1'b1,handle,5'd6};
+                            8'h08: begin index<={1'b1,handle,5'd12};field_value<={3'b0,live_q[20:0]};end
+                            8'h28: begin index<={1'b1,handle,5'd18};field_left<=1;end
+                            default: begin index<={1'b1,handle,5'd19};field_left<=1;end
+                        endcase
+                    end
+                end
+                FIELD_RD: state<=FIELD_WR;
+                FIELD_WR: if(field_left==1) begin
+                    state<=finish_after_field ? IDLE : FETCH;
+                    if(finish_after_field) have_list<=1;
+                end else begin
+                    index<=index+1'b1;field_left<=field_left-1'b1;
+                    field_value<=field_value>>4;state<=FIELD_RD;
+                end
+                CAP_RD: state<=CAP_WR;
+                CAP_WR: if(index==2047) begin
+                    index<=0;seed_addr<=0;seed_field<=0;state<=SEED_RD;
+                end else begin index<=index+1'b1;state<=CAP_RD;end
+                SEED_RD: state<=SEED_GET;
+                SEED_GET: begin
+                    seed_shift<={mq[35:32],seed_shift[19:4]};
+                    index<=index+1'b1;state<=SEED_RD;
+                    if(seed_nibble==5 || seed_nibble==11 || seed_nibble==17 || seed_nibble==18 || seed_nibble==19) begin
+                        seed_we<=1;
+                        if(seed_nibble==18 || seed_nibble==19) seed_data<={20'd0,mq[35:32]};
+                        else seed_data<={mq[35:32],seed_shift};
+                    end
+                    if(seed_nibble==19) begin
+                       
+                        if(index==1011) begin valid<=1;state<=IDLE;end
+                        else index<=index+11'd13;
+                    end
+                end
+                default: state<=INIT;
+            endcase
+            if(seed_we) begin
+                if(seed_field==4) begin seed_addr<=seed_addr+1'b1;seed_field<=0;end
+                else seed_field<=seed_field+1'b1;
+            end
+            if(changed) begin
+                pending<=1;valid<=0;rendered<=0;
+                if(in_pass) overrun<=1;
+                if(state!=INIT) begin state<=IDLE;seed_we<=0;end
+            end
+        end
+    end
 endmodule

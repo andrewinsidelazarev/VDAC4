@@ -44,6 +44,7 @@
 // CALL/JUMP/RETURN сбрасывает выборку — 2 пустых такта; слово листа за такт в остальном.
 module ft_rd_walk #(
     parameter int TW_LOG = 7,               // плитка: 2^TW_LOG × 2^TH_LOG точек (1024)
+    parameter bit SEED_HANDLES = 1'b0,      // 1 — таблицу ручек перед кадром заполняет ft_dl_snapshot (seed_*)
     parameter int TH_LOG = 3
 ) (
     input  wire         clk,
@@ -52,6 +53,10 @@ module ft_rd_walk #(
     input  wire         start,          // такт: новый кадр
     input  wire [9:0]   lines,          // строк в кадре (1…768)
     input  wire [10:0]  hsize,          // точек в строке (1…1024)
+    input wire seed_we,
+    input wire [4:0] seed_addr,
+    input wire [23:0] seed_data,
+    input wire [2:0] seed_field,
     output wire         ready,          // таблица ручек очищена после сброса
 
     output wire [10:0]  dl_addr,        // RAM_DL показываемого банка, ответ через такт
@@ -304,12 +309,12 @@ module ft_rd_walk #(
     // запись таблицы — один порт на поле (очистка или команда листа), отдельным процессом:
     // так синтез кладёт таблицу в распределённую память, а не в триггеры
     wire        h_cmd  = d_go && !end_now && !is_vtx;
-    wire [4:0]  h_wa   = h_clr[5] ? h_clr[4:0] : handle;
-    wire        h_we_s = h_clr[5] || (h_cmd && op == 8'h01);
-    wire        h_we_l = h_clr[5] || (h_cmd && op == 8'h07);
-    wire        h_we_lh = h_clr[5] || (h_cmd && op == 8'h28);
-    wire        h_we_z = h_clr[5] || (h_cmd && op == 8'h08);
-    wire        h_we_zh = h_clr[5] || (h_cmd && op == 8'h29);
+    wire [4:0]  h_wa   = h_clr[5] ? h_clr[4:0] : (SEED_HANDLES && seed_we ? seed_addr : handle);
+    wire        h_we_s = h_clr[5] || (SEED_HANDLES && seed_we && seed_field == 3'd0) || (h_cmd && op == 8'h01);
+    wire        h_we_l = h_clr[5] || (SEED_HANDLES && seed_we && seed_field == 3'd1) || (h_cmd && op == 8'h07);
+    wire        h_we_lh = h_clr[5] || (SEED_HANDLES && seed_we && seed_field == 3'd3) || (h_cmd && op == 8'h28);
+    wire        h_we_z = h_clr[5] || (SEED_HANDLES && seed_we && seed_field == 3'd2) || (h_cmd && op == 8'h08);
+    wire        h_we_zh = h_clr[5] || (SEED_HANDLES && seed_we && seed_field == 3'd4) || (h_cmd && op == 8'h29);
     // Ручки 16…31 после сброса — шрифты ПЗУ FT812, как у чипа: BITMAP_SOURCE — адрес глифа 0,
     // LAYOUT — L1 / L4, шаг строки, высота; SIZE — NEAREST, BORDER, ширина × высота. Числа — из
     // таблицы шрифтов ПЗУ (ROM_FONTROOT = 0x201EE0, по 148 байтов на шрифт; снято с bt8xxemu,
@@ -337,13 +342,13 @@ module ft_rd_walk #(
         endcase
         rom_font = {src, fmt, st, fh, 3'b000, fw, fh};
     endfunction
-    wire [66:0] h_rom = rom_font(h_clr[4:0]);
+    wire [66:0] h_rom = SEED_HANDLES ? 67'd0 : rom_font(h_clr[4:0]);
     always_ff @(posedge clk) begin
-        if (h_we_s)  h_src[h_wa]  <= h_clr[5] ? h_rom[66:45] : w[21:0];
-        if (h_we_l)  h_lay[h_wa]  <= h_clr[5] ? h_rom[44:21] : w[23:0];
-        if (h_we_lh) h_layh[h_wa] <= h_clr[5] ? 4'd0 : w[3:0];
-        if (h_we_z)  h_siz[h_wa]  <= h_clr[5] ? h_rom[20:0] : w[20:0];
-        if (h_we_zh) h_sizh[h_wa] <= h_clr[5] ? 4'd0 : w[3:0];
+        if (h_we_s)  h_src[h_wa]  <= h_clr[5] ? h_rom[66:45] : (SEED_HANDLES && seed_we ? seed_data[21:0] : w[21:0]);
+        if (h_we_l)  h_lay[h_wa]  <= h_clr[5] ? h_rom[44:21] : (SEED_HANDLES && seed_we ? seed_data[23:0] : w[23:0]);
+        if (h_we_lh) h_layh[h_wa] <= h_clr[5] ? 4'd0 : (SEED_HANDLES && seed_we ? seed_data[3:0] : w[3:0]);
+        if (h_we_z)  h_siz[h_wa]  <= h_clr[5] ? h_rom[20:0] : (SEED_HANDLES && seed_we ? seed_data[20:0] : w[20:0]);
+        if (h_we_zh) h_sizh[h_wa] <= h_clr[5] ? 4'd0 : (SEED_HANDLES && seed_we ? seed_data[3:0] : w[3:0]);
     end
 
     // переход: CALL, JUMP, RETURN (исполненные) — выборка с нового адреса
@@ -359,7 +364,7 @@ module ft_rd_walk #(
             {vfmt, handle, vcell, tr_x, tr_y, psize, lwidth, bdst, sfail, spass, swm} <= CTX_DEF;
             prim <= '0; odd <= 1'b0; px <= '0; py <= '0;
             sv_sp <= '0; sv_cnt <= '0; cs_cnt <= '0;
-            h_clr <= 6'h20;
+            h_clr <= SEED_HANDLES ? 6'd0 : 6'h20; // копия листа заполняет все поля до старта
             ty0 <= '0; tx0 <= '0; n_lines <= '0; n_h <= '0; steps <= '0; d_fend <= 1'b0; eol_wait <= 1'b0;
             fpc <= '0; f_run <= 1'b0; f_fly <= 1'b0; f_fep <= 1'b0; f_fpc <= '0; ep <= 1'b0;
             fq_w0 <= '0; fq_w1 <= '0; fq_pc0 <= '0; fq_pc1 <= '0; fq_n <= '0;
@@ -435,6 +440,24 @@ module ft_rd_walk #(
                 w_xh   <= e_xh;
             end
 
+            // Пока E1 свободна, поля задания можно менять и без вершины: важны только e_v и e_kind.
+            // Так длинный разбор кода и примитива уходит из разрешения записи широких регистров.
+            if (SEED_HANDLES && e1_free) begin
+                e_vx <= vx;
+                e_vy <= vy;
+                e_hs <= hs;
+                e_hl <= hl;
+                e_hlh <= hlh;
+                e_hz <= hz;
+                e_hzh <= hzh;
+                e_vc <= vc;
+                e_ps <= psize;
+                e_px <= px;
+                e_py <= py;
+                e_lw <= lwidth;
+                e_cull <= bmp_noop;
+            end
+
             // конец плитки ушёл: следующая плитка — правее, у правого края — в начале следующей
             // полосы строк
             if (x_go && x_kind == K_EOL) begin
@@ -488,33 +511,33 @@ module ft_rd_walk #(
                             4'd1: begin                               // BITMAPS
                                 e_v    <= 1'b1;
                                 e_kind <= K_BMP;
-                                e_cull <= bmp_noop;
-                                e_vx   <= vx;
-                                e_vy   <= vy;
-                                e_hs   <= hs;
-                                e_hl   <= hl;
-                                e_hlh  <= hlh;
-                                e_hz   <= hz;
-                                e_hzh  <= hzh;
-                                e_vc   <= vc;
+                                if (!SEED_HANDLES) e_cull <= bmp_noop;
+                                if (!SEED_HANDLES) e_vx   <= vx;
+                                if (!SEED_HANDLES) e_vy   <= vy;
+                                if (!SEED_HANDLES) e_hs   <= hs;
+                                if (!SEED_HANDLES) e_hl   <= hl;
+                                if (!SEED_HANDLES) e_hlh  <= hlh;
+                                if (!SEED_HANDLES) e_hz   <= hz;
+                                if (!SEED_HANDLES) e_hzh  <= hzh;
+                                if (!SEED_HANDLES) e_vc   <= vc;
                             end
                             4'd2: begin                               // POINTS
                                 e_v    <= 1'b1;
                                 e_kind <= K_POINT;
-                                e_vx   <= vx;
-                                e_vy   <= vy;
-                                e_ps   <= psize;
+                                if (!SEED_HANDLES) e_vx   <= vx;
+                                if (!SEED_HANDLES) e_vy   <= vy;
+                                if (!SEED_HANDLES) e_ps   <= psize;
                             end
                             4'd9: begin                               // RECTS
                                 odd <= !odd;
                                 if (odd) begin
                                     e_v    <= 1'b1;
                                     e_kind <= K_RECT;
-                                    e_px   <= px;
-                                    e_py   <= py;
-                                    e_vx   <= vx;
-                                    e_vy   <= vy;
-                                    e_lw   <= lwidth;
+                                    if (!SEED_HANDLES) e_px   <= px;
+                                    if (!SEED_HANDLES) e_py   <= py;
+                                    if (!SEED_HANDLES) e_vx   <= vx;
+                                    if (!SEED_HANDLES) e_vy   <= vy;
+                                    if (!SEED_HANDLES) e_lw   <= lwidth;
                                 end
                             end
                             4'd3, 4'd4: begin                         // LINES, LINE_STRIP
@@ -527,11 +550,11 @@ module ft_rd_walk #(
                                     if ((px == vx) != (py == vy)) begin
                                         e_v    <= 1'b1;
                                         e_kind <= K_RECT;
-                                        e_px   <= px;
-                                        e_py   <= py;
-                                        e_vx   <= vx;
-                                        e_vy   <= vy;
-                                        e_lw   <= lwidth;
+                                        if (!SEED_HANDLES) e_px   <= px;
+                                        if (!SEED_HANDLES) e_py   <= py;
+                                        if (!SEED_HANDLES) e_vx   <= vx;
+                                        if (!SEED_HANDLES) e_vy   <= vy;
+                                        if (!SEED_HANDLES) e_lw   <= lwidth;
                                     end else unsup[0] <= 1'b1;
                                 end
                             end

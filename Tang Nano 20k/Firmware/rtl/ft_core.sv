@@ -34,7 +34,11 @@ module ft_core #(
     // 1 — после сброса ACTIVE, а не SLEEP, и внешний генератор ×8 (64 МГц): ядро FT812 в слоте 1
     // грузится, когда хост уже начал обмен (переход из TS-Config по ACTIVE — CORERST, CLKEXT,
     // CLKSEL, ACTIVE уходят в ядро без FT812), и они пропали; в SLEEP ядро не отвечало бы на чтения
-    parameter bit START_ACTIVE = 1'b0
+    parameter bit START_ACTIVE = 1'b0,
+    // 1 — смена листа и INT_SWAP по событию кадра, без ожидания растеризатора: у него своя копия
+    // RAM_DL (ft_dl_snapshot в ft_render; слот 1, как eve-timing.cpp у bt8xxemu)
+    parameter bit DETACHED_SWAP = 1'b0,
+    parameter bit REG_DISTRIBUTED = 1'b0  // 1 — регистры в свободной половине блоков RAM_CMD (слот 1)
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -244,6 +248,8 @@ module ft_core #(
     wire        clearing = clr[7];
     reg         clr_q, cpur_q;
 
+    reg  [21:0] a_addr;              // байтовый адрес
+
     // --- память ---------------------------------------------------------------------------------
     reg         dl_we;
     reg  [3:0]  dl_be;
@@ -264,16 +270,34 @@ module ft_core #(
     reg  [9:0]  cm_waddr, cm_raddr;
     reg  [31:0] cm_wdata;
     wire [31:0] cm_q;
-    ft_ram #(.AW(10)) u_cmd (.clk(clk), .we(cm_we), .be(cm_be), .waddr(cm_waddr),
-                             .wdata(cm_wdata), .raddr(cm_raddr), .rdata(cm_q));
+
 
     reg         rg_we;
     reg  [3:0]  rg_be;
     reg  [6:0]  rg_waddr, rg_raddr;
     reg  [31:0] rg_wdata;
     wire [31:0] rg_q;
+    generate if (REG_DISTRIBUTED) begin : g_reg_cmd
+        // RAM_CMD — 1024 слова, а в каждом байтовом блоке BSRAM 2048 строк. Общий арбитр выдаёт одно
+        // обращение к CMD или REG за такт; запись и чтение независимы, маски байтов и задержка те же.
+        wire [31:0] q;
+        wire [10:0] wa=rg_we ? {1'b1,3'd0,rg_waddr} : {1'b0,cm_waddr};
+        // access() защёлкивает a_addr и cm_raddr вместе. У CMD_BASE бит 15 — 1, у REG_BASE — 0;
+        // остальные чтения выход этой памяти не смотрят.
+        wire [10:0] ra={~a_addr[15],cm_raddr};
+        ft_ram #(.AW(11)) shared_ram (.clk(clk), .we(cm_we || rg_we),
+            .be(rg_we ? rg_be : cm_be), .waddr(wa), .wdata(rg_we ? rg_wdata : cm_wdata),
+            .raddr(ra), .rdata(q));
+        assign cm_q=q;
+        assign rg_q=q;
+    end else begin : g_reg_block
     ft_ram #(.AW(7)) u_reg (.clk(clk), .we(rg_we), .be(rg_be), .waddr(rg_waddr),
                             .wdata(rg_wdata), .raddr(rg_raddr), .rdata(rg_q));
+    end endgenerate
+    generate if (!REG_DISTRIBUTED) begin : g_cmd_separate
+        ft_ram #(.AW(10)) u_cmd (.clk(clk), .we(cm_we), .be(cm_be), .waddr(cm_waddr),
+            .wdata(cm_wdata), .raddr(cm_raddr), .rdata(cm_q));
+    end endgenerate
 
     // --- время -------------------------------------------------------------------------------------
     wire [19:0] f_khz      = (ext_clk ? 20'd8000 : 20'd12000) * (mul != 0 ? mul : 6'd5);
@@ -310,7 +334,6 @@ module ft_core #(
     // --- доступ к памяти: стадия 0 — запрос ----------------------------------------------------
     // Хост: чтение (rd_host), запись байта; порт: слово. За такт — одно обращение.
     reg         a_v, a_we, a_host;
-    reg  [21:0] a_addr;              // байтовый адрес
     reg  [3:0]  a_be;
     reg  [31:0] a_wd;
 
@@ -481,6 +504,17 @@ module ft_core #(
         end
     endtask
 
+    // Чтение хоста снимает INT_FLAGS в access(), за две ступени до сброса: смена, пришедшая в момент
+    // снимка b_ff или позже (и в этот же такт), не должна пропасть.
+    wire detached_swap_now = DETACHED_SWAP &&
+        ((swap_pend == 2'd1 && (!scan_on_r || eol)) ||
+         (swap_pend == 2'd2 && (!scan_on_r || (eol && line == event_line_r))));
+    reg swap_recent;
+    always @(posedge clk or negedge rst_n)
+        if(!rst_n) swap_recent<=0;
+        else swap_recent<=detached_swap_now;
+    wire swap_after_read=detached_swap_now || |swap_recent;
+
     // --- основной автомат ------------------------------------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -602,7 +636,11 @@ module ft_core #(
             // FT812). Ждать саму строку события нельзя: растеризатор читает лист почти весь кадр,
             // окно между кадрами привязано к выводу 60 Гц, строка события — к развёртке 59 Гц;
             // фаза плывёт, и смена стояла до полсекунды (DEMO3D ~9 fps рывками, R-Type).
-            if (!swap_hold && (swap_pend == 2'd1 || (swap_pend == 2'd2 && (swap_due || !scan_on_r))))
+            if (DETACHED_SWAP) begin
+                // Как в bt8xxemu: eve-timing.cpp EndOfLine / FrameEvent / ApplySwap
+                if (detached_swap_now)
+                    apply_swap();
+            end else if (!swap_hold && (swap_pend == 2'd1 || (swap_pend == 2'd2 && (swap_due || !scan_on_r))))
                 apply_swap();
             if (line_clks_r != 0 && line_pos >= line_clks_r)
                 line_pos <= line_clks_r - 20'd1;
@@ -653,7 +691,7 @@ module ft_core #(
             end else if (p_req && !p_busy && !p_ack && !clearing) begin
                 // порт слов — в такт без событий хоста
                 if (p_cp && p_we && {p_addr, 2'b00} == REG_BASE + 22'(4 * R_INT_FLAGS)) begin
-                    int_flags <= int_flags | p_wdata[7:0];
+                    int_flags <= int_flags | p_wdata[7:0] | (detached_swap_now ? 8'h01 : 8'h00);
                     p_ack     <= 1'b1;
                 end else if ({p_addr, 2'b00} < 22'h300000) begin
                     if (gm_v({p_addr, 2'b00}) && !(p_we && gm_ro({p_addr, 2'b00}) && !(rom_we && !p_cp))) begin
@@ -710,7 +748,7 @@ module ft_core #(
                 if (b_host) begin
                     spi_rd_byte <= pick(read_word(), b_addr[1:0]);
                     if (b_clr_int)
-                        int_flags <= 8'd0;   // REG_INT_FLAGS сбрасывается чтением
+                        int_flags <= DETACHED_SWAP && swap_after_read ? 8'h01 : 8'h00; // сброс чтением не теряет новую смену
                 end else begin
                     p_rdata <= read_word();
                     p_ack   <= 1'b1;

@@ -41,6 +41,7 @@
 //            общем FIFO: промах кэша стоил 45–59 тактов clk (стенд tb/vsys, ядро 1.24).
 // Сигналы между доменами — только из регистров в регистры (пути — такт clk_sd).
 module sd_bridge #(
+    parameter bit PREFETCH_HEAD = 1'b0,  // 1 — признаки головы очереди из регистра: короче путь (слот 1)
     parameter int TAGW   = 3,
     parameter int RD_AW  = 9,         // FIFO чтения: 2^RD_AW слов (BSRAM)
     parameter logic [TAGW-1:0] TX_TAG = 3'b100,  // метка чтений текселей (своя очередь)
@@ -329,13 +330,15 @@ module sd_bridge #(
 
     // ==================================== домен clk_sd ========================================
     wire [24+TAGW:0] head = cq_mem[cq_r[1:0]];
-    wire        h_we  = head[24+TAGW];
-    wire [6:0]  h_n   = {head[TAGW+2:TAGW], 3'd0} + 7'd8;
+    reg [3:0] head_meta;
+    wire h_we = PREFETCH_HEAD ? head_meta[3] : head[24+TAGW];
+    wire [2:0] head_len = PREFETCH_HEAD ? head_meta[2:0] : head[TAGW+2:TAGW];
+    wire [6:0]  h_n   = {head_len, 3'd0} + 7'd8;
     // кусок головы: 2 пакета (или остаток); первый кусок записи — когда собраны все её слова
     reg         ch_on;                       // голова идёт кусками, следующий — с ch_addr
     reg  [20:0] ch_addr;
     reg  [2:0]  ch_left;                     // пакетов головы осталось − 1
-    wire [2:0]  h_len = ch_on ? ch_left : head[TAGW+2:TAGW];
+    wire [2:0]  h_len = ch_on ? ch_left : head_len;
     wire [20:0] h_addr = ch_on ? ch_addr : head[TAGW+23:TAGW+3];
     wire [2:0]  k_max = h_we ? 3'(WR_K) : 3'd1;
     wire [2:0]  k_len = h_len > k_max ? k_max : h_len;        // пакетов куска − 1
@@ -353,6 +356,12 @@ module sd_bridge #(
     wire        t_ok  = tq_w_s != tq_r && tf_free >= (TF_AW+1)'(8);
     wire        t_mg  = TX_MERGE && tq_mg[tq_r[TQ_W-1:0]] && (tq_w_s - tq_r) >= (TQ_W+1)'(2) &&
                         tf_free >= (TF_AW+1)'(16);
+    // Признаки — для указателя уже после приёма на этом фронте. Одновременная запись видна через
+    // cq_w_s позже, когда слово уже на месте.
+    wire pop_head = c_req && c_ack && !c_tx && h_len <= k_len;
+    wire [1:0] next_head = cq_r[1:0] + {1'b0,pop_head};
+    always @(posedge clk_sd)
+        head_meta <= {cq_mem[next_head][24+TAGW],cq_mem[next_head][TAGW+2:TAGW]};
     always_ff @(posedge clk_sd or negedge rst_sd_n) begin
         if (!rst_sd_n) begin
             cq_r <= '0; cq_w_s <= '0; wf_r <= '0; wf_rn <= 6'd1; wf_w_s <= '0;

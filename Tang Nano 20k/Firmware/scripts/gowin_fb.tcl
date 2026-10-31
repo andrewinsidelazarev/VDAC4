@@ -65,7 +65,27 @@ foreach f {ts_fb_hdmi_top fb_clocking ts_clocking ts_fb_core ts_mux_capture rast
 if {$has_video} {
     foreach f [lsort [glob third_party/core_jpeg/src_v/*.v]] { add_file $f }
 }
-add_file constraints/ts_fb_hdmi_top.cst
+if {$core_kind eq "ft" || $core_kind eq "video" || $core_kind eq "evo"} {
+    # Ядра FT812, видео и TS-Config (31.10.2026): выводы TMDS с DRIVE=4. У FT812 в 1366×768 при 8 экран терял сигнал в
+    # Zuma Deluxe, при 16 — и в других программах, при 4 не теряет (опыты на плате, логика та же)
+    set in [open constraints/ts_fb_hdmi_top.cst r]
+    fconfigure $in -encoding utf-8
+    set cst ""
+    while {[gets $in line] >= 0} {
+        if {[string match {IO_PORT "tmds_*} $line]} { set line [string map {DRIVE=8 DRIVE=4} $line] }
+        append cst $line "
+"
+    }
+    close $in
+    file mkdir impl/cst_ft
+    set out [open impl/cst_ft/ts_fb_hdmi_top.cst w]
+    fconfigure $out -encoding utf-8
+    puts -nonewline $out $cst
+    close $out
+    add_file impl/cst_ft/ts_fb_hdmi_top.cst
+} else {
+    add_file constraints/ts_fb_hdmi_top.cst
+}
 if {$has_evo} {
     add_file constraints/ts_fb_hdmi_top.sdc
 } else {

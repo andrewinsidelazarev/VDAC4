@@ -151,7 +151,8 @@ module ft_rd_pix #(
     reg  [9:0]  a_x;
     reg  [63:0] a_src;
     reg         a_raw;
-    reg  [31:0] b1_dcr;                 // B1: что лежало в буфере (с подстановкой «не касались»)
+    reg  [31:0] b1_dcr;                 // B1: что лежало в буфере, без подстановки «не касались»
+    reg         b1_imp;                 //     признак «не касались» этого слова
     reg  [7:0]  b1_dsr;
     reg         b1_v, b2_v, b3_v, b4_v;
     reg  [9:0]  b1_x, b2_x, b3_x, b4_x;
@@ -246,10 +247,13 @@ module ft_rd_pix #(
     // B1: что лежит в буфере (или значение строки по умолчанию)
     // A: данные буфера пришли — «не касались» заменяется значением строки по умолчанию
     wire [32:0] a_q  = cur_buf ? (a_x[0] ? qo1 : qe1) : (a_x[0] ? qo0 : qe0);
-    wire [31:0] a_dc = a_q[32] ? impl_c[cur_buf] : a_q[31:0];
-    wire [7:0]  a_ds = a_q[32] ? impl_s[cur_buf] : (cur_buf ? qs1 : qs0);
-    wire [31:0] b1_dc = b1_dcr;
-    wire [7:0]  b1_ds = b1_dsr;
+    wire [7:0]  a_qs = cur_buf ? qs1 : qs0;
+    // Подстановка — уже за регистром B1 (1.44): выход BSRAM идёт на clk_sd, до регистра — полтакта
+    // clk_mem, и выбор на 40 приёмников был на самом длинном пути. impl_c и cur_buf не меняются, пока в
+    // конвейере есть фрагменты: значения по умолчанию пишутся только в нетронутую плитку, буфер
+    // меняется при пустом конвейере (X_EOL) — значение то же, что и при выборе на стадии A.
+    wire [31:0] b1_dc = b1_imp ? impl_c[cur_buf] : b1_dcr;
+    wire [7:0]  b1_ds = b1_imp ? impl_s[cur_buf] : b1_dsr;
     // место пишется задолго до первой точки задания и не переписывается, пока его точки в
     // конвейере (slot_busy): его можно взять в регистр уже на стадии A
     wire [63:0] b1_sl = b1_slr;
@@ -279,9 +283,38 @@ module ft_rd_pix #(
     // битмап: тексель × COLOR — от регистра стадии A (a_src = {тексель, COLOR}) к b1_src (1.31:
     // раньше умножал ft_rd_exec сразу за умножением BILINEAR — оба стояли на худшем пути clk_mem)
     wire [17:0] a_tc [0:3];
+    // У пар COLOR — белый с альфой 255 и обычное смешение: первому текселю умножение на COLOR не
+    // нужно, и эти четыре DSP считают источник второй точки, ещё четыре — её приёмник. Новых портов
+    // памяти текстур, палитры и цвета нет.
+    wire [31:0] a_mod = {d255(a_tc[3][15:0]), d255(a_tc[2][15:0]),
+                        d255(a_tc[1][15:0]), d255(a_tc[0][15:0])};
+    wire [32:0] a_q2 = cur_buf ? qo1 : qo0;
+    reg  [31:0] b1_q2;
+    reg         b1_imp2;
+    wire [31:0] b1_dc2 = b1_imp2 ? impl_c[cur_buf] : b1_q2;
+    reg [7:0] b1_a2;
+    wire [17:0] b3_pd2 [0:3];
+    wire [31:0] pair_mix;
+    genvar gp;
+    generate if(UP2) begin : g_pair_blend
+        for(gp=0;gp<4;gp=gp+1) begin : ch
+            ft_mul9 #(.REG(1'b1)) u_pd2 (.clk(clk),
+                .a({1'b0,b1_dc2[8*gp+:8]}), .b({1'b0,~b1_a2}), .p(b3_pd2[gp]));
+            // floor(src·a/255) + floor(dst·(255−a)/255) не больше 255: сумма без насыщения
+            assign pair_mix[8*gp+:8] = b3_s2[8*gp+:8] + d255(b3_pd2[gp][15:0]);
+        end
+        always_ff @(posedge clk) begin
+            b1_q2 <= a_q2[31:0];
+            b1_imp2 <= a_q2[32];
+            b1_a2 <= a_s2[31:24];
+        end
+    end else begin : g_pair_opaque
+        assign pair_mix = b3_s2;
+    end endgenerate
     genvar gt;
     for (gt = 0; gt < 4; gt = gt + 1) begin : g_tex
-        ft_mul9 u_tc (.clk(clk), .a({1'b0, a_src[32 + 8 * gt +: 8]}), .b({1'b0, a_src[8 * gt +: 8]}),
+        ft_mul9 u_tc (.clk(clk), .a({1'b0, (UP2 && a_p2) ? a_s2[8 * gt +: 8] : a_src[32 + 8 * gt +: 8]}),
+                      .b({1'b0, (UP2 && a_p2) ? a_s2[31:24] : a_src[8 * gt +: 8]}),
                       .p(a_tc[gt]));
     end
 
@@ -316,7 +349,7 @@ module ft_rd_pix #(
             a_p2 <= 1'b0; b1_p2 <= 1'b0; b2_p2 <= 1'b0; b3_p2 <= 1'b0; b4_p2 <= 1'b0;
             a_w2 <= 1'b0; b1_w2 <= 1'b0; b2_w2 <= 1'b0; b3_w2 <= 1'b0; b4_w2 <= 1'b0;
             a_s2 <= '0; b1_s2 <= '0; b2_s2 <= '0; b3_s2 <= '0; b4_s2 <= '0;
-            b1_dcr <= '0; b1_dsr <= '0;
+            b1_dcr <= '0; b1_dsr <= '0; b1_imp <= 1'b0;
             b1_v <= 1'b0; b2_v <= 1'b0; b3_v <= 1'b0; b4_v <= 1'b0;
             b1_x <= '0; b2_x <= '0; b3_x <= '0; b4_x <= '0;
             b1_slot <= 1'b0; b2_slot <= 1'b0; b3_slot <= 1'b0; b4_slot <= 1'b0;
@@ -340,14 +373,15 @@ module ft_rd_pix #(
             // B1
             b1_v    <= a_v;
             b1_slr  <= slot[a_slot];
-            b1_p2   <= a_p2;  b1_w2 <= a_w2;  b1_s2 <= a_s2;
+            b1_p2   <= a_p2;  b1_w2 <= a_w2;  b1_s2 <= UP2 ? a_mod : a_s2;
             b1_x    <= a_x;
             b1_slot <= a_slot;
             b1_clr  <= a_clr;
-            b1_src  <= a_raw ? {d255(a_tc[3][15:0]), d255(a_tc[2][15:0]), d255(a_tc[1][15:0]), d255(a_tc[0][15:0])}
+            b1_src  <= a_raw ? ((UP2 && a_p2) ? a_src[63:32] : a_mod)
                              : a_src[31:0];
-            b1_dcr  <= a_dc;
-            b1_dsr  <= a_ds;
+            b1_dcr  <= a_q[31:0];
+            b1_dsr  <= a_qs;
+            b1_imp  <= a_q[32];
             // B2
             b2_v    <= b1_v;
             b2_p2   <= b1_p2; b2_w2 <= b1_w2; b2_s2 <= b1_s2;
@@ -376,7 +410,7 @@ module ft_rd_pix #(
             b3_st   <= b2_nst;
             // B4
             b4_v    <= b3_v;
-            b4_p2   <= b3_p2; b4_w2 <= b3_w2; b4_s2 <= b3_s2;
+            b4_p2   <= b3_p2; b4_w2 <= b3_w2; b4_s2 <= pair_mix;
             b4_x    <= b3_x;
             b4_slot <= b3_slot;
             b4_rgba <= b3_new;
@@ -496,7 +530,9 @@ module ft_rd_pix #(
         if (init_cnt[9]) begin
             we_e0 = 1'b1; we_o0 = 1'b1; we_e1 = 1'b1; we_o1 = 1'b1;
             wa0 = init_cnt[8:0]; wa1 = init_cnt[8:0];
-            wd0 = {1'b1, 32'd0}; wd1 = {1'b1, 32'd0}; wdo0 = {1'b1, 32'd0}; wdo1 = {1'b1, 32'd0};
+            // цвет не важен: при признаке 1 читается значение по умолчанию (1.44: без выбора на 32 бита
+            // данных — короче путь u_clr → BSRAM за полтакта clk_mem и меньше логики)
+            wd0[32] = 1'b1; wd1[32] = 1'b1; wdo0[32] = 1'b1; wdo1[32] = 1'b1;
         end else begin
             // фрагмент
             if (b4_v && !cur_buf) begin we_e0 = !b4_x[0]; we_o0 = b4_x[0] || (b4_p2 && b4_w2); we_s0 = 1'b1; end
@@ -506,10 +542,10 @@ module ft_rd_pix #(
             if (UP2 ? u_clr : dst_q == D_RUN && w_take) begin
                 if (!d_buf) begin
                     we_e0 = 1'b1; we_o0 = 1'b1; wa0 = UP2 ? {u_ck, u_x2} : d_k;
-                    wd0 = {1'b1, 32'd0}; wdo0 = {1'b1, 32'd0};
+                    wd0[32] = 1'b1; wdo0[32] = 1'b1;
                 end else begin
                     we_e1 = 1'b1; we_o1 = 1'b1; wa1 = UP2 ? {u_ck, u_x2} : d_k;
-                    wd1 = {1'b1, 32'd0}; wdo1 = {1'b1, 32'd0};
+                    wd1[32] = 1'b1; wdo1[32] = 1'b1;
                 end
             end
         end

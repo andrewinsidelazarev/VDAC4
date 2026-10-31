@@ -49,7 +49,7 @@ double sc_time_stamp() { return 0.0; }        // время ведёт стен�
 
 namespace {
 
-constexpr double PS_MEM = 1e6 / 61.875;     // период clk_mem, пс
+constexpr double PS_MEM = 1e6 / 60.75;     // период clk_mem, пс
 #ifdef VSYS_768
 constexpr double PS_PIX = 1e6 / 72.0;       // период pixel_clk, пс: 1366×768 RB (ядро с 1.41)
 #else
@@ -390,12 +390,15 @@ int main(int argc, char** argv) {
     size_t rep_swaps = 0, rep_renders = 0, rep_takes = 0;
     long rep_steps = 0, rep_out = 0, rep_skip = 0;
     size_t k = 0;
+    const char* hz_env=std::getenv("VDAC_TEST_HOST_HZ");
+    double test_hz=hz_env ? std::atof(hz_env) : 0.0, test_deadline=-1;
+
 
     auto report = [&](double t_end, bool final) {
         size_t sw = sim.st.swaps.size(), rr = sim.st.renders.size(), tk = sim.st.takes.size();
         double rmax = 0, rsum = 0;
         for (size_t i = rep_renders; i < rr; ++i) {
-            double v = sim.st.rtimes[i] * 1024.0 / 61875.0;
+            double v = sim.st.rtimes[i] * 1024.0 * PS_MEM / 1e9;
             rsum += v; rmax = std::max(rmax, v);
         }
         double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
@@ -412,6 +415,11 @@ int main(int argc, char** argv) {
     const double t_stop = t0 + seconds * 1e12;
     while (sim.now < t_stop && (max_steps < 0 || n_steps < max_steps)) {
         if (k >= steps.size()) { if (!loop) break; k = 1; }   // по кругу — без листа установки
+        if(k>0 && test_hz>0) {
+            if(test_deadline<0) test_deadline=sim.now;
+            if(sim.now<test_deadline) sim.idle(test_deadline-sim.now);
+            test_deadline+=1e12/test_hz;
+        }
         const Step& s = steps[fixed_dl ? 0 : k];
         const Step& tm = steps[k];
         double t_start = sim.now;
@@ -485,6 +493,17 @@ int main(int argc, char** argv) {
     // сводка за весь прогон
     rep_swaps = rep_renders = rep_takes = 0; rep_steps = rep_out = rep_skip = 0;
     report(t_end, true);
+    if (sim.st.rtimes.size() > 2) {
+        double sum=0, lo=1e9, hi=0;
+        for (size_t i=2; i<sim.st.rtimes.size(); ++i) {
+            double v=sim.st.rtimes[i] * 1024.0 * PS_MEM / 1e9;
+            sum+=v; lo=std::min(lo,v); hi=std::max(hi,v);
+        }
+        std::printf("STEADY frames=%zu mean_ms=%.4f min_ms=%.4f max_ms=%.4f\n", sim.st.rtimes.size()-2, sum/(sim.st.rtimes.size()-2),lo,hi);
+    }
+    std::printf("FAST early=%u cross_pair=%u rect_pair=%u rect_eligible=%u\n",sim.top->rc[44],sim.top->rc[45],sim.top->rc[46],sim.top->rc[47]);
+    std::printf("DEADLINE late_fresh_frames=%u state_overrun=%u host_hz=%.6f\n",sim.top->late_frames,sim.top->state_overrun,test_hz);
+    if(sim.top->state_overrun) return 2;
     double secs_model = (t_end - t0) / 1e12;
     double wsum = 0, wmax = 0;
     for (double w : waits) { wsum += w; wmax = std::max(wmax, w); }
@@ -494,7 +513,7 @@ int main(int argc, char** argv) {
     {
         double cyc = (t_end - t0) / (sim.top->sd_fast ? PS_MEM / 2 : PS_MEM);
         static const char* nm[7] = {"вывод/захват", "RAM_G", "тексели", "выгрузка плиток", "оверлеи", "регенерация", "всего"};
-        std::printf("SDRAM занята (доля тактов %s):", sim.top->sd_fast ? "clk_sd 123,75 МГц" : "clk_mem");
+        std::printf("SDRAM занята (доля тактов %s):", sim.top->sd_fast ? "clk_sd 121,5 МГц" : "clk_mem");
         for (int i = 0; i < 7; ++i) std::printf(" %s %.1f%%%s", nm[i], 100.0 * sim.top->busy[i] / cyc, i < 6 ? "," : "\n");
     }
     if (ramg_wr > 0) {
@@ -552,7 +571,7 @@ int main(int argc, char** argv) {
                     ms(rc(32) / fr * PS_MEM), ms(rc(33) / fr * PS_MEM), rc(34) / fr,
                     100.0 * rc(35) / std::max(1.0, rc(0)), ms(rc(36) / fr * PS_MEM));
         std::printf("  мост (такты clk_sd): голова — чтение без места в FIFO чтения %.2f мс на кадр, запись без слов %.2f мс, очередь пуста %.1f%%\n",
-                    ms(rc(37) / fr * PS_MEM / 2), ms(rc(38) / fr * PS_MEM / 2), 100.0 * rc(39) / std::max(1.0, 2.0 * rc(0)));
+                    ms(rc(37) / fr * PS_MEM / 2), ms(rc(38) / fr * PS_MEM / 2), 100.0 * rc(39) / std::max(1.0, t_end / (PS_MEM / 2)));
         std::printf("  строка плитки ждёт приёма (мс на кадр): сбор прошлой %.2f, места в FIFO записи %.2f, места в очереди %.2f, арбитр отдал другому %.2f\n",
                     ms(rc(40) / fr * PS_MEM), ms(rc(41) / fr * PS_MEM), ms(rc(42) / fr * PS_MEM), ms(rc(43) / fr * PS_MEM));
         std::printf("  обходчик: занят %.2f мс на кадр, слов листа %.0f на кадр (%.1f на плитку), ждёт места в очереди %.1f%%, выборка пуста %.1f%%\n",

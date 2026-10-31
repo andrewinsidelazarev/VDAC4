@@ -285,7 +285,15 @@ module ts_fb_core #(
     //                     MPEG-4 F с нечётным отражением, решение по зелёной, сила — от шага
     //                     квантования) и зерно (синий шум 64×64 со сдвигом кадра) при сведении к
     //                     RGB565 (vp_fbwrite, vp_dbk_lp, vp_noise_rom); тайминг декодера: регистры
-    //                     vp_avi → декодер и байтов DHT, длина кода Хаффмана — по таблице до сравнений
+    //                     vp_avi → декодер и байтов DHT, длина кода Хаффмана — по таблице до сравнений;
+    //                     1.44 — ядро FT812: смена листа и INT_SWAP — по событию кадра, не ждут растеризатор
+    //                     (DETACHED_SWAP): он рисует неизменяемую копию RAM_DL с таблицей ручек (ft_dl_snapshot
+    //                     в ft_render), не успел — показан последний целый кадр; запись хоста в RAM_G после смены
+    //                     отменяет устаревшую картинку. Пары полупрозрачных точек за такт, через границу слова и
+    //                     в RECTS (PAIR_EXT), ранний перезапуск кэша текселей (EARLY_RESTART); регистры FT — в
+    //                     свободной половине блоков RAM_CMD, вместо их BSRAM — копия листа;
+    //                     1.45 — ядро FT812: отмена по записи в RAM_G — одна на картинку, следующая дорисовывается
+    //                     (иначе при кадре дольше периода смен и записи в RAM_G каждый кадр экран стоял)
     //   0x08 STATUS   R   [15:0] флаги: 0 растр захвачен, 3:1 режим raster_detect, 4/5 HS/VS
     //                     активны низким, 6/7 окно по картинке H/V, 8 границы картинки есть,
     //                     9 в SDRAM таблица, 10 SDRAM готова, 11 есть кадр, 12 M_SEL,
@@ -853,7 +861,7 @@ module ts_fb_core #(
     assign ft_int_n = ft_cfg_esp ? 1'b1 : ft_int_core;
     generate if (HAS_FT) begin : g_ft
         // ядро FT812 без Evo (слот 1) — сразу ACTIVE: хост начал обмен ещё в слоте TS-Config
-        ft_core #(.CLK_KHZ(MEM_KHZ), .START_ACTIVE(!HAS_EVO)) ft (
+        ft_core #(.CLK_KHZ(MEM_KHZ), .START_ACTIVE(!HAS_EVO), .REG_DISTRIBUTED(SD_FAST && !HAS_EVO), .DETACHED_SWAP(SD_FAST && !HAS_EVO)) ft (
             .clk(clk_mem), .rst_n(rst_mem_n),
             .spi_tg(ft_tg), .spi_kind(ft_kind), .spi_h0(ft_h0), .spi_h1(ft_h1), .spi_b(ft_b),
             .spi_cs_n(ft_cs_n | ft_cfg_esp), .spi_rd_byte(ft_rd_byte),
@@ -960,7 +968,7 @@ module ts_fb_core #(
         if (lk_rd_addr[11]) lk_rd_data = HAS_VIDEO ? vp_au_q : sd_rx_q;   // 0x2000…: окно RX моста к microSD (ядро видео — FIFO звука)
         else case (lk_rd_addr[7:0])
             8'h00: lk_rd_data = 32'h5644_4334;
-            8'h01: lk_rd_data = {HAS_EVO ? 8'h01 : HAS_VIDEO ? 8'h05 : 8'h02, 8'h01, 16'h012B};   // личность: 05 — ядро видео (03 — Next, 04 — NES)
+            8'h01: lk_rd_data = {HAS_EVO ? 8'h01 : HAS_VIDEO ? 8'h05 : 8'h02, 8'h01, 16'h012D};   // личность: 05 — ядро видео (03 — Next, 04 — NES)
             8'h02: lk_rd_data = {pclk_khz, cal_fail, cal_done, cal_busy, blank, p_have_frame,
                                  p_mem_ready, p_pattern_on, p_bb_valid, p_aligned_v, p_aligned_h,
                                  p_vs_low, p_hs_low, p_mode, p_locked};
@@ -1243,7 +1251,7 @@ module ts_fb_core #(
         wire [31:0] c_wdata, c_rd_data;
         wire [3:0]  c_wmask;
         // запись растеризатора (метка 101) — по два слова за такт (ft_rd_pix UP2)
-        sd_bridge #(.TAGW(3), .W2(HAS_FT)) bridge (
+        sd_bridge #(.TAGW(3), .W2(HAS_FT), .PREFETCH_HEAD(HAS_FT && !HAS_EVO)) bridge (
             .clk(clk_mem), .rst_n(rst_mem_n), .clk_sd(clk_sd), .rst_sd_n(rst_sd_n),
             .req(sd_req), .we(sd_we), .addr(sd_addr), .req_len(sd_len), .req_tag(sd_tag),
             .ack(sd_ack), .ack_tag(sd_ack_tag),
@@ -1312,7 +1320,7 @@ module ts_fb_core #(
             .clk(clk_mem), .rst_n(rst_mem_n), .clk_sd(clk_sd),
             .enable(m_ft && ft_disp_on), .hsize(ft_hsize), .vsize(ft_vsize),
             .ramg_3mb(ft_cfg_3mb_s[1]), .dither(!ft_cfg_nodith_s[1]),
-            .dl_addr(rd_dl_addr), .dl_q(rd_dl_q), .swap_hold(rd_swap_hold), .swap_wait(ft_dlswap != 2'd0),
+            .texture_write(ft_g_wr_take), .dl_epoch(ft_dl_active), .dl_addr(rd_dl_addr), .dl_q(rd_dl_q), .swap_hold(rd_swap_hold), .swap_wait(ft_dlswap != 2'd0),
             .s_req(rd_req), .s_we(rd_we), .s_addr(rd_addr), .s_len(rd_len), .s_sub(rd_sub),
             .s_ack(sd_ack && sd_ack_tag[2:1] == 2'd2), .s_op_sub(sd_ack_tag[0]),
             .s_wr_take(mem_wr_take_any && sd_wr_tag == 3'b101), .s_wdata(rd_wdata), .s_wdata2(rd_wdata2),
@@ -1442,6 +1450,7 @@ module ts_fb_core #(
                     (!(HAS_FT || HAS_VIDEO) ? blank : HAS_EVO ? (SCALE ? 1'b0 : blank) : (!p_pattern_on && !blank));
 
     fb_scanout #(
+        .PIPE_SCALE_ROM(SD_FAST),
         .H_ACTIVE(H_ACTIVE), .V_ACTIVE(V_ACTIVE),
         .OUT_W(OUT_W), .OUT_H(OUT_H), .IMG_X(IMG_X), .IMG_Y(IMG_Y),
         .H_FP(H_FP), .H_SYNC(H_SYNC), .H_BP(H_BP),
@@ -1544,6 +1553,7 @@ module ts_fb_core #(
     // 1366×768 — не формат CEA-861: VIC 0, пропорции не указаны (так его на плате приняли
     // телевизор, карта захвата и мониторы, 28.10.2026)
     hdmi_tx #(
+        .SHORT_TMDS(HAS_FT && !HAS_EVO && !HAS_VIDEO),
         .HDMI(HDMI), .VS_HIGH(!VS_NEG),
         .VIC(OUT768 ? 8'd0 : SCALE ? ((HAS_EVO || HAS_VIDEO) ? 8'd19 : 8'd4) : 8'd17),   // 4 — 720p60 (ядро FT812 до 1.41)
         .PIC_AR(OUT768 ? 2'b00 : SCALE ? 2'b10 : 2'b01)

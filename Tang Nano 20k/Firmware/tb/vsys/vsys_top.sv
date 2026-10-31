@@ -28,6 +28,8 @@ module vsys_top #(
     // замеры
     output reg  [31:0] n_swaps,        // смен листа (apply_swap ядра FT812)
     output reg  [31:0] n_takes,        // кадров FT, взятых выводом (смена буфера вывода)
+    output reg [31:0] late_frames,
+    output wire state_overrun,
     output wire [15:0] r_frames,       // кадров растеризатора
     output wire [15:0] r_time,         // время последнего кадра, такты / 1024
     output wire [31:0] ft_frames,      // REG_FRAMES
@@ -65,7 +67,7 @@ module vsys_top #(
     ts_fb_core #(
         .OUT_W(OUT_W), .OUT_H(OUT_H), .IMG_X((OUT_W - 720) / 2), .IMG_Y((OUT_H - 576) / 2),
         .H_FP(HFP), .H_SYNC(HSY), .H_BP(HBP), .V_FP(VFP), .V_SYNC(VSY), .V_BP(VBP),
-        .HS_NEG(1'b0), .VS_NEG(1'b0), .PIX_KHZ(PKHZ), .MEM_KHZ(61_875),
+        .HS_NEG(1'b0), .VS_NEG(1'b0), .PIX_KHZ(PKHZ), .MEM_KHZ(SD_FAST ? 60_750 : 61_875),
         .SDRAM_INIT_US(20), .DEF_SRC(2'd0), .DEF_RD(2'd1), .CALIBRATE(1'b0),
         .SCALE(1'b1), .HDMI(1'b1), .FLASH_BOOT_US(20),
         .BOOT_SLOT(8'd1), .BOOT_NEXT(8'd0), .HAS_EVO(1'b0), .HAS_FT(1'b1)
@@ -222,6 +224,12 @@ module vsys_top #(
     wire [2:0]  k_kind = core.g_render.render.walk.x_kind;
     wire        k_fqe  = core.g_render.render.walk.fq_n == 2'd0 && !core.g_render.render.walk.eol_wait;
     always @(posedge clk_mem) begin
+        if (core.g_render.render.exec.p4_v && core.g_render.render.exec.p4_early &&
+            core.g_render.render.exec.fe_adv && core.g_render.render.exec.p4_need &&
+            !(core.g_render.render.exec.p4_tag[9] && core.g_render.render.exec.p4_tag[8:0] == core.g_render.render.exec.p4_wa[20:12])) rc[44] <= rc[44]+1;
+        if (x_iss && core.g_render.render.exec.p2_go && core.g_render.render.exec.j_dual && !core.g_render.render.exec.p2_same) rc[45] <= rc[45]+1;
+        if (x_iss && core.g_render.render.exec.p2_go && core.g_render.render.exec.j_rect_dual) rc[46] <= rc[46]+1;
+        if (x_iss && core.g_render.render.exec.j_rect_dual) rc[47] <= rc[47]+1;
         if (r_run) rc[0] <= rc[0] + 32'd1;
         if (core.g_render.render.start) rc[27] <= rc[27] + 32'd1;
         // брошен повтор (условие R_RUN в ft_render: повтор, хост просит смену листа)
@@ -309,4 +317,15 @@ module vsys_top #(
             if (front != front_q)   n_takes <= n_takes + 32'd1;
         end
     end
+    assign state_overrun=core.g_render.render.snap_overrun;
+    always @(posedge clk_mem) begin
+        if(!rst_n) late_frames<=0;
+        else if(core.g_render.render.rst_q == 1 && core.g_render.render.stale_write_abort && !core.g_render.render.f_redo)
+            late_frames<=late_frames+1;
+    end
+    always @(posedge clk_mem) if(rst_n && core.g_render.render.q_full != (core.g_render.render.q_cnt == 8))
+        $fatal(1,"registered queue-full disagrees with occupancy");
+    always @(posedge clk_sd) if(rst_n && core.g_sd_fast.bridge.cq_w_s != core.g_sd_fast.bridge.cq_r)
+        if(core.g_sd_fast.bridge.head_meta != {core.g_sd_fast.bridge.head[27],core.g_sd_fast.bridge.head[5:3]})
+            $fatal(1,"prefetched SDRAM metadata disagrees with live command");
 endmodule

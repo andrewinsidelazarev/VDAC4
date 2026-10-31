@@ -24,6 +24,7 @@
 //
 module hdmi_tx #(
     parameter bit         HDMI     = 1'b1,
+    parameter bit         SHORT_TMDS = 1'b0, // 1 — кодер с коротким путём (слот 1)
     parameter bit         VS_HIGH  = 1'b1,     // активный уровень VSYNC на входе
     parameter logic [7:0] VIC      = 8'd19,    // 19 — 1280×720p50; 4 — 1280×720p60; 17 — 720×576p50 4:3
     parameter logic [1:0] PIC_AR   = 2'b10     // формат кадра: 1 — 4:3, 2 — 16:9
@@ -95,15 +96,15 @@ module hdmi_tx #(
     localparam logic [9:0] GB_1   = 10'b0100110011;   // канал 1 видео; каналы 1 и 2 островка
 
     generate if (!HDMI) begin : g_dvi
-        tmds_encoder enc_blue (
+        tmds_encoder #(.SHORT_PATH(SHORT_TMDS)) enc_blue (
             .pixel_clk(pixel_clk), .reset_n(reset_n), .video_data(b),
             .control_data({vs, hs}), .data_enable(de), .tmds(tmds_blue)
         );
-        tmds_encoder enc_green (
+        tmds_encoder #(.SHORT_PATH(SHORT_TMDS)) enc_green (
             .pixel_clk(pixel_clk), .reset_n(reset_n), .video_data(g),
             .control_data(2'b00), .data_enable(de), .tmds(tmds_green)
         );
-        tmds_encoder enc_red (
+        tmds_encoder #(.SHORT_PATH(SHORT_TMDS)) enc_red (
             .pixel_clk(pixel_clk), .reset_n(reset_n), .video_data(r),
             .control_data(2'b00), .data_enable(de), .tmds(tmds_red)
         );
@@ -162,15 +163,15 @@ module hdmi_tx #(
 
         // Кодеры TMDS: видео и управляющие символы; CTL каналов 1 и 2 — в преамбулах
         wire [9:0] e_blue, e_green, e_red;
-        tmds_encoder enc_blue (
+        tmds_encoder #(.SHORT_PATH(SHORT_TMDS)) enc_blue (
             .pixel_clk(pixel_clk), .reset_n(reset_n), .video_data(db),
             .control_data({dvs, dhs}), .data_enable(dde), .tmds(e_blue)
         );
-        tmds_encoder enc_green (
+        tmds_encoder #(.SHORT_PATH(SHORT_TMDS)) enc_green (
             .pixel_clk(pixel_clk), .reset_n(reset_n), .video_data(dg),
             .control_data((v_pre || d_pre) ? 2'b01 : 2'b00), .data_enable(dde), .tmds(e_green)
         );
-        tmds_encoder enc_red (
+        tmds_encoder #(.SHORT_PATH(SHORT_TMDS)) enc_red (
             .pixel_clk(pixel_clk), .reset_n(reset_n), .video_data(dr),
             .control_data(d_pre ? 2'b01 : 2'b00), .data_enable(dde), .tmds(e_red)
         );

@@ -6,7 +6,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 | Ядро | Где хранится | Версия | Файлы |
 |---|---|---|---|
 | **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.32 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
-| **FT812** — видеоускоритель для программ Evo, вывод 1366×768 | flash Tang, слот 1 | 1.41 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
+| **FT812** — видеоускоритель для программ Evo, вывод 1366×768 | flash Tang, слот 1 | 1.45 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
 | **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Evo, `/WC/ESP` | 1.43, слой ESP 0.9 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`VIDEO/esp/dist/VIDEO.ELF`](VIDEO/esp/dist/VIDEO.ELF) |
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.9 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
@@ -98,6 +98,12 @@ Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит �
 Джойстик Kempston работает в Next и NES. Мышь Kempston работает в Next.
 
 ## Проверено на плате
+
+2026-10-31, BL616 35, TS-Config 1.32, видео 1.43:
+- **FT812 1.45**: рендер быстрее (R-Type L4, тяжёлый кадр: 24,1 → 20,6 мс на стенде), смена листа и `INT_SWAP` по событию
+  кадра: игра не замедляется, не успевший кадр не показывается.
+- **Выводы TMDS `DRIVE=4` в TS-Config, FT812 и видео**: с 8 экран терял сигнал HDMI в Zuma Deluxe на ядре FT812.
+  На плате всё показывает; долгая работа и другие экраны ещё проверяются.
 
 2026-10-31, ESP 0.1.105-heat2, BL616 35:
 - **Amiga 0.4-debug5**: Test Kit 1.21 загружается с DF0 (108 секторов), F1 Memory — 3 круга без ошибок,

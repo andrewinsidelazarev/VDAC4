@@ -6,6 +6,8 @@ set boot_slot 1
 if {![info exists core_kind]} { set core_kind ft }
 # Общее ядро 1.11 в слоте 1 разводилось только с размещением 0
 if {![info exists place_option]} { set place_option [expr {$core_kind eq "both" ? 0 : 2}] }
+# SLOT1: вариант рендера с ранним чтением кэша и парами проходит timing с route 0.
+if {![info exists route_option] && $core_kind eq "ft"} { set route_option 0 }
 # Ядро FT812 грузится по первому запуску чипа программой Evo, и та ждёт FT812 недолго (просмотрщик
 # WC — сразу «VDAC2 не найден»): MCLK загрузки 41,667 МГц — ~0,2 с вместо ~2,9 с (1.18)
 if {![info exists loading_rate] && $core_kind eq "ft"} { set loading_rate "41.667" }

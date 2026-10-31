@@ -19,7 +19,7 @@ create_clock -name cp_sck -period 33.333 -waveform {0 16.667} [get_ports {cp_sck
 create_generated_clock -name clk_serial -source [get_ports {clk27}] -multiply_by 55 -divide_by 4 [get_pins {pll_xtal/pll/CLKOUT}]
 create_generated_clock -name clk_mem -source [get_pins {pll_xtal/pll/CLKOUT}] -divide_by 6 [get_pins {pll_xtal/pll/CLKOUTD}]
 create_generated_clock -name pixel_clk -source [get_pins {pll_xtal/pll/CLKOUT}] -divide_by 5 [get_pins {clkdiv/divider/CLKOUT}]
-create_generated_clock -name clk_cap -source [get_ports {pclk_in}] -multiply_by 2 [get_pins {pll_capture/pll/CLKOUTP}]
+create_generated_clock -name clk_cap -source [get_ports {pclk_in}] -multiply_by 2 [get_pins {g_pll_cap.pll_capture/pll/CLKOUTP}]
 
 # Домены связаны только через асинхронный FIFO, двухклоковый строчный буфер и
 # синхронизированные переключатели — статический анализ между ними не нужен.

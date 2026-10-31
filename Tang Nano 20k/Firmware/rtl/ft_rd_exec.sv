@@ -49,6 +49,9 @@
 module ft_rd_exec #(
     parameter int TW_LOG = 7,               // плитка: 2^TW_LOG × 2^TH_LOG точек (1024)
     parameter int TH_LOG = 3,
+    parameter bit SHORT_DECODE = 1'b0,      // слот 1: формат палитры разбирается при приёме задания
+    parameter bit EARLY_RESTART = 1'b0,      // SLOT1: читать уже пришедшие слова строки кэша
+    parameter bit PAIR_EXT = 1'b0,           // SLOT1: пары через границу слова и внутри RECTS
     parameter int FS_N   = 4,               // заполнений кэша в полёте (степень двойки, ≥ 2)
     parameter int PF_N   = 1                // предвыборка вперёд по строкам: L + 1 … L + PF_N (1…3;
                                             // стенд vsys, 1.39: 2 — HMM2 −4 %, R-Type +4 %: лишние
@@ -281,6 +284,7 @@ module ft_rd_exec #(
     reg  [35:0] mk;
     reg  [22:0] m_sl;                   // stride·высота раскладки
     reg  [29:0] m_cell;
+    reg  [23:0] n_pair_end;
     reg  signed [32:0] n_sx, n_sy;
     reg  [13:0] n_dy;                   // RECT: расстояние строки до ядра; POINT: |dy|
     reg         n_dy0;                  // POINT: dy = 0
@@ -387,7 +391,11 @@ module ft_rd_exec #(
     reg         p5_kind_bmp, p5_kind_clr;
 
     wire        k_bmp   = j_kind == J_BMP;
-    wire        k_pal   = j_fmt == 5'd14 || j_fmt == 5'd15 || j_fmt == 5'd16;   // PALETTED565/4444/8
+    reg [11:0] j_pal_hi1;
+    reg [31:0] p4_ramp_w;
+    reg         j_is_pal, j_bmp_pal;
+    wire        k_pal   = SHORT_DECODE ? j_is_pal : (j_fmt == 5'd14 || j_fmt == 5'd15 || j_fmt == 5'd16);   // PALETTED565/4444/8
+    wire        k_bmp_pal = SHORT_DECODE ? j_bmp_pal : (k_bmp && k_pal);
     wire        k_shape = j_kind == J_RECT || j_kind == J_POINT;
 
     // --- кэш текселей: 512 строк по 8 слов --------------------------------------------------------
@@ -411,7 +419,8 @@ module ft_rd_exec #(
         cidx = ln[8:0] ^ {1'b0, ln[16:9]};
     endfunction
     wire [8:0]  p4_idx = cidx(p4_wa[20:3]);
-    wire        c_hit  = p4_tag[9] && p4_tag[8:0] == p4_wa[20:12];
+    reg         p4_early;
+    wire        c_hit  = (p4_tag[9] && p4_tag[8:0] == p4_wa[20:12]) || (EARLY_RESTART && p4_early);
     wire        p4_need = p4_v && k_bmp && p4_in && !p4_oob && !p4_ramp;
     wire        p4_miss = p4_need && !c_hit;
 
@@ -423,10 +432,10 @@ module ft_rd_exec #(
     wire        q5_hit  = q5_tag[11] && q5_tag[10:0] == q5_pw[19:9];
     wire [11:0] q5_tag2 = pl_tag[q5_pw2[8:3]];
     wire        q5_hit2 = q5_tag2[11] && q5_tag2[10:0] == q5_pw2[19:9];
-    wire        q6_miss2 = q6_v && q6_p2 && k_bmp && k_pal && q6_inok && !q6_hit2;
-    wire        q6_miss = (q6_v && k_bmp && k_pal && q6_inok && !q6_hit) || q6_miss2;
+    wire        q6_miss2 = q6_v && q6_p2 && k_bmp_pal && q6_inok && !q6_hit2;
+    wire        q6_miss = (q6_v && k_bmp_pal && q6_inok && !q6_hit) || q6_miss2;
     // строка палитры заказа: первой точки, если у неё промах, иначе второй
-    wire [16:0] q6_pl  = (q6_v && k_bmp && k_pal && q6_inok && !q6_hit) ? q6_pw[19:3] : q6_pw2[19:3];
+    wire [16:0] q6_pl  = (q6_v && k_bmp_pal && q6_inok && !q6_hit) ? q6_pw[19:3] : q6_pw2[19:3];
 
     // Заполнение: пакет из SDRAM. Мест FS_N (кольцо): заявки подаются по порядку мест, слова
     // приходят в том же порядке (мост SDRAM, своя очередь текселей), так что слова — старшему
@@ -469,8 +478,10 @@ module ft_rd_exec #(
     function automatic logic f_busy(input logic [17:0] ln, input logic pal);
         f_busy = 1'b0;
         for (int k = 0; k < FS_N; k++) begin
-            if (fs_v[k] && fs_pal[k] == pal && fs_line[k] == ln) f_busy = 1'b1;
-            if (fs_v[k] && !fs_pal[k] && !pal && cidx(fs_line[k]) == cidx(ln)) f_busy = 1'b1;
+            // У текселей совпадение полного адреса уже покрыто совпадением индекса:
+            // второй 18-битный компаратор здесь избыточен.
+            if (fs_v[k] && fs_pal[k] == pal &&
+                (pal ? fs_line[k] == ln : cidx(fs_line[k]) == cidx(ln))) f_busy = 1'b1;
         end
         if (rc_n != 2'd0 && rc_line == ln) f_busy = 1'b1;
     endfunction
@@ -514,6 +525,43 @@ module ft_rd_exec #(
     wire        tag_we  = dn_v && !dn_pal;
     wire        pl_tag_we = dn_v && dn_pal;
 
+    wire        fe_adv;
+    reg         t_we;
+    reg  [8:0]  t_wa;
+    reg  [9:0]  t_wd;
+    // Ответы заполнения идут по порядку: достаточно маски одной принимаемой строки.
+    // Маска обновляется при записи, а p4_early — вместе с синхронным чтением BSRAM.
+    // Поэтому слово доступно только после записи, без зависимости от read-during-write.
+    reg         er_v;
+    reg  [17:0] er_line;
+    reg  [7:0]  er_words;
+    function automatic logic early_word_ready(input logic [20:0] a, input logic [1:0] bo,
+                                               input logic [2:0] d, input logic pair_on);
+        logic [2:0] bo2;
+        bo2 = {1'b0, bo} + d;
+        early_word_ready = er_v && er_line == a[20:3] && er_words[a[2:0]] &&
+                           (!(pair_on && bo2[2]) || (a[2:0] != 3'd7 && er_words[a[2:0] + 3'd1]));
+    endfunction
+    wire er_p3 = early_word_ready(p3_wa, p3_a[1:0], p3_d2, p3_p2);
+    wire er_p4 = early_word_ready(p4_wa, p4_a[1:0], p4_d2, p4_p2);
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            er_v <= 1'b0; er_line <= '0; er_words <= '0; p4_early <= 1'b0;
+        end else if (abort || clr_on) begin
+            er_v <= 1'b0; er_words <= '0; p4_early <= 1'b0;
+        end else if (EARLY_RESTART) begin
+            // Длинное сравнение адресов — до выбора по fe_adv.
+            p4_early <= fe_adv ? er_p3 : er_p4;
+            if (t_we && !t_wd[9] && t_wa == cidx(er_line)) er_v <= 1'b0;
+            if (c_we) begin
+                er_v <= 1'b1;
+                er_line <= f_dline;
+                if (tx_rd_idx == 3'd0) er_words <= 8'b1;
+                else er_words[tx_rd_idx] <= 1'b1;
+            end
+        end
+    end
+
     // --- корень полосы сглаживания -------------------------------------------------------------
     reg         sq_run, sq_done;
     reg  [4:0]  sq_i;
@@ -535,11 +583,11 @@ module ft_rd_exec #(
     wire        bp_now = j_bil && (j_k == 2'd0 ? bq_t : j_k == 2'd2 && bq_b);
     wire        b_last = !j_bil || j_k == 2'd3 || (j_k == 2'd2 && bq_b);   // последний проход — шаг j_x
     reg  sp2_q;
-    wire sp_need_w = p5_v && p5_p2 && !j_bil && !(p5_t2[31:24] == 8'd0 || p5_t2[31:24] == 8'd255) && !sp2_q;
+    wire sp_need_w = !PAIR_EXT && p5_v && p5_p2 && !j_bil && !(p5_t2[31:24] == 8'd0 || p5_t2[31:24] == 8'd255) && !sp2_q;
     // фрагмент на выходе: у BILINEAR — только последний проход точки
     wire p5_emit = p5_v && (!j_bil || p5_k == 2'd3 || (p5_k == 2'd2 && p5_p2));
     wire p4_stall = p4_miss || (p4_band && !sq_done);
-    wire fe_adv   = !p4_stall && !q6_miss && !(p5_emit && !f_ready) && !sp_need_w;
+    assign fe_adv = !p4_stall && !q6_miss && !(p5_emit && !f_ready) && !sp_need_w;
     wire front_empty = !p0_v && !p1_v && !p2_v && !p3_v && !p4_v && !q5_v && !q6_v && !p5_v;
 
     // чтение кэша: адрес — стадия P3, при остановке — P4 (данные для неё после заполнения);
@@ -551,9 +599,6 @@ module ft_rd_exec #(
     // один порт записи меток: очистка, готовая строка, сброс строки перед заполнением
     // (пока пишется, чтение конвейера по её индексу — промах, а не смесь старых и новых слов;
     // сброс опережает первое слово заполнения не меньше чем на такт)
-    reg         t_we;
-    reg  [8:0]  t_wa;
-    reg  [9:0]  t_wd;
     // Адрес и данные — только от регистров (и когда записи нет): предвыборка заказывается
     // только при pf_q, промах — только без него (f_ok_any), так что выход меток (промах P4)
     // идёт лишь в разрешение записи
@@ -605,6 +650,17 @@ module ft_rd_exec #(
     // по младшим разрядам начала строки base + ty·stride и столбца). Тогда тексель × 255 и
     // смешение с альфой 255 или 0 дают сам тексель или прежнюю точку — без умножителей.
     reg         j_dual;
+    reg         j_rect_dual;
+    reg  [10:0] j_rect_lo, j_rect_hi;
+    reg         j_pair_ram, j_pair_wrap;
+    reg         p2_cache_ok;
+    wire        p2_ok1, p2_ok2;
+    reg         bq_valid;
+    reg  [3:0]  bq_row;
+    wire c_pair_ok = c_a == 8'd255 && cx[O_BSRC +: 3] == 3'd2 && cx[O_BDST +: 3] == 3'd4 &&
+                     cx[O_AF +: 3] == 3'd7 && cx[O_SF +: 3] == 3'd7 &&
+                     ((cx[O_SFAIL +: 3] == 3'd1 && cx[O_SPASS +: 3] == 3'd1) || cx[O_SWM +: 8] == 8'd0) &&
+                     cx[O_CM +: 4] == 4'hF;
     reg  signed [17:0] j_a2;            // 2·A
     // Решение о паре — из регистров (короткий путь в шаг j_x/j_sx того же такта). При D = 0 строка
     // текстуры у всей строки задания одна: «y в раскладке» и выравнивание её начала (p2_yin, p2_rb)
@@ -647,10 +703,11 @@ module ft_rd_exec #(
             n_lo <= '0; n_hi <= '0; n_cylo <= '0; n_cyhi <= '0; n_cyio <= '0;
             n_first <= '0; n_last <= '0;
             j_kind <= '0; j_x <= '0; j_xe <= '0; j_sx <= '0; j_sy <= '0; j_a <= '0; j_d <= '0;
-            j_k <= '0; j_bil <= 1'b0; j_bilp <= 1'b0;
+            j_k <= '0; j_bil <= 1'b0; j_bilp <= 1'b0; j_rect_dual <= 1'b0;
+            j_rect_lo <= '0; j_rect_hi <= '0; j_pair_ram <= 1'b0; j_pair_wrap <= 1'b0; n_pair_end <= '0; p2_cache_ok <= 1'b0;
             bq_t <= 1'b0; bq_b <= 1'b0;
             p2_first <= 1'b1; p2_yin <= 1'b0; p2_xin <= 1'b0; p2_lt <= 1'b0; p2_rb <= '0;
-            j_base <= '0; j_stride <= '0; j_lw <= '0; j_lh <= '0; j_fmt <= '0; j_dfmt <= '0; j_p8 <= 1'b0;
+            j_base <= '0; j_stride <= '0; j_lw <= '0; j_lh <= '0; j_fmt <= '0; j_is_pal <= 1'b0; j_bmp_pal <= 1'b0; j_dfmt <= '0; j_p8 <= 1'b0;
             j_x0 <= '0; j_x1 <= '0; j_r <= '0; j_r8 <= '0; j_o <= '0; j_dy2 <= '0;
             j_r8sq <= '0; j_osq <= '0; j_kq <= '0; j_kok <= 1'b0; j_rz <= 1'b0;
             j_corner <= 1'b0; j_dy0 <= 1'b0; j_cy <= '0; j_s <= '0; j_rgb <= '0; j_ca <= '0;
@@ -672,6 +729,7 @@ module ft_rd_exec #(
                     // проверки следующей точки (для пары) и строки — на первой точке строки
                     p2_xin <= p2_go ? xk2[1] : xk1[1];
                     p2_lt  <= p2_go ? xk2[0] : xk1[0];
+                    p2_cache_ok <= bq_valid && bq_row == j_row && (p2_go ? p2_ok2 : p2_ok1);
                     if (p2_first) begin
                         p2_first <= 1'b0;
                         p2_yin   <= i_yin;
@@ -682,6 +740,7 @@ module ft_rd_exec #(
             // строка выдана: следующая строка плитки — тот же пролёт, тексель начала + (B, E)
             if (j_run && (j_x >= j_xe || (issue && b_last && (p2_go ? j_e2 : j_e1)))) begin
                 p2_first <= 1'b1;
+                p2_cache_ok <= 1'b0;
                 bq_t     <= 1'b0;
                 bq_b     <= 1'b0;
                 if ({1'b0, j_row} + 5'd1 < j_rend) begin
@@ -825,6 +884,13 @@ module ft_rd_exec #(
             end
             X_SET1: begin : set1
                 logic signed [20:0] rel;
+                // Концы после отсечения защёлкнуты в X_SET0C, а эти признаки нужны только в
+                // X_SET3/X_XFER: считая их здесь, сравнение после отсечения уходит с длинного пути.
+                if (SHORT_DECODE) begin
+                    n_tfull <= n_xs == {1'b0, tx0} && n_xe == t_x1;
+                    n_skip <= it_r0 >= it_r1 || n_xs >= n_xe ||
+                              (n_kind == J_CLR && !(clr_mask[2] || clr_mask[1]));
+                end
                 rel   = $signed({6'd0, n_xs, 4'd0}) - $signed({it[22], it[22:3]});
                 n_rel <= rel[17:0];
                 n_cy  <= axis_cov2(n_cyio, n_s);
@@ -877,6 +943,9 @@ module ft_rd_exec #(
                          (it[94] || (tx >= 0 && tx < $signed({10'd0, lw}))) &&
                          (it[95] || (ty >= 0 && ty < $signed({14'd0, lh})));
                 sp_m <= tyw * stride;
+                // Вся раскладка должна лежать в RAM_G: в ПЗУ есть синтетическая рампа,
+                // для которой соседнее слово кэша не запрашивается.
+                n_pair_end <= {2'b0, it[64:43]} + {2'b0, m_cell[21:0]} + {1'b0, m_sl};
                 case (fmt)
                     5'd1:             sp_col <= {3'd0, txw[14:3]};
                     5'd17:            sp_col <= {2'd0, txw[13:2]};
@@ -1023,9 +1092,11 @@ module ft_rd_exec #(
         cl = clip(n_first, n_last, scx_r, scend_r, 11'h7FF);   // ширина кадра — уже в scend_r
         n_xs   <= cl[21:11];
         n_xe   <= cl[10:0];
+        if (!SHORT_DECODE) begin
         n_tfull <= cl[21:11] == {1'b0, tx0} && cl[10:0] == t_x1;
         n_skip <= it_r0 >= it_r1 || cl[21:11] >= cl[10:0] ||
                   (n_kind == J_CLR && !(clr_mask[2] || clr_mask[1]));
+        end
     endtask
 
     // ---- CLEAR без записи: значение по умолчанию строки ----
@@ -1050,6 +1121,9 @@ module ft_rd_exec #(
     endtask
 
     // ---- перенос задания ----
+    function automatic logic [10:0] clamp_pair_x(input logic signed [20:0] x);
+        clamp_pair_x = x < 0 ? 11'd0 : x > 21'sd1024 ? 11'd1024 : x[10:0];
+    endfunction
     task automatic transfer();
         logic [4:0] fmt;
         logic [11:0] stride;
@@ -1087,18 +1161,26 @@ module ft_rd_exec #(
         bq_t     <= 1'b0;
         bq_b     <= 1'b0;
         p2_first <= 1'b1;
+        p2_cache_ok <= 1'b0;
         j_dual   <= n_kind == J_BMP && !it[93] && c_td == 17'sd0 && c_ta >= 17'sd0 && c_ta <= 17'sd256 &&
                     (fmt == 5'd0 || (fmt >= 5'd3 && fmt <= 5'd7) || (fmt >= 5'd14 && fmt <= 5'd16)) &&
-                    c_rgb == 24'hFFFFFF && c_a == 8'd255 && cx[O_BSRC +: 3] == 3'd2 && cx[O_BDST +: 3] == 3'd4 &&
-                    cx[O_AF +: 3] == 3'd7 && cx[O_SF +: 3] == 3'd7 &&
-                    ((cx[O_SFAIL +: 3] == 3'd1 && cx[O_SPASS +: 3] == 3'd1) || cx[O_SWM +: 8] == 8'd0) &&
-                    cx[O_CM +: 4] == 4'hF;
+                    c_rgb == 24'hFFFFFF && c_pair_ok;
+        j_rect_dual <= PAIR_EXT && n_kind == J_RECT && c_pair_ok && it[94:83] >= 12'd16 && !n_corner && n_cy == 9'd256;
+        // Обе точки полностью внутри: x*16 >= left-r+8, (x+1)*16 <= right+r-8.
+        // Границы считаются один раз при подготовке, не в критическом шаге j_x.
+        j_rect_lo <= clamp_pair_x((n_lo + 21'sd31) >>> 4);
+        j_rect_hi <= clamp_pair_x(((n_hi - 21'sd31) >>> 4) + 21'sd1);
+        j_pair_ram <= ramg_3mb || n_pair_end <= 24'h200000;
+        // REPEAT с неполной битовой маской может перескочить назад до конца строки.
+        j_pair_wrap <= !it[94] || (stride != 12'd0 && (stride & (stride - 12'd1)) == 12'd0);
         j_d      <= c_td;
         j_b      <= c_tb;
         j_e      <= c_te;
         j_base   <= it[64:43] + m_cell[21:0];
         j_stride <= stride;
         j_fmt    <= fmt;
+        j_is_pal <= fmt == 5'd14 || fmt == 5'd15 || fmt == 5'd16;
+        j_bmp_pal <= n_kind == J_BMP && (fmt == 5'd14 || fmt == 5'd15 || fmt == 5'd16);
         j_dfmt   <= fmt == 5'd14 ? 5'd7 : (fmt == 5'd15 ? 5'd6 : fmt);
         j_p8     <= fmt == 5'd16;
         j_lh     <= it[92:82];
@@ -1113,6 +1195,7 @@ module ft_rd_exec #(
         j_wy     <= it[95];
         j_lhm    <= it[92:82] - 11'd1;
         j_pal    <= cx[O_PAL +: 22];
+        j_pal_hi1 <= cx[O_PAL+10 +: 12] + 12'd1;
         case (fmt)
             5'd1:              j_lwm <= {stride, 3'b000} - 15'd1;
             5'd17:             j_lwm <= {1'b0, stride, 2'b00} - 15'd1;
@@ -1264,6 +1347,9 @@ module ft_rd_exec #(
     wire [1:0]  p2_tx  = j_wx ? (j_sx[9:8] & j_lwm[1:0]) : j_sx[9:8];
     wire [1:0]  p2_b0  = p2_rb + (i_b16 ? {p2_tx[0], 1'b0} : p2_tx);
     wire        p2_same = i_b16 ? (p2_b0 <= 2'd2 && (!i_inc || p2_b0 == 2'd0)) : (!i_inc || p2_b0 != 2'd3);
+    // bq_rt уже вычисляется штатным умножителем адреса первой точки строки.
+    // До её P1, а также у границы строки кэша остаётся прежняя проверка одного слова.
+    wire p2_cross = PAIR_EXT && j_pair_ram && j_pair_wrap && p2_cache_ok;
     // следующая точка: шаг +A или +2A — суммы заранее, x-проверка для обеих
     assign s_a1 = j_sx + {{16{j_a[16]}}, j_a};
     assign s_a2 = j_sx + {{15{j_a2[17]}}, j_a2};
@@ -1279,6 +1365,11 @@ module ft_rd_exec #(
     wire [4:0]  bq_tx = i_b16 ? {k1_t[3:0], 1'b0} : k1_t[4:0];
     wire [4:0]  bq_at = bq_rt + bq_tx;
     wire [4:0]  bq_ab = bq_rb + bq_tx;
+    // Как xk1/xk2: проверить оба возможных следующих положения заранее.
+    // В шаге j_x остаётся флаг, без выбора формата и сложения адреса текстуры.
+    wire [4:0] p2_at2 = bq_rt + (i_b16 ? {k2_t[3:0], 1'b0} : k2_t[4:0]);
+    assign p2_ok1 = bq_at[4:2] != 3'd7 && (!i_b16 || !bq_at[0]);
+    assign p2_ok2 = p2_at2[4:2] != 3'd7 && (!i_b16 || !p2_at2[0]);
     assign bq_okt = (bq_at[4:2] != 3'd7 || (i_b16 ? bq_at[1:0] == 2'd0 : bq_at[1:0] != 2'd3)) && !(i_b16 && bq_at[0]);
     assign bq_okb = (bq_ab[4:2] != 3'd7 || (i_b16 ? bq_ab[1:0] == 2'd0 : bq_ab[1:0] != 2'd3)) && !(i_b16 && bq_ab[0]);
     assign i_yin = (j_wy || (i_ty >= 0 && i_ty < $signed({14'd0, j_lh}))) && j_lw != 15'd0 && j_lh != 11'd0;
@@ -1289,8 +1380,9 @@ module ft_rd_exec #(
 `ifdef NO_DUAL
     always_comb p2_go = 1'b0;                                      // проверка: пары выключены
 `else
-    always_comb p2_go = j_dual && !p2_first && !j_x[0] && !j_e1 && p2_xin && p2_yin && p2_same &&
-                        (!i_inc || p2_lt);
+    always_comb p2_go = !j_x[0] && !j_e1 &&
+                       ((j_dual && !p2_first && p2_xin && p2_yin && (p2_same || p2_cross) && (!i_inc || p2_lt)) ||
+                        (j_rect_dual && j_x >= j_rect_lo && j_x < j_rect_hi));
 `endif
     wire signed [20:0] i_px = $signed({7'd0, j_x[9:0], 4'd0});
     wire        i_left  = i_px < j_x0;
@@ -1311,7 +1403,7 @@ module ft_rd_exec #(
         if (a < 22'h200065 || a >= 22'h200265) ramp_byte = 8'd0;
         else ramp_byte = d < 23'd128 ? 8'd0 : (d >= 23'd383 ? 8'd255 : 8'(d - 23'd128));
     endfunction
-    wire [31:0] ramp_w = {ramp_byte({p4_a[21:2], 2'd3}), ramp_byte({p4_a[21:2], 2'd2}),
+    wire [31:0] ramp_w = SHORT_DECODE ? p4_ramp_w : {ramp_byte({p4_a[21:2], 2'd3}), ramp_byte({p4_a[21:2], 2'd2}),
                           ramp_byte({p4_a[21:2], 2'd1}), ramp_byte({p4_a[21:2], 2'd0})};
     // слово P4 — из своей половины кэша; у следующего нужна лишь младшая половина: второй
     // тексель пары BILINEAR за границей слова начинается с его байта 0
@@ -1490,7 +1582,7 @@ module ft_rd_exec #(
     // Пара на P5: вторая точка с частичной альфой идёт следующим тактом отдельно (sp2), тогда
     // конвейер стоит такт; её цвет — сам тексель (× 255)
     wire        sp2     = sp2_q;
-    wire        p5_s2   = p5_t2[31:24] == 8'd0 || p5_t2[31:24] == 8'd255;
+    wire        p5_s2   = PAIR_EXT || p5_t2[31:24] == 8'd0 || p5_t2[31:24] == 8'd255;
     wire        sp_need = sp_need_w;                                  // первая уходит, вторая — потом
     always_ff @(posedge clk or negedge rst_n)
         if (!rst_n) sp2_q <= 1'b0;
@@ -1500,7 +1592,7 @@ module ft_rd_exec #(
     assign f_v    = p5_emit;
     assign f_x    = {p5_r[TH_LOG-1:0], p5_x[TW_LOG-1:1], p5_x[0] | sp2};
     assign f_p2   = p5_v && p5_p2 && !j_bil && p5_s2 && !sp2;
-    assign f_w2   = p5_t2[31:24] == 8'd255;
+    assign f_w2   = PAIR_EXT ? p5_t2[31:24] != 8'd0 : p5_t2[31:24] == 8'd255;
     assign f_rgba2 = p5_t2;
     assign f_slot = j_slot;
     assign f_clr  = p5_kind_clr;
@@ -1510,6 +1602,15 @@ module ft_rd_exec #(
     assign f_raw  = !sp2 && !p5_kind_clr && p5_kind_bmp;
     assign f_rgba = f_raw ? {p5_tx, j_ca, j_rgb} :
                     {32'd0, sp2 ? p5_t2 : p5_kind_clr ? {j_ca, j_rgb} : {cov_m[19:12], j_rgb}};
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin bq_valid <= 1'b0; bq_row <= '0; end
+        else if (abort || (!j_run && front_empty)) bq_valid <= 1'b0;
+        else if (fe_adv && p1_v && p1_bt) begin
+            bq_valid <= 1'b1;
+            bq_row <= p1_r;
+        end
+    end
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -1553,7 +1654,7 @@ module ft_rd_exec #(
             p0_p2  <= issue && (p2_go || bp_now);
             p0_d2  <= bp_now ? (i_b16 ? 3'sd2 : 3'sd1) : 3'(i_dc);
             p0_w2  <= bp_now ? b_w2 : 9'd0;
-            p0_bt  <= issue && j_bil && p2_first && j_k == 2'd0;
+            p0_bt  <= issue && (j_bil || (PAIR_EXT && j_dual)) && p2_first && j_k == 2'd0;
             p0_x   <= j_x[9:0];
             p0_r   <= j_row;
             p0_in  <= j_bil ? b_in : i_in;
@@ -1661,6 +1762,8 @@ module ft_rd_exec #(
             p4_in   <= p3_in;
             p4_sub  <= p3_sub;
             p4_a    <= p3_a;
+            p4_ramp_w <= {ramp_byte({p3_a[21:2],2'd3}), ramp_byte({p3_a[21:2],2'd2}),
+                          ramp_byte({p3_a[21:2],2'd1}), ramp_byte({p3_a[21:2],2'd0})};
             p4_oob  <= p3_oob;
             p4_ramp <= p3_ramp;
             p4_wa   <= p3_wa;
@@ -1681,14 +1784,26 @@ module ft_rd_exec #(
             q5_raw2 <= t_raw2;
             begin : q5_pal2
                 logic [21:0] pa;
-                pa = j_pal + (j_fmt == 5'd16 ? {12'd0, t_raw2[7:0], 2'b00} : {13'd0, t_raw2[7:0], 1'b0});
+                if(SHORT_DECODE) begin
+                    logic [10:0] lo;
+                    lo = {1'b0,j_pal[9:0]} + (j_p8 ? {1'b0,t_raw2[7:0],2'b00} : {2'b0,t_raw2[7:0],1'b0});
+                    pa = {lo[10] ? j_pal_hi1 : j_pal[21:10],lo[9:0]};
+                end else begin
+                    pa = j_pal + (j_fmt == 5'd16 ? {12'd0, t_raw2[7:0], 2'b00} : {13'd0, t_raw2[7:0], 1'b0});
+                end
                 q5_pw2 <= pa[21:2];
                 q5_ph2 <= pa[1];
             end
             q5_inok <= p4_in && !p4_oob;
             begin : q5_pal
                 logic [21:0] pa;
-                pa = j_pal + (j_fmt == 5'd16 ? {12'd0, t_raw[7:0], 2'b00} : {13'd0, t_raw[7:0], 1'b0});
+                if(SHORT_DECODE) begin
+                    logic [10:0] lo;
+                    lo = {1'b0,j_pal[9:0]} + (j_p8 ? {1'b0,tbyte,2'b00} : {2'b0,tbyte,1'b0});
+                    pa = {lo[10] ? j_pal_hi1 : j_pal[21:10],lo[9:0]};
+                end else begin
+                    pa = j_pal + (j_fmt == 5'd16 ? {12'd0, t_raw[7:0], 2'b00} : {13'd0, t_raw[7:0], 1'b0});
+                end
                 q5_pw <= pa[21:2];
                 q5_ph <= pa[1];
             end
@@ -1718,7 +1833,7 @@ module ft_rd_exec #(
             p5_w        <= q6_w;
             p5_w2       <= q6_w2;
             p5_k        <= q6_k;
-            p5_t2       <= {t_a2, t_r2, t_g2, t_b2};
+            p5_t2       <= PAIR_EXT && !k_bmp ? {j_ca, j_rgb} : {t_a2, t_r2, t_g2, t_b2};
             p5_p2       <= q6_p2;
             p5_kind_bmp <= k_bmp;
             p5_kind_clr <= j_kind == J_CLR;
