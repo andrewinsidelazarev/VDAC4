@@ -140,6 +140,8 @@ IO_PORT "pa_en" IO_TYPE=LVCMOS33 DRIVE=8 PULL_MODE=DOWN;
 
 // ---------------------------------------------------------------------------
 // HDMI: дифференциальные пары TMDS (эмулированный LVDS: ELVDS_OBUF + LVCMOS33D)
+// DRIVE=8 здесь — только исходное значение: ядра TS-Config, FT812 и видео собираются с DRIVE=4
+// (scripts/gowin_fb.tcl; почему — docs/a3-fpga-framebuffer.md, «Сила выводов TMDS»)
 // ---------------------------------------------------------------------------
 IO_LOC  "tmds_clk_p" 33,34;
 IO_PORT "tmds_clk_p" IO_TYPE=LVCMOS33D PULL_MODE=NONE DRIVE=8;
