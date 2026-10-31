@@ -13,6 +13,7 @@ module amiga_debug(
     input wire [31:0] trace_start,
     output wire [31:0] trace_out [0:3]
 );
+`ifdef AMIGA_DEBUG
     // Synchronous read/write arrays infer block RAM; no reset of the RAM contents.
     reg [31:0] history_address [0:511], history_data [0:511], history_status [0:511];
     reg [31:0] history_address_q, history_data_q, history_status_q;
@@ -64,4 +65,9 @@ module amiga_debug(
     assign words[6]={8'b0,chip_address,1'b0};
     assign words[7]={chip_read,chip_write};
     for (genvar j=0;j<16;j=j+1) assign words[8+j]=trace_words[j];
+`else
+    // Обычная сборка: трасса CPU занимает блочную память и логику, включается define AMIGA_DEBUG.
+    for (genvar j=0;j<24;j=j+1) assign words[j]=0;
+    for (genvar j=0;j<4;j=j+1) assign trace_out[j]=0;
+`endif
 endmodule

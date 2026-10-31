@@ -6,7 +6,7 @@
 `define ENABLE_CACHE
 `define CHIPRAM_CACHE
 `define DENISE_EBR
-`define DISABLE_IDE
+`define ENABLE_RTC
 `define DISABLE_ROM_LOADER
 module amiga_vdac4
 (
@@ -123,7 +123,8 @@ wire [5:0] leds; wire fdd_step_n;
 wire [1:0] osd_cpu=3, osd_chipmem=3, osd_slowmem=0, osd_fastmem=2;
 wire [2:0] osd_chipset=6, osd_turbo=2, osd_volume=4;
 wire [1:0] osd_floppy_drives=0, osd_video_filter=0, osd_video_scanlines=0, osd_video_screen=0;
-wire osd_video_mode=0, osd_floppy_wrprot=1, osd_floppy_turbo=0, osd_ide_enable=0, osd_stereo_mix=0;
+wire osd_video_mode=0, osd_floppy_turbo=0, osd_ide_enable=1, osd_stereo_mix=0;
+wire osd_floppy_wrprot=floppy_wrprot;
 wire hs_n, vs_n; wire [7:0] red, green, blue;
 wire [2:0] mouse_buttons;
 wire kbd_mouse_level, kbd_reset, keyboard_ack;
@@ -149,7 +150,12 @@ wire [31:0] debug_words [0:35];
 wire [31:0] cpu_debug [0:23];
 wire [31:0] cpu_trace [0:3];
 wire [8:0] trace_index; wire [31:0] trace_start;
-wire [31:0] video_probe;
+wire osd_wr, osd_show, floppy_wrprot; wire [8:0] osd_addr; wire [31:0] osd_data, osd_bar;
+wire [5:0] osd_sel; wire [29:0] osd_band, osd_rule; wire [11:0] rtc;
+assign debug_words[0]=32'h414d4406;
+assign debug_words[1]={14'b0,warm_reset,btn[1:0],kbd_reset,soft_reset,nanomig_reset,
+                      rom_done,sdram_ready,pll_lock,rst_28m,1'b0};
+`ifdef AMIGA_DEBUG
 reg [15:0] debug_hs_count, debug_vs_count;
 reg [31:0] debug_color_count, debug_rom_writes;
 reg debug_hs, debug_vs, debug_rom_we;
@@ -165,9 +171,6 @@ always @(posedge clk_28m) begin
         if (rom_write && !debug_rom_we) debug_rom_writes<=debug_rom_writes+1'b1;
     end
 end
-assign debug_words[0]=32'h414d4405;
-assign debug_words[1]={14'b0,warm_reset,btn[1:0],kbd_reset,soft_reset,nanomig_reset,
-                      rom_done,sdram_ready,pll_lock,rst_28m,1'b0};
 assign debug_words[2]={debug_vs_count,debug_hs_count};
 assign debug_words[3]=debug_color_count;
 for (genvar d=0;d<24;d=d+1) assign debug_words[4+d]=cpu_debug[d];
@@ -176,13 +179,19 @@ assign debug_words[29]={5'b0,sdram_cs,sdram_we,sdram_be,sdram_addr,1'b0};
 assign debug_words[30]={sdram_dout,sdram_din};
 assign debug_words[31]={8'b0,red,green,blue};
 for (genvar t=0;t<4;t=t+1) assign debug_words[32+t]=cpu_trace[t];
+`else
+// Обычная сборка: счётчики и трасса занимают логику и блочную память, включаются define AMIGA_DEBUG.
+for (genvar d=2;d<36;d=d+1) assign debug_words[d]=0;
+`endif
 amiga_link link(.clk(clk_28m),.rst_n(rst_28m_n),.sck(link_sck),.cs_n(link_cs_n),
     .io_in(link_io),.io_out(link_out),.io_oe(link_oe),.clk7_en(clk7_en),.clk7n_en(clk7n_en),
     .audio_left(audio_left),.audio_right(audio_right),.key_free(key_free),.debug_words(debug_words),
-    .trace_index(trace_index),.trace_start(trace_start),.video_probe(video_probe),
+    .trace_index(trace_index),.trace_start(trace_start),
+    .osd_wr(osd_wr),.osd_addr(osd_addr),.osd_data(osd_data),.osd_show(osd_show),.osd_sel(osd_sel),
+    .osd_band(osd_band),.osd_rule(osd_rule),.osd_bar(osd_bar),.rtc(rtc),.floppy_wrprot(floppy_wrprot),
     .disk_reset(nanomig_reset),.disk_rd(sd_rd),.disk_wr(sd_wr),.disk_sector(sd_sector),
     .disk_mounted(sd_img_mounted),.disk_size(sd_img_size),.disk_busy(sd_busy),.disk_done(sd_done),
-    .disk_strobe(sd_rd_byte_strobe),.disk_addr(sd_byte_index),.disk_data(sd_rd_data),
+    .disk_strobe(sd_rd_byte_strobe),.disk_addr(sd_byte_index),.disk_data(sd_rd_data),.disk_guest_data(sd_wr_data),
     .hid_strobe(hid_strobe),.hid_start(hid_start),.hid_data(hid_data),.hid_reset(hid_reset),
     .sd_cs_n(SD_CS),.sd_sck(SD_SCK),.sd_mosi(SD_MOSI),.sd_miso(SD_MISO),
     .boot_req(boot_req),.soft_reset(soft_reset),.rom_ready(rom_done),
@@ -238,6 +247,7 @@ nanomig nanomig
  .por(rst_28m),
  .debug_words(cpu_debug),
  .trace_index(trace_index),.trace_start(trace_start),.trace_words(cpu_trace),
+ .rtc(rtc),
 
  .clk7_en(clk7_en),
  .clk7n_en(clk7n_en),
@@ -402,6 +412,24 @@ sdram #(
 
 wire [15:0] silent_audio[1:0];
 assign silent_audio[0]=0, silent_audio[1]=0;
+
+// Окно меню дискет поверх картинки. Координаты считаются от синхроимпульсов AGA: кадр 908x626,
+// на HDMI видно 165..886 x 45..622 (снято с карты захвата), середина 525 x 334; окно 470x406 — вокруг неё.
+reg [10:0] osd_cx=0; reg [9:0] osd_cy=0; reg osd_hs=1, osd_vs=1;
+always @(posedge clk_28m) begin
+    osd_hs<=hs_n; osd_vs<=vs_n;
+    if (osd_hs && !hs_n) begin osd_cx<=0; osd_cy<=osd_cy+1'b1; end
+    else osd_cx<=osd_cx+1'b1;
+    if (osd_vs && !vs_n) osd_cy<=0;
+end
+wire osd_box, osd_hl, osd_band_px, osd_text; wire [23:0] osd_text_rgb;
+nes_osd #(.COLS(56),.ROWS(24),.PAD(12),.WX0(290),.WY0(131),.FRAME_Y(1)) osd(.clk(clk_28m),
+    .wr(osd_wr),.wr_addr(osd_addr),.wr_data(osd_data),.show(osd_show),.sel(osd_sel),
+    .band_rows(osd_band),.rule_rows(osd_rule),
+    .clk_pixel(clk_28m),.cx(osd_cx),.cy(osd_cy),
+    .box(osd_box),.hl(osd_hl),.band(osd_band_px),.text(osd_text),.text_rgb(osd_text_rgb));
+wire [23:0] osd_rgb = osd_text ? osd_text_rgb : osd_hl ? 24'h2C4C9C : osd_band_px ? 24'h1E3266 :
+    osd_box ? {3'b0,red[7:3],3'b0,green[7:3],3'b0,blue[7:3]}+24'h080C28 : {red,green,blue};
 wire [2:0] tmds;
 wire tmds_clock;
 
@@ -437,7 +465,7 @@ hdmi #(
   .interlace(interlace),
   .reset(vreset),    // signal to synchronize HDMI
 
-  .rgb( video_probe[31:24]==8'ha5 ? video_probe[23:0] : { red, green, blue } )
+  .rgb( osd_rgb )
 );
 
 // differential output

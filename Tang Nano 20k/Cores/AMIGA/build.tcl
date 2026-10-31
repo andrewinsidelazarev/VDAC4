@@ -4,7 +4,6 @@ add_file upstream/src/minimig-aga/amiga_clk.v
 add_file upstream/src/minimig-aga/cpu_cache_new.v
 add_file upstream/src/minimig-aga/dpram.v
 add_file upstream/src/minimig-aga/dpram_be_1024x16.v
-add_file upstream/src/minimig-aga/minimig.v
 add_file upstream/src/minimig-aga/ciaa.v
 add_file upstream/src/minimig-aga/ciab.v
 add_file upstream/src/minimig-aga/cia_int.v
@@ -66,6 +65,9 @@ add_file upstream/src/tg68k/TG68K.vhd
 add_file upstream/src/tg68k/TG68K_ALU.vhd
 add_file upstream/src/tg68k/TG68KdotC_Kernel.vhd
 add_file fpga/amigaclks.v
+add_file fpga/minimig.v
+add_file fpga/nes_osd.sv
+add_file fpga/nes_osd_font.sv
 add_file fpga/nanomig.v
 add_file fpga/cpu_wrapper.v
 add_file fpga/amiga_debug.sv

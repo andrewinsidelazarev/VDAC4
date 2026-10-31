@@ -61,7 +61,7 @@ try:
 
         def identity():
             values = [read(a) for a in (0, 4, 0x60)]
-            if values[:2] != [0x56444334, 0x05010001] or values[2] not in (0x414d4403, 0x414d4404, 0x414d4405):
+            if values[:2] != [0x56444334, 0x05010005] or values[2] not in (0x414d4403, 0x414d4404, 0x414d4405, 0x414d4406):
                 raise RuntimeError(f'Not an Amiga with trace support: {values}')
             if read(0x44) != 4:
                 raise RuntimeError('Kickstart is not ready')

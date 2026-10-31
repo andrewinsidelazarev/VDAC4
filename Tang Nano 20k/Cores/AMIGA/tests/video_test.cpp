@@ -26,7 +26,7 @@ static unsigned decode(unsigned word) {
 static void tick() {
     d.hs_in=(ticks%1816)>=144;
     d.clk=0;d.eval();
-    uint32_t before=(d.video_probe>>24)==0xa5 ? d.video_probe&0xffffff : d.rgb;
+    uint32_t before=d.rgb;
     d.clk=1;d.eval();++ticks;
     if(ticks>10 && d.video_symbol && !d.reset) {
         uint32_t pixel=decode(d.tmds_r)<<16|decode(d.tmds_g)<<8|decode(d.tmds_b);
@@ -74,7 +74,7 @@ static void steady(uint32_t expected) {
 }
 int main(int argc,char**argv) {
     Verilated::commandArgs(argc,argv);
-    d.video_probe=0;d.reset=1;run(8);d.reset=0;
+    d.reset=1;run(8);d.reset=0;
     uint32_t colors[256];
     for(unsigned i=0;i<256;i++) {
         colors[i]=(i<<16)|(((i*73+19)&255)<<8)|(255-i);
@@ -107,15 +107,5 @@ int main(int argc,char**argv) {
     d.ehb=1;d.palette_index=32+7;run(2);
     uint32_t half=(colors[7]&0xfefefe)>>1;
     equal(d.clut_rgb,half,"EHB per-channel shift");steady(half);
-    // Override only the HDMI input while the chipset/Amber pixel stream keeps
-    // changing. Validate every color bit and returning to the original image.
-    for(unsigned bit=0;bit<24;bit++) {
-        d.video_probe=0xa5000000u|(1u<<bit);
-        for(unsigned i=0;i<1816*2;i++) {d.palette_index=i&255;tick();}
-    }
-    for(uint32_t probe : {0xa5000000u,0xa5ffffffu,0xa5202020u,0xa4ffffffu,0u}) {
-        d.video_probe=probe;
-        for(unsigned i=0;i<1816*2;i++) {d.palette_index=i&255;tick();}
-    }
-    std::printf("PASS RGB888: 256 palette entries/8 banks, all 256 levels per channel, 24 walking bits, dynamic pixel alignment, all filter/scanline modes, OCS/EHB, blanking, unchanged sync, output probe on/off/colors, %llu decoded DVI symbols\n",(unsigned long long)symbols);
+    std::printf("PASS RGB888: 256 palette entries/8 banks, all 256 levels per channel, 24 walking bits, dynamic pixel alignment, all filter/scanline modes, OCS/EHB, blanking, unchanged sync, %llu decoded DVI symbols\n",(unsigned long long)symbols);
 }

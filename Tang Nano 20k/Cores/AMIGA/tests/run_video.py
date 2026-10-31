@@ -34,6 +34,7 @@ assert 'wire [7:0] red, green, blue;' in top
 rgb=re.search(r'\.rgb\(\s*(.*?)\s*\)',top)[1]
 (stage/'video_hdmi_from_source.svh').write_text('''
 wire [7:0] red=r,green=g,blue=b;
+wire [23:0] osd_rgb={red,green,blue};
 wire [15:0] silence[1:0];assign silence[0]=0,silence[1]=0;
 hdmi #(.DVI_OUTPUT(1)) dvi(.clk_pixel(clk),.clk_pixel_x5(clk),.clk_audio(1'b0),
 .pal_mode(1'b1),.screen(2'b0),.short_frame(1'b0),.interlace(1'b0),.reset(reset),

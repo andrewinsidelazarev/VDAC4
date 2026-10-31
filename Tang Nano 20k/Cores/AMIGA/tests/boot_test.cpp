@@ -13,7 +13,10 @@ int main(int argc,char **argv) {
     const int clock_order=argc>2?atoi(argv[2]):0;
     if(duration<=0 || duration>30)return 2;
     std::vector<uint8_t> adf;
-    if(argc>3){std::ifstream disk(argv[3],std::ios::binary);adf.assign(std::istreambuf_iterator<char>(disk),{});if(adf.size()!=901120)return 3;}
+    if(argc>3 && argv[3][0]!='-'){std::ifstream disk(argv[3],std::ios::binary);adf.assign(std::istreambuf_iterator<char>(disk),{});if(adf.size()!=901120)return 3;}
+    std::vector<uint8_t> hdf;
+    if(argc>4){std::ifstream disk(argv[4],std::ios::binary);hdf.assign(std::istreambuf_iterator<char>(disk),{});if(hdf.empty()||hdf.size()%512)return 3;}
+    unsigned hdf_reads=0,hdf_writes=0;bool serve_hdf=false;
     unsigned sectors_served=0,transfer_word=0;uint32_t sector=0,token=0;bool transferring=false;
     std::ofstream disklog("disk.csv");disklog<<"seconds,sector,token\n";
     VerilatedContext ctx;Vboot_top q{&ctx};
@@ -30,21 +33,33 @@ int main(int argc,char **argv) {
     for(uint64_t n=0;n<cycles;n++) {
         q.host_wr=0;
         if(n==3000){q.host_wr=1;q.host_addr=0x60;q.host_data=unsigned(adf.size());}
+        if(!hdf.empty()&&n==6000){q.host_wr=1;q.host_addr=0x65;q.host_data=4;}
+        if(!hdf.empty()&&n==6100){q.host_wr=1;q.host_addr=0x60;q.host_data=unsigned(hdf.size());}
+        if(!hdf.empty()&&n==6200){q.host_wr=1;q.host_addr=0x65;q.host_data=0;}
         if(q.disk_status&4){printf("FAIL disk mailbox error %08X\n",q.disk_status);return 4;}
         // Poll at the real app's 4 ms cadence; bound host transfer rate too.
-        if(!adf.empty() && !transferring && n%114000==0 && (q.disk_status&1)) {
-            if((q.disk_status&0xff08)!=0x100 || q.disk_sector>=1760)return 5;
+        // Опрос как у настоящего приложения: дискета раз в 4 мс; к диску — сразу, как при HD0.HDF.
+        if(!transferring && (q.disk_status&1) && (((q.disk_status>>8)&255)==0x10 || n%114000==0)) {
+            unsigned drive=(q.disk_status>>8)&255;
+            if(drive==1){if(adf.empty()||(q.disk_status&8)||q.disk_sector>=1760)return 5;}
+            else if(drive==0x10){
+                if(hdf.empty()||q.disk_sector>=hdf.size()/512)return 5;
+                if(q.disk_status&8){hdf_writes++;q.host_wr=1;q.host_addr=0x64;q.host_data=q.disk_token;goto clocks;}
+                hdf_reads++;
+            } else return 5;
+            serve_hdf=drive==0x10;
             sector=q.disk_sector;token=q.disk_token;transfer_word=0;transferring=true;
             disklog<<double(n)/28500000<<","<<sector<<","<<token<<"\n";disklog.flush();
         }
-        if(transferring && n%228==0){
+        if(transferring && (serve_hdf || n%228==0)){
             q.host_wr=1;
             if(transfer_word<128){
-                auto p=&adf[sector*512+transfer_word*4];q.host_addr=0x1400+transfer_word;
+                auto p=(serve_hdf?hdf:adf).data()+sector*512+transfer_word*4;q.host_addr=0x1400+transfer_word;
                 q.host_data=uint32_t(p[0])|(uint32_t(p[1])<<8)|(uint32_t(p[2])<<16)|(uint32_t(p[3])<<24);
                 transfer_word++;
             }else{q.host_addr=0x64;q.host_data=token;transferring=false;sectors_served++;}
         }
+        clocks:
         if(n==2850)q.por=0;            // 100 us
         if(n==142500)q.rom_done=1;     // 5 ms, preloaded ROM ready
         for(int phase=0;phase<2;phase++) {
@@ -93,7 +108,8 @@ int main(int argc,char **argv) {
         (q.cpu_debug[9]>>16)==0x1114 && (q.cpu_debug[11]>>16)==0x4ef9 &&
         (q.cpu_debug[13]>>16)==0xf8 && (q.cpu_debug[15]>>16)==0xd2;
     std::ofstream out("boot.json");
-    out<<"{\n\"sectors_served\":"<<sectors_served<<",\n\"simulated_seconds\":"<<duration<<",\n\"reset_released\":"<<(!q.reset_out?"true":"false")
+    printf("HDF sectors read %u, written %u\n",hdf_reads,hdf_writes);
+    out<<"{\n\"hdf_reads\":"<<hdf_reads<<",\n\"sectors_served\":"<<sectors_served<<",\n\"simulated_seconds\":"<<duration<<",\n\"reset_released\":"<<(!q.reset_out?"true":"false")
        <<",\n\"cpu_reset_released\":"<<((q.cpu_debug[0]&1)?"true":"false")
        <<",\n\"sdram_ready\":"<<(q.sdram_ready?"true":"false")
        <<",\n\"reset_vectors_match\":"<<(vectors?"true":"false")

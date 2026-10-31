@@ -30,9 +30,9 @@ with socket.create_connection((args.address,23),timeout=10,source_address=(args.
         raise TimeoutError(command)
     def read(address):
         return int(request(f'tang rd {address:x}',f'tang {address:02X} = ([0-9A-Fa-f]{{8}})'.encode())[1],16)
-    assert read(0)==0x56444334 and read(4)==0x05010001,'Not Amiga'
+    assert read(0)==0x56444334 and read(4)==0x05010005,'Not Amiga'
     report['build_tag']=f'{read(0x60):08X}'
-    assert report['build_tag'] in ('414D4403','414D4404','414D4405'),'No extended trace in this build'
+    assert report['build_tag'] in ('414D4403','414D4404','414D4405','414D4406'),'No extended trace in this build'
     report['trace_start']=read(0xf8)
     for i in range(args.count):
         m=request(f'tang wr f4 {i:x}',rb'tang F4 <- ([0-9A-Fa-f]{8}), reads ([0-9A-Fa-f]{8})')

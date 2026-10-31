@@ -376,13 +376,12 @@ always @(negedge clk) begin
       end
     end
     STATE_RAS_WAIT_0: begin
+      sd_addr <= sd_addr_cas;
       // Выводы DQ включаются на такт раньше WRITE: шина свободна, а такт SDRAM теперь ближе.
       if (ram_we && (sdram_port == PORT_1 || sdram_port == PORT_2))
         sd_dq <= 1;
     end
     STATE_CAS: begin
-      sd_addr <= sd_addr_cas;
-
       case (sdram_port)
         PORT_1: begin
           sd_cmd <= ram_we ? CMD_WRITE : CMD_READ;

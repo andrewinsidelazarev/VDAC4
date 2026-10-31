@@ -2,7 +2,7 @@ module link_top(
     input clk, rst_n, sck, cs_n, input [3:0] io_in,
     output [3:0] io_out, output io_oe,
     output boot_req, soft_reset, rom_ready, rom_we,
-    output [31:0] video_probe,
+    output osd_show, output [5:0] osd_sel, output [11:0] rtc, output floppy_wrprot,
     output [17:0] rom_addr, output [15:0] rom_word,
     output hid_strobe, hid_start, hid_reset, output [7:0] hid_data,
     output sd_cs_n, sd_sck, sd_mosi,
@@ -13,6 +13,8 @@ module link_top(
     reg [1:0] phase=0;
     wire [31:0] debug_words [0:35];
     wire [8:0] trace_index; wire [31:0] trace_start;
+    wire osd_wr; wire [8:0] osd_addr; wire [31:0] osd_data, osd_bar; wire [29:0] osd_band, osd_rule;
+    wire [7:0] disk_guest_data = (disk_addr[7:0]*8'd5+8'd3)^{7'b0,disk_addr[8]};
     for (genvar i=0; i<36; i=i+1) assign debug_words[i]=32'hd1a60000+i;
     always @(posedge clk) if (!rst_n) phase<=0; else phase<=phase+1'b1;
     amiga_link dut(.clk7_en(phase==0),.clk7n_en(phase==2),

@@ -1,9 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later
- * AMIGA.ELF bring-up: Kickstart from Tang SD, Evo input, stereo via ESP DAC.
- * Uses the existing WC core START/INPUT/STATUS/EXIT protocol; optional read-only DF0.
+ * AMIGA.ELF: Kickstart from Tang SD, Evo input, stereo via ESP DAC, the WC core START/INPUT/STATUS/EXIT
+ * protocol. DF0: /AMIGA/DF0.ADF, меню F11 (disk_menu.h), образ .adf из WC. Образ дискеты целиком в PSRAM;
+ * запись идёт и в PSRAM, и сразу в файл на карте Tang. HD0: образ, выбранный в меню (путь в /AMIGA/HD0.CFG),
+ * пока не выбран — /AMIGA/HD0.HDF; работает на месте, секторы прямо с карты. Выбранный диск — системный:
+ * /AMIGA/DF0.ADF при старте не вставляется, чтобы загрузка шла с диска.
+ * Диск с карты Evo только для чтения: записывать на неё некуда.
  */
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include "zm_app.h"
 #include "ps2_hid.h"
@@ -12,7 +17,23 @@
 #define ROM_BYTES 524288u
 #define ADF_PATH "/AMIGA/DF0.ADF"
 #define ADF_BYTES 901120u
-#define VERSION 0x05010001u
+#define HDF_PATH "/AMIGA/HD0.HDF"
+#define HD0_CFG "/AMIGA/HD0.CFG"
+#define HD0_PATH_MAX 512u
+#define HDF_MAX_SECTORS 8388607u    /* размер в регистре ядра — 32 бита в байтах */
+#define VERSION 0x05010006u
+#define R_DISK_SIZE 0x180u
+#define R_DISK_STATUS 0x184u
+#define R_DISK_SECTOR 0x188u
+#define R_DISK_TOKEN 0x18Cu
+#define R_DISK_ACK 0x190u
+#define R_DISK_UNIT 0x194u
+#define R_DISK_SIGN 0x198u
+#define R_DISK_WP 0x19Cu
+#define R_RTC 0xDCu
+#define RTC_WAIT_MS 1200u
+#define W_DISK 0x5000u
+#define DF0_SWAP_MS 2000u           /* без дискеты, чтобы система успела увидеть смену */
 static const zm_core_t *core;
 static void *lock, *link_lock, *wake;
 static volatile int running, state, exit_req, live;
@@ -21,6 +42,21 @@ static uint32_t core_version, input_ms, generation;
 static char error_text[80];
 static uint8_t ring[256], head, tail, lost, joy, buttons, last_x, last_y, mouse_base;
 static int32_t mouse_x, mouse_y;
+static uint8_t *df0_data;
+static void *df0_file, *hd0_file;
+static int df0_ro=1, menu_available;
+static char df0_name[64], hd0_name[64], hd0_path[HD0_PATH_MAX];
+static uint32_t df0_swap_at, hd0_sectors, zero_sector[128];
+static uint32_t sector_words[128];
+static uint8_t evo_time[6];
+static volatile int rtc_pending;
+/* Файл с карты Evo: плагин шлёт его командами 0x77…0x79 (.adf из WC и меню F11) */
+static uint8_t *rx_data;
+static volatile uint32_t rx_received;
+static volatile int rx_ready, rx_receiving;
+static int sd_disk_api(void) {
+    return core->size>=offsetof(zm_core_t,sd_create)+sizeof core->sd_create && core->sd_open && core->sd_pread;
+}
 
 static uint32_t crc32(const uint8_t *p, size_t n) {
     uint32_t c=~0u;
@@ -61,25 +97,198 @@ static int load_disk(uint8_t **disk) {
     }
     return 1;
 }
+static int mount_unit(unsigned unit,uint32_t bytes) {
+    return wr(R_DISK_UNIT,unit) && wr(R_DISK_SIZE,bytes) && wr(R_DISK_UNIT,0);
+}
 static int mount_disk(const uint8_t *disk) {
     uint32_t signature=0;
-    if (!rd(0x198,&signature) || signature!=0x41444631u) return 0;
-    return wr(0x180,disk?ADF_BYTES:0);
+    if (!rd(R_DISK_SIGN,&signature) || signature!=0x41444632u) return 0;
+    return wr(R_DISK_WP,df0_ro) && mount_unit(0,disk?ADF_BYTES:0);
 }
-static int disk_step(const uint8_t *disk) {
-    uint32_t status=0, sector=0, token=0;
-    if (!rd(0x184,&status) || (status&4)) return 0;
-    if (!(status&1)) return 1;
-    if (!disk || (status&8) || ((status>>8)&255)!=1 ||
-        !rd(0x188,&sector) || !rd(0x18c,&token) || sector>=ADF_BYTES/512) return 0;
-    const uint8_t *p=disk+(size_t)sector*512;
+static void df0_close_file(void) {
+    if (df0_file) { core->sd_close(df0_file); df0_file=NULL; }
+}
+static int send_sector(const uint8_t *p) {
     for (unsigned part=0;part<8;part++) {
         if (!running || exit_req) return 0;
         uint32_t w[16];
         for (unsigned i=0;i<16;i++) w[i]=little32(p+part*64+i*4);
-        if (core->link_write(0x5000+part*64,w,16)!=ZM_OK) return 0;
+        if (core->link_write(W_DISK+part*64,w,16)!=ZM_OK) return 0;
     }
-    return wr(0x190,token);
+    return 1;
+}
+static int take_sector(void) {
+    for (unsigned part=0;part<8;part++)
+        if (core->link_read(W_DISK+part*64,sector_words+part*16,16)!=ZM_OK) return 0;
+    return 1;
+}
+/* Карта занята (BUSY) — ядро её вернёт: подождать, отказ — только при настоящей ошибке. */
+static int sd_retry_read(void *file,uint32_t sector,uint8_t *data) {
+    for (unsigned tries=0;tries<200;tries++) {
+        int r=core->sd_pread(file,sector,data,1);
+        if (r!=ZM_BUSY) return r==ZM_OK;
+        core->delay(5);
+    }
+    return 0;
+}
+static int sd_retry_write(void *file,uint32_t sector,const uint8_t *data) {
+    for (unsigned tries=0;tries<200;tries++) {
+        int r=core->sd_pwrite(file,sector,data,1);
+        if (r!=ZM_BUSY) return r==ZM_OK;
+        core->delay(5);
+    }
+    return 0;
+}
+/* Один запрос сектора, если есть. *served — был запрос. Ноль — обмен с ядром нарушен. */
+static int disk_step(int *served) {
+    uint32_t status=0, sector=0, token=0;
+    *served=0;
+    if (!rd(R_DISK_STATUS,&status) || (status&4)) return 0;
+    if (!(status&1)) return 1;
+    *served=1;
+    unsigned drive=(status>>8)&255;
+    int writing=(status&8)!=0;
+    if (!rd(R_DISK_SECTOR,&sector) || !rd(R_DISK_TOKEN,&token)) return 0;
+    if (drive==1) {
+        if (sector>=ADF_BYTES/512) return 0;
+        if (writing) {
+            if (!take_sector()) return 0;
+            if (df0_data && !df0_ro) {
+                memcpy(df0_data+(size_t)sector*512,sector_words,512);
+                if (df0_file && !sd_retry_write(df0_file,sector,(const uint8_t *)sector_words)) {
+                    /* Дальше — только чтение: иначе программа считала бы записанным то, чего нет. */
+                    core->log("amiga: DF0 write failed, sector %u",(unsigned)sector);
+                    df0_ro=1; wr(R_DISK_WP,1); df0_close_file();
+                }
+            }
+        } else if (!send_sector(df0_data?df0_data+(size_t)sector*512:(const uint8_t *)zero_sector)) return 0;
+    } else if (drive==0x10) {
+        if (!hd0_file || sector>=hd0_sectors) return 0;
+        if (writing) {
+            if (!take_sector() || !sd_retry_write(hd0_file,sector,(const uint8_t *)sector_words)) return 0;
+        } else if (!sd_retry_read(hd0_file,sector,(uint8_t *)sector_words) ||
+                   !send_sector((const uint8_t *)sector_words)) return 0;
+    } else return 0;
+    return wr(R_DISK_ACK,token);
+}
+static void rx_discard(void) {
+    if (rx_data) core->free(rx_data);
+    rx_data=NULL; rx_received=0; rx_ready=0;
+}
+/* Новая дискета: снять прежнюю (система должна это увидеть), вставить через DF0_SWAP_MS. */
+static void df0_change(uint8_t *data,void *file,int read_only,const char *name) {
+    wr(R_DISK_SIZE,0);
+    if (df0_data) core->free(df0_data);
+    df0_close_file();
+    df0_data=data; df0_file=file; df0_ro=read_only;
+    strncpy(df0_name,name,sizeof df0_name-1); df0_name[sizeof df0_name-1]=0;
+    wr(R_DISK_WP,df0_ro);
+    uint32_t at=core->millis()+DF0_SWAP_MS;
+    df0_swap_at=at?at:1;
+}
+static void df0_eject(void) {
+    df0_swap_at=0;
+    wr(R_DISK_SIZE,0);
+    if (df0_data) core->free(df0_data);
+    df0_data=NULL; df0_close_file(); df0_ro=1; df0_name[0]=0;
+}
+static const char *df0_insert_received(const char *name) {
+    uint8_t *data=rx_data;
+    rx_data=NULL; rx_received=0; rx_ready=0;
+    df0_change(data,NULL,1,name);
+    return NULL;
+}
+static const char *df0_insert_tang(const char *path,const char *name) {
+    uint8_t *data=NULL; size_t size=0; void *file=NULL; uint32_t sectors=0;
+    int r=core->sd_read(path,&data,&size,ADF_BYTES,&running);
+    if (r!=ZM_OK || size!=ADF_BYTES) {
+        if (data) core->free(data);
+        return r==ZM_OK?"NOT AN 880K ADF IMAGE":r==ZM_BUSY?"TANG SD IS BUSY, TRY AGAIN":"CANNOT READ THE FILE";
+    }
+    df0_close_file();       /* та же дискета ещё раз: один файл не держать открытым дважды */
+    if (sd_disk_api() && (core->sd_open(path,1,&sectors,&file)!=ZM_OK || sectors!=ADF_BYTES/512)) {
+        if (file) core->sd_close(file);
+        file=NULL;
+    }
+    df0_change(data,file,file==NULL,name);
+    return NULL;
+}
+static void hd0_detach(void) {
+    mount_unit(4,0);
+    if (hd0_file) core->sd_close(hd0_file);
+    hd0_file=NULL; hd0_sectors=0; hd0_name[0]=0;
+}
+/* Образ работает там, где лежит, ничего не копируется. Без RDB ядро диск не подключит (nanomig.v). */
+static const char *hd0_attach(const char *path) {
+    void *file=NULL; uint32_t sectors=0;
+    int r=core->sd_open(path,1,&sectors,&file);
+    if (r!=ZM_OK) return r==ZM_BUSY?"TANG SD IS BUSY, TRY AGAIN":"CANNOT OPEN THE IMAGE";
+    const char *problem=NULL;
+    if (!sectors || sectors>HDF_MAX_SECTORS) problem="THE IMAGE IS TOO BIG";
+    else if (!sd_retry_read(file,0,(uint8_t *)sector_words)) problem="CANNOT READ THE IMAGE";
+    else if (memcmp(sector_words,"RDSK",4)) problem="NO RDB IN THE IMAGE, CANNOT BE USED";
+    if (problem) { core->sd_close(file); return problem; }
+    hd0_detach();
+    if (!mount_unit(4,sectors*512u)) { core->sd_close(file); return "CORE DOES NOT ANSWER"; }
+    const char *slash=strrchr(path,'/');
+    strncpy(hd0_name,slash?slash+1:path,sizeof hd0_name-1); hd0_name[sizeof hd0_name-1]=0;
+    hd0_file=file; hd0_sectors=sectors;
+    if (path!=hd0_path) { strncpy(hd0_path,path,sizeof hd0_path-1); hd0_path[sizeof hd0_path-1]=0; }
+    core->log("amiga: HD0 %s, %u sectors",hd0_name,(unsigned)sectors);
+    return NULL;
+}
+/* Что подключить при старте. 1 — диск выбран в меню и файл на месте: он и системный. */
+static int hd0_read_config(void) {
+    uint8_t *text=NULL; size_t size=0;
+    strcpy(hd0_path,HDF_PATH);
+    if (!sd_disk_api() || core->sd_read(HD0_CFG,&text,&size,HD0_PATH_MAX-1u,&running)!=ZM_OK) {
+        if (text) core->free(text);
+        return 0;
+    }
+    size_t n=0;
+    while (n<size && text[n]>=0x20) { hd0_path[n]=(char)text[n]; n++; }
+    hd0_path[n]=0;
+    core->free(text);
+    if (!n) return 0;
+    void *file=NULL; uint32_t sectors=0;
+    if (core->sd_open(hd0_path,0,&sectors,&file)!=ZM_OK) {
+        core->log("amiga: chosen HD0 not found: %s",hd0_path);
+        return 0;
+    }
+    core->sd_close(file);
+    return 1;
+}
+/* Путь пустой — диска нет. Запись одним файлом: прерванная не оставит половину пути. */
+static int hd0_save_config(const char *path) {
+    uint8_t text[HD0_PATH_MAX]; size_t n=strlen(path);
+    if (n+1>=sizeof text) return 0;
+    memcpy(text,path,n); text[n]='\n';
+    return core->sd_write(HD0_CFG,text,n+1,&running)==ZM_OK;
+}
+/* Другой диск виден системе только после перезапуска. Ядро сначала читает у образа RDB. */
+static void amiga_restart(void) {
+    uint32_t at=core->millis();
+    while (core->millis()-at<100u) {
+        int served=0;
+        if (!disk_step(&served)) break;
+        if (!served) core->delay(1);
+    }
+    wr(0x44,3);
+}
+#include "amiga_fs.h"
+#include "disk_menu.h"
+/* Время Evo: минуты и прочее — двоичные, год — две цифры, как у настоящего MSM6242; месяц 0…11, у числа сверху день недели. */
+static void rtc_apply(void) {
+    uint8_t t[6];
+    core->mutex_lock(lock); memcpy(t,evo_time,6); rtc_pending=0; core->mutex_unlock(lock);
+    if (t[4]<1 || t[4]>12 || t[3]<1 || t[3]>31) return;
+    static const uint8_t table[12]={0,3,2,5,0,3,5,1,4,6,2,4};
+    unsigned year=2000u+t[5], y=year-(t[4]<3);
+    unsigned weekday=(y+y/4-y/100+y/400+table[t[4]-1]+t[3])%7;
+    const uint32_t field[6]={0u<<8|t[5], 1u<<8|(t[4]-1u), 2u<<8|weekday<<5|t[3],
+                             3u<<8|t[2], 4u<<8|t[1], 5u<<8|t[0]};
+    for (unsigned i=0;i<6;i++) wr(R_RTC,field[i]);
+    core->log("amiga: RTC from Evo 20%02u-%02u-%02u %02u:%02u:%02u",t[5],t[4],t[3],t[2],t[1],t[0]);
 }
 static void fail(const char *s) {
     strncpy(error_text,s,sizeof error_text-1); error_text[sizeof error_text-1]=0;
@@ -96,7 +305,7 @@ static int wait_packet(uint32_t seq) {
     return 0;
 }
 static int upload_rom(const uint8_t *p) {
-    uint32_t wanted=crc32(p,ROM_BYTES), count=0, crc=0, s=0;
+    uint32_t wanted=crc32(p,ROM_BYTES), count=0, crc=0;
     if (!wr(0x44,1) || !wr(0x58,wanted)) return 0;
     for (uint32_t off=0;off<ROM_BYTES;off+=256) {
         if (!running || exit_req) return 0;
@@ -108,7 +317,11 @@ static int upload_rom(const uint8_t *p) {
         uint32_t seq=off/256+1;
         if (!wr(0x48,(seq<<16)|256) || !wait_packet(seq)) return 0;
     }
-    if (!rd(0x4c,&count) || !rd(0x50,&crc) || count!=ROM_BYTES || crc!=wanted) return 0;
+    return rd(0x4c,&count) && rd(0x50,&crc) && count==ROM_BYTES && crc==wanted;
+}
+/* Снять сброс: процессор пошёл. */
+static int rom_release(void) {
+    uint32_t s=0;
     if (!wr(0x44,2)) return 0;
     core->delay(1);
     return rd(0x44,&s) && (s&15)==4;
@@ -124,7 +337,7 @@ static int input_step(ps2_hid_t *parser) {
     static uint16_t pending[128];
     static unsigned at, count;
     static uint8_t down[128], f4_down;
-    uint8_t bytes[64], j,b; unsigned n=0; int clear;
+    uint8_t bytes[64], j,b; unsigned n=0; int clear, was_open=menu_open;
     int32_t dx,dy;
     core->mutex_lock(lock);
     clear=lost; lost=0;
@@ -149,6 +362,19 @@ static int input_step(ps2_hid_t *parser) {
     }
     while (at<count) {
         uint16_t ev=pending[at]; uint32_t free_slots=0;
+        if (ev!=PS2_HID_CLEAR && menu_key(ev)) {
+            ++at;
+            // Меню открылось: что держали нажатым, отпустить, отпускания уйдут уже меню.
+            if (menu_open && !was_open) {
+                was_open=1;
+                for (unsigned k=0;k<128;k++) if (down[k]) {
+                    uint8_t release=(uint8_t)(k|128);
+                    if (!hid_packet(1,&release,1)) return 0;
+                    down[k]=0;
+                }
+            }
+            continue;
+        }
         if (ev==PS2_HID_CLEAR) { if (!wr(0x1c,0)) return 0; }
         else if ((ev&127)==61 && (f4_down ||
                  (!(ev&128) && !down[61] && (down[104] || down[108]) && (down[106] || down[110])))) {
@@ -159,11 +385,13 @@ static int input_step(ps2_hid_t *parser) {
             if (!rd(0x0c,&free_slots)) return 0;
             if (!free_slots) break;
             uint8_t k=(uint8_t)ev;
+            if ((k&128) && !down[k&127]) { ++at; continue; }   // нажата в меню, отпущена уже в игре
             if (!hid_packet(1,&k,1)) return 0;
             down[k&127]=(k&128)==0;
         }
         ++at;
     }
+    if (menu_open) { b=0; j=0; dx=dy=0; core->mutex_lock(lock); mouse_x=mouse_y=0; core->mutex_unlock(lock); }
     // NanoMig expects USB mouse coordinates; Kempston Y grows upward.
     uint8_t mouse[3]={b,(uint8_t)dx,(uint8_t)-dy};
     if (!hid_packet(2,mouse,3)) return 0;
@@ -226,13 +454,24 @@ static void worker(void *arg) {
     while (running) {
         core->signal_wait(wake,20);
         if (!running || state!=1) continue;
-        uint8_t *rom=NULL, *disk=NULL; size_t size=0; int loaded=0, ok=0;
+        uint8_t *rom=NULL, *disk=NULL; size_t size=0; int loaded=0, ok=0, start_ok=0;
+        df0_ro=1; df0_name[0]=0; df0_swap_at=0; menu_open=0; menu_available=0;
+        hd0_file=NULL; hd0_sectors=0; hd0_name[0]=0; df0_file=NULL;
         if (core->sd_read(ROM_PATH,&rom,&size,ROM_BYTES,&running)!=ZM_OK)
             fail("Place 512 KiB Kickstart at /AMIGA/KICK31.ROM on Tang SD");
         else if (!valid_rom(rom,size)) fail("Kickstart size or Amiga checksum is invalid");
+        else if (rx_ready && rx_data) {         // .adf, открытый в WC: уже в памяти, только чтение
+            hd0_read_config();
+            disk=rx_data; rx_data=NULL; rx_ready=0; rx_received=0;
+            strcpy(df0_name,"FILE FROM EVO SD");
+            start_ok=1;
+        }
+        else if (hd0_read_config()) start_ok=1; // загрузка с выбранного диска, дискеты нет
         else if (!load_disk(&disk)) fail("DF0.ADF read failed: use a standard 880 KiB ADF");
-        else if (!running || exit_req) fail("Start cancelled");
-        else {
+        else start_ok=1;
+        if (start_ok && (!running || exit_req)) { fail("Start cancelled"); start_ok=0; }
+        if (start_ok) {
+            if (disk && !df0_name[0]) strcpy(df0_name,"DF0.ADF");
             loaded=1; // core_load can fail after FPGA has changed: always attempt recovery.
             if (core->core_load("AMIGA",&core_version)!=ZM_OK) fail("AMIGA.BIN load failed");
             else if (core_version!=VERSION) fail("AMIGA.BIN / AMIGA.ELF version mismatch");
@@ -247,23 +486,96 @@ static void worker(void *arg) {
             input_ms=core->millis(); mouse_base=1; lost=1;
             core->mutex_unlock(lock);
             core->mutex_lock(link_lock); ++generation; live=1; core->mutex_unlock(link_lock);
+            /* Kickstart читает часы через 1,1 с после сброса (модель), а TIME плагин присылает, когда увидел
+             * состояние 2. Процессор ждёт время, но недолго: без плагина с TIME Amiga просто стартует позже. */
             state=2;
-            while (running && !exit_req) {
-                if (core->millis()-input_ms>1500) break;
-                if (!input_step(&parser)) { fail("Amiga input LINK failed"); ok=0; break; }
-                if (!disk_step(disk)) { fail("DF0 sector transfer failed"); ok=0; break; }
-                core->signal_wait(wake,4);
+            for (uint32_t t0=core->millis();!rtc_pending && running && !exit_req && core->millis()-t0<RTC_WAIT_MS;)
+                core->signal_wait(wake,20);
+            if (rtc_pending) rtc_apply();
+            if (!rom_release()) { fail("Kickstart did not start"); ok=0; }
+            core->mutex_lock(lock); input_ms=core->millis(); core->mutex_unlock(lock);
+            df0_data=disk; disk=NULL;
+            /* Карта Tang в этом ядре — при прошивке с посекторным доступом: запись в DF0 и HD0, меню. */
+            if (sd_disk_api()) {
+                uint32_t sectors=0; void *file=NULL;
+                menu_available=1;
+                if (df0_data && !strcmp(df0_name,"DF0.ADF") &&
+                    core->sd_open(ADF_PATH,1,&sectors,&file)==ZM_OK) {
+                    if (sectors==ADF_BYTES/512) { df0_file=file; df0_ro=0; wr(R_DISK_WP,0); }
+                    else core->sd_close(file);
+                }
+                if (hd0_path[0]) {
+                    const char *problem=hd0_attach(hd0_path);
+                    if (problem) core->log("amiga: HD0 %s: %s",hd0_path,problem);
+                }
+            }
+            uint32_t input_at=core->millis()-4;
+            while (ok && running && !exit_req) {
+                uint32_t now=core->millis();
+                if (now-input_ms>1500) break;
+                // Сектора идут подряд, клавиатура и мышь — не чаще 4 мс: ввод стоит дорого по LINK.
+                if (now-input_at>=4) {
+                    input_at=now;
+                    if (!input_step(&parser)) { fail("Amiga input LINK failed"); ok=0; break; }
+                }
+                if (rtc_pending) rtc_apply();
+                if (df0_swap_at && (int32_t)(now-df0_swap_at)>=0) {
+                    df0_swap_at=0;
+                    if (df0_data) mount_unit(0,ADF_BYTES);
+                }
+                int served=0;
+                if (!disk_step(&served)) { fail("Disk sector transfer failed"); ok=0; break; }
+                if (!served) core->signal_wait(wake,2);
             }
         }
         core->mutex_lock(link_lock); live=0; core->mutex_unlock(link_lock);
         if (disk) core->free(disk);
+        if (df0_data) core->free(df0_data);
+        df0_data=NULL;
+        df0_close_file();
+        if (hd0_file) { core->sd_close(hd0_file); hd0_file=NULL; }
+        menu_items_free();
+        rx_discard();
         if (loaded && core->core_back(10000)!=ZM_OK) { fail("Could not return to TS-Config"); ok=0; }
         state=ok?3:255;
     }
     worker_done=1;
 }
+static uint16_t crc16(const uint8_t *p,size_t n) {
+    uint16_t c=0xFFFF;
+    while (n--) { c^=(uint16_t)(*p++)<<8; for (unsigned k=0;k<8;k++) c=(c&0x8000)?(uint16_t)(c<<1^0x1021):(uint16_t)(c<<1); }
+    return c;
+}
+/* Файл от плагина (Cores/NES/esp/main/rom_source.h): до старта ядра или по запросу меню. */
+static int rx_command(uint8_t cmd,const uint8_t *p,uint16_t n) {
+    uint8_t reply[5]={0};
+    int idle=state==0 || state==3 || state==255 || (state==2 && rx_receiving);
+    if (idle) {
+        if (cmd==0x77 && n==4) {
+            if (little32(p)==ADF_BYTES) {
+                rx_discard();
+                rx_data=core->alloc(ADF_BYTES,ZM_MEM_PSRAM);
+                if (rx_data) { error_text[0]=0; if (state!=2) state=0; reply[0]=1; }
+                else fail("Not enough PSRAM for the disk image");
+            } else fail("Not an 880 KiB ADF image");
+        } else if (cmd==0x78 && n>6 && n<=518 && rx_data && !rx_ready) {
+            uint32_t at=little32(p), count=n-6u;
+            uint16_t expected=(uint16_t)p[n-2]|(uint16_t)p[n-1]<<8;
+            if (crc16(p,n-2)==expected && at<=rx_received && count<=ADF_BYTES-at) {
+                if (at==rx_received) { memcpy(rx_data+at,p+4,count); rx_received+=count; reply[0]=1; }
+                else if (count<=rx_received-at && !memcmp(rx_data+at,p+4,count)) reply[0]=1;
+            }
+        } else if (cmd==0x79 && n==0 && rx_data && rx_received==ADF_BYTES) { rx_ready=1; reply[0]=1; }
+    }
+    put32(reply+1,rx_received);
+    core->reply(cmd|0x80,reply,sizeof reply);
+    return ZM_OK;
+}
 static int command(uint8_t cmd,const uint8_t *p,uint16_t n) {
     uint8_t ok=0;
+    if (cmd==0x6E || cmd==0x6F) return evo_command(cmd,p,n);
+    if (cmd>=0x77 && cmd<=0x79) return rx_command(cmd,p,n);
+    if (cmd==0x7A) { const uint8_t reply[2]={1,1}; core->reply(0xFA,reply,sizeof reply); return ZM_OK; }
     if (cmd==0x70) {
         if ((state==0 || state==3 || state==255) &&
             (n==0 || (n==6 && memcmp(p,"AMIGA",6)==0))) {
@@ -286,15 +598,24 @@ static int command(uint8_t cmd,const uint8_t *p,uint16_t n) {
                 if ((uint8_t)(head+1)==tail) { head=tail=0; lost=1; break; }
                 ring[head++]=p[i];
             }
-            core->mutex_unlock(lock); ok=1; core->signal_give(wake);
+            core->mutex_unlock(lock); core->signal_give(wake);
+            evo_reply_input(1);
+            return ZM_OK;
         }
+        evo_reply_input(0);
+        return ZM_OK;
     } else if (cmd==0x72) {
         uint8_t out[5+sizeof error_text];
         out[0]=(uint8_t)state; put32(out+1,core_version);
         size_t len=strlen(error_text); memcpy(out+5,error_text,len+1);
         core->reply(0xf2,out,(uint16_t)(6+len)); return ZM_OK;
     } else if (cmd==0x73) { exit_req=1; ok=1; core->signal_give(wake); }
-    else if (cmd!=0x74 && cmd!=0x75) return ZM_ERROR;
+    else if (cmd==0x74) {
+        if (n==6 && state==2) {
+            core->mutex_lock(lock); memcpy(evo_time,p,6); rtc_pending=1; core->mutex_unlock(lock);
+            ok=1; core->signal_give(wake);
+        }
+    } else if (cmd!=0x75) return ZM_ERROR;
     core->reply(cmd|0x80,&ok,1); return ZM_OK;
 }
 static int start(const zm_core_t *c) {
@@ -304,7 +625,8 @@ static int start(const zm_core_t *c) {
     core=c; lock=c->mutex_create(); link_lock=c->mutex_create(); wake=c->signal_create();
     if (!lock || !link_lock || !wake) return ZM_NO_MEMORY;
     state=0; live=0; exit_req=0; running=1; worker_done=0;
-    int r=c->task_start(worker,NULL,8192,3,1);
+    // Ядро 0, ниже звука: ответы Evo идут на ядре 1, а TLS и распаковка заняты секундами.
+    int r=c->task_start(worker,NULL,16384,2,0);
     if (r!=ZM_OK) { running=0; worker_done=1; return r; }
     audio_done=0; r=c->task_start(audio_task,NULL,4096,4,0);
     if (r!=ZM_OK) { audio_done=1; running=0; c->signal_give(wake); }
@@ -317,7 +639,7 @@ static void stop(void) {
 #ifndef AMIGA_HOST_TEST
 int main(int argc,char **argv) {
     static const zm_app_t app={sizeof(zm_app_t),ZM_APP_ABI_MAJOR,ZM_APP_ABI_MINOR,
-        "amiga","0.4",0x70,0x75,start,stop,command,NULL,NULL,NULL};
+        "amiga","0.8",0x6E,0x7A,start,stop,command,NULL,NULL,NULL};
     if (argc!=3) return 0;
     *(const zm_app_t **)argv[2]=&app;
     return ZM_APP_ABI_MAJOR;

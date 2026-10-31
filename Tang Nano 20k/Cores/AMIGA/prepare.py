@@ -16,8 +16,10 @@ if (ROOT / 'upstream.git').is_dir():
         raise SystemExit(f'Expected NanoMig {PIN}, found {actual}')
 FP.mkdir(exist_ok=True)
 nes = ROOT.parent / 'NES'
-for name in ('next_qspi.sv', 'cp_spi.sv', 'next_cp.sv', 'next_evo_reset.sv', 'fb_sdspi.sv'):
+for name in ('next_qspi.sv', 'cp_spi.sv', 'next_cp.sv', 'next_evo_reset.sv', 'fb_sdspi.sv', 'nes_osd_font.sv'):
     shutil.copyfile(nes / 'fpga' / name, FP / name)
+# Окно меню: шрифт и текстовая память как у NES, но своя сетка под кадр AGA.
+shutil.copyfile(ROOT/'integration/amiga_osd.sv', FP/'nes_osd.sv')
 shutil.copyfile(nes / 'fpga/nesVdac4.cst', FP / 'amigaVdac4.cst')
 # Match NanoMig's Tang Nano 20K button wiring: S1=88, S2=87, active high.
 cst=(FP/'amigaVdac4.cst').read_text(encoding='utf-8')
@@ -41,7 +43,7 @@ top = '''// SPDX-License-Identifier: GPL-3.0-or-later
 `define ENABLE_CACHE
 `define CHIPRAM_CACHE
 `define DENISE_EBR
-`define DISABLE_IDE
+`define ENABLE_RTC
 `define DISABLE_ROM_LOADER
 module amiga_vdac4''' + ports + ');\n`default_nettype none\n'
 top += '// HDMI clock' + section('// HDMI clock', '// control signals generated')
@@ -63,7 +65,8 @@ wire [5:0] leds; wire fdd_step_n;
 wire [1:0] osd_cpu=3, osd_chipmem=3, osd_slowmem=0, osd_fastmem=2;
 wire [2:0] osd_chipset=6, osd_turbo=2, osd_volume=4;
 wire [1:0] osd_floppy_drives=0, osd_video_filter=0, osd_video_scanlines=0, osd_video_screen=0;
-wire osd_video_mode=0, osd_floppy_wrprot=1, osd_floppy_turbo=0, osd_ide_enable=0, osd_stereo_mix=0;
+wire osd_video_mode=0, osd_floppy_turbo=0, osd_ide_enable=1, osd_stereo_mix=0;
+wire osd_floppy_wrprot=floppy_wrprot;
 wire hs_n, vs_n; wire [7:0] red, green, blue;
 wire [2:0] mouse_buttons;
 wire kbd_mouse_level, kbd_reset, keyboard_ack;
@@ -89,7 +92,12 @@ wire [31:0] debug_words [0:35];
 wire [31:0] cpu_debug [0:23];
 wire [31:0] cpu_trace [0:3];
 wire [8:0] trace_index; wire [31:0] trace_start;
-wire [31:0] video_probe;
+wire osd_wr, osd_show, floppy_wrprot; wire [8:0] osd_addr; wire [31:0] osd_data, osd_bar;
+wire [5:0] osd_sel; wire [29:0] osd_band, osd_rule; wire [11:0] rtc;
+assign debug_words[0]=32'h414d4406;
+assign debug_words[1]={14'b0,warm_reset,btn[1:0],kbd_reset,soft_reset,nanomig_reset,
+                      rom_done,sdram_ready,pll_lock,rst_28m,1'b0};
+`ifdef AMIGA_DEBUG
 reg [15:0] debug_hs_count, debug_vs_count;
 reg [31:0] debug_color_count, debug_rom_writes;
 reg debug_hs, debug_vs, debug_rom_we;
@@ -105,9 +113,6 @@ always @(posedge clk_28m) begin
         if (rom_write && !debug_rom_we) debug_rom_writes<=debug_rom_writes+1'b1;
     end
 end
-assign debug_words[0]=32'h414d4405;
-assign debug_words[1]={14'b0,warm_reset,btn[1:0],kbd_reset,soft_reset,nanomig_reset,
-                      rom_done,sdram_ready,pll_lock,rst_28m,1'b0};
 assign debug_words[2]={debug_vs_count,debug_hs_count};
 assign debug_words[3]=debug_color_count;
 for (genvar d=0;d<24;d=d+1) assign debug_words[4+d]=cpu_debug[d];
@@ -116,13 +121,19 @@ assign debug_words[29]={5'b0,sdram_cs,sdram_we,sdram_be,sdram_addr,1'b0};
 assign debug_words[30]={sdram_dout,sdram_din};
 assign debug_words[31]={8'b0,red,green,blue};
 for (genvar t=0;t<4;t=t+1) assign debug_words[32+t]=cpu_trace[t];
+`else
+// Обычная сборка: счётчики и трасса занимают логику и блочную память, включаются define AMIGA_DEBUG.
+for (genvar d=2;d<36;d=d+1) assign debug_words[d]=0;
+`endif
 amiga_link link(.clk(clk_28m),.rst_n(rst_28m_n),.sck(link_sck),.cs_n(link_cs_n),
     .io_in(link_io),.io_out(link_out),.io_oe(link_oe),.clk7_en(clk7_en),.clk7n_en(clk7n_en),
     .audio_left(audio_left),.audio_right(audio_right),.key_free(key_free),.debug_words(debug_words),
-    .trace_index(trace_index),.trace_start(trace_start),.video_probe(video_probe),
+    .trace_index(trace_index),.trace_start(trace_start),
+    .osd_wr(osd_wr),.osd_addr(osd_addr),.osd_data(osd_data),.osd_show(osd_show),.osd_sel(osd_sel),
+    .osd_band(osd_band),.osd_rule(osd_rule),.osd_bar(osd_bar),.rtc(rtc),.floppy_wrprot(floppy_wrprot),
     .disk_reset(nanomig_reset),.disk_rd(sd_rd),.disk_wr(sd_wr),.disk_sector(sd_sector),
     .disk_mounted(sd_img_mounted),.disk_size(sd_img_size),.disk_busy(sd_busy),.disk_done(sd_done),
-    .disk_strobe(sd_rd_byte_strobe),.disk_addr(sd_byte_index),.disk_data(sd_rd_data),
+    .disk_strobe(sd_rd_byte_strobe),.disk_addr(sd_byte_index),.disk_data(sd_rd_data),.disk_guest_data(sd_wr_data),
     .hid_strobe(hid_strobe),.hid_start(hid_start),.hid_data(hid_data),.hid_reset(hid_reset),
     .sd_cs_n(SD_CS),.sd_sck(SD_SCK),.sd_mosi(SD_MOSI),.sd_miso(SD_MISO),
     .boot_req(boot_req),.soft_reset(soft_reset),.rom_ready(rom_done),
@@ -134,7 +145,7 @@ hid hid(.clk(clk_28m),.reset(rst_28m | hid_reset),.data_in_strobe(hid_strobe),
     .kbd_reset(kbd_reset),.joystick0(joystick0),.joystick1(joystick1),.key_free(key_free));
 '''
 top += '// Minimig ram/rom interface' + section('// Minimig ram/rom interface', 'wire flash_ready;')
-top=top.replace('.por(rst_28m),','.por(rst_28m),\n .debug_words(cpu_debug),\n .trace_index(trace_index),.trace_start(trace_start),.trace_words(cpu_trace),')
+top=top.replace('.por(rst_28m),','.por(rst_28m),\n .debug_words(cpu_debug),\n .trace_index(trace_index),.trace_start(trace_start),.trace_words(cpu_trace),\n .rtc(rtc),')
 top += '''
 wire sdram_sync=clk7_en;
 wire sdram_access=(!ram_oe_n || !ram_we_n);
@@ -157,8 +168,26 @@ video = video.replace('.AUDIO_RATE(AUDIO_RATE)', '.DVI_OUTPUT(1)')
 video = video.replace('.clk_audio(clk_audio)', ".clk_audio(1'b0)")
 video = video.replace('.audio_sample_word( audio_reg )', '.audio_sample_word( silent_audio )')
 video = video.replace("{ video_red, 2'b00, video_green, 2'b00, video_blue, 2'b00 }",
-                      "video_probe[31:24]==8'ha5 ? video_probe[23:0] : { red, green, blue }")
-top += "\nwire [15:0] silent_audio[1:0];\nassign silent_audio[0]=0, silent_audio[1]=0;\n" + video
+                      "osd_rgb")
+top += "\nwire [15:0] silent_audio[1:0];\nassign silent_audio[0]=0, silent_audio[1]=0;\n" + '''
+// Окно меню дискет поверх картинки. Координаты считаются от синхроимпульсов AGA: кадр 908x626,
+// на HDMI видно 165..886 x 45..622 (снято с карты захвата), середина 525 x 334; окно 470x406 — вокруг неё.
+reg [10:0] osd_cx=0; reg [9:0] osd_cy=0; reg osd_hs=1, osd_vs=1;
+always @(posedge clk_28m) begin
+    osd_hs<=hs_n; osd_vs<=vs_n;
+    if (osd_hs && !hs_n) begin osd_cx<=0; osd_cy<=osd_cy+1'b1; end
+    else osd_cx<=osd_cx+1'b1;
+    if (osd_vs && !vs_n) osd_cy<=0;
+end
+wire osd_box, osd_hl, osd_band_px, osd_text; wire [23:0] osd_text_rgb;
+nes_osd #(.COLS(56),.ROWS(24),.PAD(12),.WX0(290),.WY0(131),.FRAME_Y(1)) osd(.clk(clk_28m),
+    .wr(osd_wr),.wr_addr(osd_addr),.wr_data(osd_data),.show(osd_show),.sel(osd_sel),
+    .band_rows(osd_band),.rule_rows(osd_rule),
+    .clk_pixel(clk_28m),.cx(osd_cx),.cy(osd_cy),
+    .box(osd_box),.hl(osd_hl),.band(osd_band_px),.text(osd_text),.text_rgb(osd_text_rgb));
+wire [23:0] osd_rgb = osd_text ? osd_text_rgb : osd_hl ? 24'h2C4C9C : osd_band_px ? 24'h1E3266 :
+    osd_box ? {3'b0,red[7:3],3'b0,green[7:3],3'b0,blue[7:3]}+24'h080C28 : {red,green,blue};
+''' + video
 for old, new in [('tmds_clk_p','O_tmds_clk_p'),('tmds_clk_n','O_tmds_clk_n'),('tmds_d_p','O_tmds_data_p'),('tmds_d_n','O_tmds_data_n')]:
     top = re.sub(r'\b'+old+r'\b', new, top)
 top += '\nendmodule\n`default_nettype wire\n'
@@ -221,7 +250,99 @@ sdram=sdram.replace(marker,'''    STATE_RAS_WAIT_0: begin
         sd_dq <= 1;
     end
 '''+marker)
+# Адрес столбца уходил на том же фронте, что и READ, но команда лежит в регистрах вывода, а адрес идёт по кристаллу:
+# на выводе он отставал от команды до 2,5 нс и зависел от раскладки (STA эти выводы не проверяет). Ядро 0.6 первой
+# сборки: A4..A7 за 0,3 нс до фронта SDRAM, красный экран Kickstart (контрольная сумма ROM). Теперь адрес — на такт раньше
+# команды; ACTIVE к этому фронту уже защёлкнута (её фронт SDRAM — на 90 градусов после рабочего фронта контроллера).
+old='      sd_addr <= sd_addr_cas;\n\n      case (sdram_port)'
+assert sdram.count(old)==1
+sdram=sdram.replace(old,'      case (sdram_port)')
+old="    STATE_RAS_WAIT_0: begin\n"
+assert sdram.count(old)==1
+sdram=sdram.replace(old,old+"      sd_addr <= sd_addr_cas;\n")
 (FP/'sdram.sv').write_text('// VDAC4 debug5: контроллер по спаду clk, DQ по фронту; такт SDRAM на 90 градусов после рабочего фронта.\n'+sdram,encoding='utf-8')
+
+# Часы RTC: счётчик секунды рассчитан на 28,375 МГц, здесь такт 28,5 МГц (иначе +6 минут в сутки).
+minimig=(UP/'src/minimig-aga/minimig.v').read_text(encoding='utf-8')
+assert minimig.count("cnt < 32'd28375159")==1
+minimig=minimig.replace("cnt < 32'd28375159","cnt < 32'd28499999")
+# Часы как MSM6242: Test Kit и SetClock пишут в регистры и проверяют записанное; только чтение для них — «нет часов».
+# Счёт исходника ошибался на переносе минут (минуты шли до 99) и не знал смены суток; дату он по-прежнему не считает.
+a=minimig.index("\t   (cpu_address_out[5:2] == 4'hd)?4'h0:")
+b=minimig.index("// hours, minutes and seconds are just BCD encoded")
+minimig=minimig[:a]+'''\t   (cpu_address_out[5:2] == 4'hd)?rtc_reg_D:
+\t   (cpu_address_out[5:2] == 4'he)?rtc_reg_E:
+\t   rtc_reg_F };
+
+'''+minimig[b:]
+minimig=minimig.replace("reg [3:0] rtc_reg_C;  // weekday\n","reg [3:0] rtc_reg_C;  // weekday\nreg [3:0] rtc_reg_D = 4'h0;  // HOLD, BUSY (всегда 0), IRQ, ADJ\nreg [3:0] rtc_reg_E = 4'h0;\nreg [3:0] rtc_reg_F = 4'h4;  // 24 часа\n")
+a=minimig.index("always @(posedge clk) begin\n   static reg old_flg")
+b=minimig.index("`endif",a)
+minimig=minimig[:a]+'''wire rtc_stopped = rtc_reg_D[0] | rtc_reg_F[0] | rtc_reg_F[1];  // HOLD, RESET, STOP
+always @(posedge clk) begin
+   static reg old_flg = 1'b0;
+   reg [31:0] cnt;
+
+   old_flg <= rtc[11];
+   if(sel_rtc && cpu_lwr) begin
+      // запись процессора: регистры лежат на младших битах младшего байта
+      case(cpu_address_out[5:2])
+        4'h0: rtc_reg_0 <= cpu_data_out[3:0];
+        4'h1: rtc_reg_1 <= cpu_data_out[3:0];
+        4'h2: rtc_reg_2 <= cpu_data_out[3:0];
+        4'h3: rtc_reg_3 <= cpu_data_out[3:0];
+        4'h4: rtc_reg_4 <= cpu_data_out[3:0];
+        4'h5: rtc_reg_5 <= cpu_data_out[3:0];
+        4'h6: rtc_reg_6 <= cpu_data_out[3:0];
+        4'h7: rtc_reg_7 <= cpu_data_out[3:0];
+        4'h8: rtc_reg_8 <= cpu_data_out[3:0];
+        4'h9: rtc_reg_9 <= cpu_data_out[3:0];
+        4'ha: rtc_reg_A <= cpu_data_out[3:0];
+        4'hb: rtc_reg_B <= cpu_data_out[3:0];
+        4'hc: rtc_reg_C <= cpu_data_out[3:0];
+        4'hd: rtc_reg_D <= cpu_data_out[3:0] & 4'hd;
+        4'he: rtc_reg_E <= cpu_data_out[3:0];
+        default: rtc_reg_F <= cpu_data_out[3:0];
+      endcase
+   end
+   else if(old_flg ^ rtc[11]) begin
+      // время от Evo
+      if(rtc[10:8] == 3'd0) { rtc_reg_B, rtc_reg_A } <= bcd;  // years
+      if(rtc[10:8] == 3'd1) { rtc_reg_9, rtc_reg_8 } <= bcd;  // months
+      if(rtc[10:8] == 3'd2) { rtc_reg_7, rtc_reg_6 } <= bcd;  // days
+      if(rtc[10:8] == 3'd3) { rtc_reg_5, rtc_reg_4 } <= bcd;  // hours
+      if(rtc[10:8] == 3'd4) { rtc_reg_3, rtc_reg_2 } <= bcd;  // minutes
+      if(rtc[10:8] == 3'd5) { rtc_reg_1, rtc_reg_0 } <= bcd;  // seconds
+      if(rtc[10:8] == 3'd2) rtc_reg_C <= { 1'b0, rtc[7:5] };  // weekday
+   end
+   else if(cnt < 32'd28499999) cnt <= cnt + 32'd1;
+   else if(!rtc_stopped) begin
+      cnt <= 32'd0;
+      // секунда: цепочка переносов до часов; дату ядро не считает, её заново даёт Evo при старте
+      if(rtc_reg_0 < 9) rtc_reg_0 <= rtc_reg_0 + 4'd1;
+      else begin
+         rtc_reg_0 <= 4'h0;
+         if(rtc_reg_1 < 5) rtc_reg_1 <= rtc_reg_1 + 4'd1;
+         else begin
+            rtc_reg_1 <= 4'h0;
+            if(rtc_reg_2 < 9) rtc_reg_2 <= rtc_reg_2 + 4'd1;
+            else begin
+               rtc_reg_2 <= 4'h0;
+               if(rtc_reg_3 < 5) rtc_reg_3 <= rtc_reg_3 + 4'd1;
+               else begin
+                  rtc_reg_3 <= 4'h0;
+                  if(rtc_reg_5 == 2 && rtc_reg_4 == 3) begin rtc_reg_5 <= 4'h0; rtc_reg_4 <= 4'h0; end
+                  else if(rtc_reg_4 < 9) rtc_reg_4 <= rtc_reg_4 + 4'd1;
+                  else begin rtc_reg_4 <= 4'h0; rtc_reg_5 <= rtc_reg_5 + 4'd1; end
+               end
+            end
+         end
+      end
+   end
+end
+'''+minimig[b:]
+assert minimig.count('rtc_reg_D')==4 and minimig.count('rtc_stopped')==2
+(FP/'minimig.v').write_text('// VDAC4: секунда RTC от 28,5 МГц, часы как MSM6242; generated by prepare.py.\n'+minimig,encoding='utf-8')
 
 # AGA already produces RGB888; retain it through blanking and the line doubler.
 nanomig=(UP/'src/nanomig.v').read_text(encoding='utf-8')
@@ -308,7 +429,7 @@ set_false_path -from [get_ports {link_cs_n link_io[*] cp_cs_n cp_mosi btn[*] m_s
 (FP / 'amigaVdac4.sdc').write_text(sdc,encoding='utf-8')
 tcl=['set_device GW2AR-LV18QN88C8/I7 -device_version C', 'add_file fpga/amiga_vdac4.sv']
 source=(UP/'src/scripts/build_020.tcl').read_text(encoding='utf-8')
-skip={'tang/nano20k/top_020.sv','tang/nano20k/amigaclks.v','misc/hid.v','misc/amiga_xml.hex','hdmi/serializer.sv','misc/sdram.sv',
+skip={'tang/nano20k/top_020.sv','tang/nano20k/amigaclks.v','minimig-aga/minimig.v','misc/hid.v','misc/amiga_xml.hex','hdmi/serializer.sv','misc/sdram.sv',
       'nanomig.v','minimig/Amber.v','minimig-aga/cpu_wrapper.v',
       'misc/mcu_spi.v','misc/sysctrl.v','misc/osd_u8g2.v','misc/ws2812.v',
       'misc/sd_card.v','misc/sd_rw.v','misc/sdcmd_ctrl.v','misc/flash_dspi.v',
@@ -318,7 +439,7 @@ for p in re.findall(r'^add_file (.+)$',source,re.M):
     if p in skip or p.endswith(('.cst','.sdc')): continue
     if p.startswith('hdmi/') and p not in ('hdmi/hdmi.sv','hdmi/tmds_channel.sv'): continue
     tcl.append('add_file upstream/src/'+p)
-for n in ['amigaclks.v','nanomig.v','cpu_wrapper.v','amiga_debug.sv','amiga_disk.sv','sdram.sv','Amber.v','hid.v','serializer.sv','next_qspi.sv','cp_spi.sv','next_cp.sv','next_evo_reset.sv','fb_sdspi.sv','amiga_link.sv','amigaVdac4.cst','amigaVdac4.sdc']:
+for n in ['amigaclks.v','minimig.v','nes_osd.sv','nes_osd_font.sv','nanomig.v','cpu_wrapper.v','amiga_debug.sv','amiga_disk.sv','sdram.sv','Amber.v','hid.v','serializer.sv','next_qspi.sv','cp_spi.sv','next_cp.sv','next_evo_reset.sv','fb_sdspi.sv','amiga_link.sv','amigaVdac4.cst','amigaVdac4.sdc']:
     tcl.append('add_file fpga/'+n)
 tcl += ['set_option -synthesis_tool gowinsynthesis','set_option -top_module amiga_vdac4',
         'set_option -output_base_name amigaVdac4','set_option -verilog_std sysv2017',
@@ -334,8 +455,9 @@ tcl += ['set_option -synthesis_tool gowinsynthesis','set_option -top_module amig
 esp=ROOT/'esp'
 (esp/'main').mkdir(parents=True,exist_ok=True)
 (esp/'tools').mkdir(exist_ok=True)
-for name in ('ps2_hid.c','ps2_hid.h','zm_app.h'):
+for name in ('ps2_hid.c','ps2_hid.h'):
     shutil.copyfile(nes/'esp/main'/name,esp/'main'/name)
+shutil.copyfile(ROOT.parents[2]/'ESP32 S3 Zero N8R8/Firmware/modules/sdk/include/zm_app.h',esp/'main/zm_app.h')
 for name in ('CMakeLists.txt','sdkconfig.defaults','tools/build.ps1','main/CMakeLists.txt'):
     text=(nes/'esp'/name).read_text(encoding='utf-8')
     text=text.replace('nes_vdac4','amiga_vdac4').replace('NES.ELF','AMIGA.ELF').replace('NES.','AMIGA.')

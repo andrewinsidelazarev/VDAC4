@@ -15,7 +15,7 @@ def read(commands,suffix):
     return json.loads(result.read_text())
 identity=read(['tang rd 0','tang rd 4','tang rd 60'],'.identity')
 values=[r['value'] for r in identity if 'value' in r]
-assert len(values)==3 and values[:2]==[0x56444334,0x05010001] and values[2] in (0x414d4401,0x414d4402,0x414d4403,0x414d4404,0x414d4405),f'Unexpected running core/build: {values}; identity saved at {prefix}'
+assert len(values)==3 and values[:2]==[0x56444334,0x05010005] and values[2] in (0x414d4401,0x414d4402,0x414d4403,0x414d4404,0x414d4405,0x414d4406),f'Unexpected running core/build: {values}; identity saved at {prefix}'
 raw=read([f'tang rd {i:x}' for i in range(0x60,0xe0,4)],'.raw')
 words=[r['value'] for r in raw if 'value' in r]
 assert len(words)==32 and all(w is not None for w in words),f'Incomplete diagnostics: {prefix}'

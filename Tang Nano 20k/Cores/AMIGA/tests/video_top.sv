@@ -3,7 +3,6 @@ module video_top (
     input clk, reset, write_color, loct, ehb, hblank, vblank, hs_in,
     input [7:0] palette_index, write_index,
     input [11:0] palette_data,
-    input [31:0] video_probe,
     input [1:0] filter, scanline,
     output [23:0] clut_rgb, rgb,
     output [9:0] tmds_b, tmds_g, tmds_r,

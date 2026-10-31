@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// VDAC4 A1200 bring-up: bounded ROM packets, HID transport and stereo audio.
+// VDAC4 A1200: bounded ROM packets, HID transport, stereo audio, disk mailbox, menu window, RTC.
 // Register addresses in this module are WORD addresses; host uses byte addresses.
 module amiga_link (
     input wire clk, rst_n, sck, cs_n,
@@ -12,11 +12,16 @@ module amiga_link (
     input wire [31:0] debug_words [0:35],
     output reg [8:0] trace_index,
     output reg [31:0] trace_start,
-    output reg [31:0] video_probe,
+    output wire osd_wr, output wire [8:0] osd_addr, output wire [31:0] osd_data,
+    output reg osd_show, output reg [5:0] osd_sel,
+    output reg [29:0] osd_band, osd_rule, output reg [31:0] osd_bar,
+    output reg [11:0] rtc,              // [11] — переключатель, [10:8] — поле, [7:0] — значение
+    output wire floppy_wrprot,
     input wire disk_reset,
     input wire [7:0] disk_rd, disk_wr, input wire [31:0] disk_sector,
     output wire [7:0] disk_mounted, disk_data, output wire [63:0] disk_size,
     output wire disk_busy, disk_done, disk_strobe, output wire [8:0] disk_addr,
+    input wire [7:0] disk_guest_data,
     output reg hid_strobe, hid_start, hid_reset, output reg [7:0] hid_data,
     output reg boot_req, output wire soft_reset,
     output reg rom_ready, output reg rom_we,
@@ -31,9 +36,15 @@ module amiga_link (
         .io_oe(io_oe), .clk(clk), .rst_n(rst_n), .wr_stb(wr_stb),
         .wr_addr(wr_addr), .wr_data(wr_data), .rd_addr(rd_addr), .rd_data(rd_data));
 
-    wire [31:0] disk_status;
+    // Окно текста меню: слова 0xC00..0xDFF (байты 0x3000..), как у NES
+    assign osd_wr = wr_stb && wr_addr[17:9]==9'd6;
+    assign osd_addr = wr_addr[8:0];
+    assign osd_data = wr_data;
+
+    wire [31:0] disk_status, disk_tx_q;
     amiga_disk disk(.clk(clk),.rst_n(rst_n),.guest_reset(disk_reset),
         .wr_stb(wr_stb),.wr_addr(wr_addr),.wr_data(wr_data),.rd_addr(rd_addr),.rd_data(disk_status),
+        .rd_clk(sck),.tx_q(disk_tx_q),.floppy_wrprot(floppy_wrprot),.guest_data(disk_guest_data),
         .request_rd(disk_rd),.request_wr(disk_wr),.request_sector(disk_sector),
         .image_mounted(disk_mounted),.image_size(disk_size),.busy(disk_busy),.done(disk_done),
         .byte_strobe(disk_strobe),.byte_addr(disk_addr),.byte_data(disk_data));
@@ -80,12 +91,10 @@ module amiga_link (
             received<=0; crc<=32'hffffffff; expected_crc<=0; expected_set<=0;
             rom_ready<=0; rom_we<=0; rom_addr<=0; rom_word<=0;
             boot_req<=0; scratch<=0; reset_count<=0; trace_index<=0; trace_start<=0;
-            video_probe<=0;
+            osd_show<=0; osd_sel<=6'd63; osd_band<=0; osd_rule<=0; osd_bar<=0; rtc<=0;
             hid_strobe<=0; hid_start<=0; hid_data<=0; hid_reset<=0;
         end else begin
             hid_strobe<=0; hid_reset<=0;
-            // Diagnostic output only; a guest reset restores the ordinary picture.
-            if (disk_reset) video_probe<=0;
             if (reset_count != 0) reset_count<=reset_count-1'b1;
             // Same phase schedule as NanoMig's flash-to-SDRAM writer.
             // Data/address stay constant until the falling 7 MHz enable.
@@ -140,7 +149,11 @@ module amiga_link (
                     18'h3c: if (wr_data==32'h424f4f54) boot_req<=1;
                     18'h3d: trace_index<=wr_data[8:0];
                     18'h3e: trace_start<=wr_data;
-                    18'h68: if (!disk_reset) video_probe<=wr_data;
+                    18'h30: begin osd_show<=wr_data[0]; osd_sel<=wr_data[13:8]; end
+                    18'h34: osd_band<=wr_data[29:0];
+                    18'h35: osd_rule<=wr_data[29:0];
+                    18'h36: osd_bar<=wr_data;
+                    18'h37: rtc<={~rtc[11],wr_data[10:0]};
                     default: ;
                 endcase
             end
@@ -173,10 +186,11 @@ module amiga_link (
         if (rd_addr>=13'h1800 && rd_addr<13'h1c00) rd_data=audio_q;
         else if (rd_addr>=13'h0800 && rd_addr<13'h0a00) rd_data=sd_rx_q;
         else if (rd_addr>=13'h18 && rd_addr<13'h3c) rd_data=debug_words[rd_addr-13'h18];
-        else if (rd_addr>=13'h60 && rd_addr<=13'h66) rd_data=disk_status;
+        else if (rd_addr>=13'h60 && rd_addr<=13'h67) rd_data=disk_status;
+        else if (rd_addr>=13'h1400 && rd_addr<13'h1480) rd_data=disk_tx_q;   // сектор записи гостя
         else case (rd_addr)
             13'h00: rd_data=32'h56444334;
-            13'h01: rd_data=32'h05010001;
+            13'h01: rd_data=32'h05010006;
             13'h02: rd_data={29'd0,rom_ready,boot_req,error};
             13'h03: rd_data={24'd0,key_free};
             13'h08: rd_data={22'd0,audio_gray};
@@ -194,8 +208,6 @@ module amiga_link (
             13'h40: rd_data=sd_ctrl_rd;
             13'h41: rd_data=sd_ptr_rd;
             13'h42: rd_data=sd_stat;
-            13'h68: rd_data=video_probe;
-            13'h69: rd_data=32'h56505231; // VPR1: A5RRGGBB solid-output probe
             default: ;
         endcase
     end

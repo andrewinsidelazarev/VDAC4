@@ -15,11 +15,12 @@ input [16:0] probe_addr,output [31:0] probe_data);
 reg [1:0] phase=0;
 always @(posedge clk) if (!rst_n) phase<=0; else phase<=phase+1'b1;
 wire [31:0] debug_words [0:35];
-wire [8:0] trace_index;wire [31:0] trace_start,video_probe;
+wire [8:0] trace_index;wire [31:0] trace_start;
 for(genvar i=0;i<36;i=i+1) assign debug_words[i]=0;
 amiga_link dut(.clk7_en(phase==0),.clk7n_en(phase==2),
 .disk_reset(1'b0),.disk_rd(8'b0),.disk_wr(8'b0),.disk_sector(32'b0),
-.disk_mounted(),.disk_data(),.disk_size(),.disk_busy(),.disk_done(),.disk_strobe(),.disk_addr(),
+.disk_mounted(),.disk_data(),.disk_size(),.disk_busy(),.disk_done(),.disk_strobe(),.disk_addr(),.disk_guest_data(8'b0),
+.osd_wr(),.osd_addr(),.osd_data(),.osd_show(),.osd_sel(),.osd_band(),.osd_rule(),.osd_bar(),.rtc(),.floppy_wrprot(),
 .audio_left(15'b0),.audio_right(15'b0),.key_free(8'd8),.sd_miso(sd_mosi),.*);
 wire clk_85m=clk85,rst_sdram_n=rst_n;
 wire [31:0] IO_sdram_dq;

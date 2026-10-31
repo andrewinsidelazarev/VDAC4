@@ -70,16 +70,12 @@ int main(int argc,char **argv) {
     std::vector<uint8_t> rom((std::istreambuf_iterator<char>(f)),{});CHECK(rom.size()==524288);
     unsigned cases=0;
     for(unsigned p:{285u,570u,1140u,5700u})for(unsigned phase=0;phase<400;phase+=40) {
-        Sim s(p,phase);CHECK(s.rd(0)==0x56444334);CHECK(s.rd(4)==0x05010001);
+        Sim s(p,phase);CHECK(s.rd(0)==0x56444334);CHECK(s.rd(4)==0x05010006);
         for(unsigned i=0;i<36;i++)CHECK(s.rd(0x60+4*i)==0xd1a60000+i);
         s.wr(0x60,0xffffffff);CHECK(s.rd(0x60)==0xd1a60000); // diagnostics are read-only
         CHECK(s.rd(0xf4)==0);CHECK(s.rd(0xf8)==0);
-        CHECK(s.rd(0x1a4)==0x56505231);CHECK(s.rd(0x1a0)==0);CHECK(s.q.video_probe==0);
-        s.wr(0x1a0,0xa5123456);CHECK(s.rd(0x1a0)==0xa5123456);CHECK(s.q.video_probe==0xa5123456);
-        s.q.disk_reset=1;s.advance(2000);CHECK(s.q.video_probe==0);
-        s.wr(0x1a0,0xa5ffffff);CHECK(s.rd(0x1a0)==0);
-        s.q.disk_reset=0;s.wr(0x1a0,0xa5abcdef);CHECK(s.q.video_probe==0xa5abcdef);
-        s.wr(0x1a0,0);CHECK(s.q.video_probe==0);
+        s.wr(0xc0,0x0501);CHECK(s.q.osd_show);CHECK(s.q.osd_sel==5);s.wr(0xc0,0x3f00);CHECK(!s.q.osd_show);
+        {unsigned before=s.q.rtc>>11;s.wr(0xdc,0x2a5);CHECK((s.q.rtc&0x7ff)==0x2a5);CHECK((s.q.rtc>>11)==!before);}
         s.wr(0xf4,0x3ff);CHECK(s.rd(0xf4)==0x1ff);
         s.wr(0xf8,123456);CHECK(s.rd(0xf8)==123456);
         CHECK(!s.q.rom_ready);s.wr(0x3c,0xfedcba98);CHECK(s.rd(0x3c)==0xfedcba98);
@@ -99,7 +95,7 @@ int main(int argc,char **argv) {
         unsigned limit=0;while((s.rd(0x108)&1)&&limit++<100)s.advance(400*200);
         CHECK(limit<100);CHECK(s.rd(0x2000)==0x12345678);CHECK(s.rd(0x2004)==0x9abcdef0);
         // Actual QSPI path to the DF0 mailbox: all byte values and final sector.
-        CHECK(s.rd(0x198)==0x41444631);s.wr(0x180,901120);CHECK(s.q.disk_size==901120);
+        CHECK(s.rd(0x198)==0x41444632);CHECK(s.q.floppy_wrprot);s.wr(0x19c,0);CHECK(!s.q.floppy_wrprot);s.wr(0x180,901120);CHECK(s.q.disk_size==901120);
         s.q.disk_sector=1759;s.q.disk_rd=1;s.advance(1600);CHECK(s.q.disk_busy);
         s.q.disk_rd=0;s.advance(1600);CHECK(s.rd(0x184)==0x103);CHECK(s.rd(0x188)==1759);
         unsigned token=s.rd(0x18c);CHECK(token==1);
@@ -118,6 +114,25 @@ int main(int argc,char **argv) {
         CHECK(s.rd(0x18c)==token+2);s.write(0x5000,payload);
         s.wr(0x190,token+1);CHECK(s.rd(0x184)&4);CHECK(s.disk_bytes.empty());
         s.q.disk_reset=1;s.advance(1600);s.q.disk_reset=0;s.advance(1600);
+        // Запись сектора: ящик забирает 512 байт у гостя, хост читает окно и подтверждает.
+        {
+            s.q.disk_sector=7;s.q.disk_wr=1;s.advance(1600);CHECK(s.q.disk_busy);s.q.disk_wr=0;
+            s.advance(400ull*8400);CHECK(s.rd(0x184)==0x11b);CHECK(s.rd(0x188)==7);
+            for(unsigned i=0;i<128;i++){
+                uint32_t w=0;
+                for(unsigned k=0;k<4;k++){unsigned a=i*4+k;w|=(((a&255)*5+3)&255^(a>>8))<<(8*k);}
+                CHECK(s.rd(0x5000+i*4)==w);
+            }
+            unsigned done=s.disk_done_count,t=s.rd(0x18c);
+            s.wr(0x190,t+1);CHECK(s.rd(0x184)&4);s.q.disk_reset=1;s.advance(1600);s.q.disk_reset=0;s.advance(1600);
+            s.q.disk_wr=1;s.advance(1600);s.q.disk_wr=0;s.advance(400ull*8400);
+            t=s.rd(0x18c);s.wr(0x190,t);s.advance(4000);CHECK(s.disk_done_count==done+1);CHECK(!s.q.disk_busy);
+            // Диск HD0 — свой импульс подключения, сектор без проверки ядром.
+            s.wr(0x194,4);s.wr(0x180,1048576);CHECK(s.q.disk_size==1048576);s.wr(0x194,0);
+            s.q.disk_sector=100000;s.q.disk_rd=0x10;s.advance(1600);s.q.disk_rd=0;s.advance(1600);
+            CHECK((s.rd(0x184)>>8&255)==0x10);t=s.rd(0x18c);s.write(0x5000,payload);s.wr(0x190,t);s.advance(400ull*2100);
+            CHECK(!s.q.disk_busy);CHECK(!(s.rd(0x184)&4));
+        }
         s.wr(0x180,0);CHECK(s.q.disk_size==0);
         s.wr(0xf0,0x424f4f54);CHECK(s.q.boot_req);cases++;
     }

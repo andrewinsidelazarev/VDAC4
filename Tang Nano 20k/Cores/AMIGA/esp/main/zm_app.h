@@ -29,7 +29,7 @@ extern "C" {
 #endif
 
 #define ZM_APP_ABI_MAJOR 1
-#define ZM_APP_ABI_MINOR 9   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
+#define ZM_APP_ABI_MINOR 10   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
                                 4: core_* (ядра ПЛИС из кэша BL616), link_*, sock_* (TCP/UDP);
                                 5: ui_* — экран приложения оверлеем Tang поверх картинки Evo;
                                 6: app_done — приложение кончило работу: выгрузить */
@@ -236,7 +236,9 @@ struct zm_core {
    * версия}); ZM_NOT_FOUND — нет ни в кэше, ни на SD; ZM_BUSY — загрузка уже идёт; ZM_ERROR —
    * не загрузилось (Tang снова в слоте 0, TS-Config). Грузит задача прошивки: выгрузка
    * приложения посреди загрузки её не прерывает. Загрузившее ядро приложение при выгрузке
-   * возвращает Tang в слот 0 (ядро ESP само зовёт core_back).
+   * возвращает Tang в слот 0 (ядро ESP само зовёт core_back). С ESP 0.1.101 ядро со своим
+   * слотом во flash Tang (VIDEO — слот 3) грузится оттуда за доли секунды (прошивка BL616 35+);
+   * слот пуст — как прежде, через кэш.
    * core_back — назад в слот 0: запись BOOT текущему ядру (FT812, ядро из кэша), ждать
    * TS-Config на LINK до timeout_ms. Tang уже в TS-Config — сразу ZM_OK. Ядро приложение
    * отпускает в любом случае: ZM_TIMEOUT — возврат не вышел, ESP повторит BOOT сама через 3 с.
@@ -293,9 +295,26 @@ struct zm_core {
    * Только TS-Config (с 0.1.96 и ядро NES 0.7+); Session удерживается до закрытия и проверки чтением обратно.
    * path.tmp/path.bak — временный файл и предыдущая копия. Приложение решает,
    * какие данные писать и как восстанавливаться из .bak после прерванной замены.
-   * ABI 1.8 ограничивал запись форматом NES; новых полей в таблице нет. */
+   * ABI 1.8 ограничивал запись форматом NES; новых полей в таблице нет.
+   * С ABI 1.10 недостающие папки пути создаются, дата файла — по часам ESP. */
   int (*sd_write)(const char* path, const uint8_t* data, size_t size,
                   const volatile int* active);
+
+  /* ABI 1.10: файл на microSD Tang как диск, секторы по 512 байт, длина файла не меняется.
+   * Те же условия, что у sd_read; файл не копируется в память (образ HDF, дискета).
+   * sd_open: *file — дескриптор, *sectors — длина в секторах. writable: 0 — только чтение.
+   * ZM_NOT_FOUND — файла нет, ZM_BUSY — карта занята, попробовать позже.
+   * sd_pread / sd_pwrite: count секторов с sector; ZM_BUSY — повторить, ZM_ERROR — отказ.
+   * sd_close — закрыть; при выгрузке приложения ядро закрывает оставшиеся само (до четырёх). */
+  int (*sd_open)(const char* path, int writable, uint32_t* sectors, void** file);
+  int (*sd_pread)(void* file, uint32_t sector, uint8_t* data, uint32_t count);
+  int (*sd_pwrite)(void* file, uint32_t sector, const uint8_t* data, uint32_t count);
+  void (*sd_close)(void* file);
+
+  /* ABI 1.10: новый файл длиной sectors по 512 байт, место на карте занято, содержимое не стёрто.
+   * Открыть его — sd_open. ZM_NO_MEMORY — нет места на карте, ZM_BUSY — карта занята,
+   * ZM_ERROR — файл уже есть или иной отказ; при отказе файла не остаётся. */
+  int (*sd_create)(const char* path, uint32_t sectors);
 };
 
 /* Таблица приложения: заполняет приложение в main. */

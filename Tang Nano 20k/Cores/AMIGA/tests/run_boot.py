@@ -9,11 +9,12 @@ import argparse,hashlib,json,os,re,struct,subprocess,time,zlib
 ap=argparse.ArgumentParser();ap.add_argument('--seconds',type=float,default=.12)
 ap.add_argument('--clock-order',choices=['28-first','85-first','together'],default='together')
 ap.add_argument('--adf',type=Path)
+ap.add_argument('--hdf',type=Path)
 ap.add_argument('--no-build',action='store_true');args=ap.parse_args()
 root=Path(__file__).resolve().parents[1]
 stage=root/'tests/boot-build';stage.mkdir(exist_ok=True)
 top=(root/'fpga/amiga_vdac4.sv').read_text(encoding='utf-8')
-defines='\n'.join(re.findall(r'^`define .+$',top,re.M))+'\n`define INFER_DPRAM\n'
+defines='\n'.join(re.findall(r'^`define .+$',top,re.M))+'\n`define INFER_DPRAM\n`define AMIGA_DEBUG\n'
 config=top.split('wire [1:0] osd_cpu=',1)[1].split('reg [1:0] button_reset_sync=',1)[0]
 config='wire [1:0] osd_cpu='+config
 config=config.replace('wire hs_n, vs_n; wire [7:0] red, green, blue;','')
@@ -30,6 +31,7 @@ wire [31:0] trace_start=0;
 wire rst_sdram_n=~por;
 wire rst_28m=por || !sdram_ready;
 wire [1:0] btn=0;wire soft_reset=0;
+wire floppy_wrprot;wire [11:0] rtc=0;
 wire clk7_en,clk7n_en,rom_write=0;
 wire [17:0] rom_address=0;wire [15:0] rom_value=0;
 wire [14:0] audio_left,audio_right;
@@ -42,8 +44,12 @@ wire O_sdram_cs_n,O_sdram_wen_n,O_sdram_ras_n,O_sdram_cas_n,O_sdram_cke;
 assign kbd_reset=0;
 assign mouse_buttons=0,kbd_mouse_level=0,kbd_mouse_type=0,kbd_mouse_data=0,joystick0=0,joystick1=0;
 assign reset_out=nanomig_reset;
+// Наблюдение обмена с диском: первый запрос каждого устройства.
+reg [7:0] seen_rd=0;
+always @(posedge clk_28m) if (|(sd_rd & ~seen_rd)) begin seen_rd<=seen_rd|sd_rd; $display("first read request drive %02x sector %0d busy %b",sd_rd,sd_sector,sd_busy); end
 amiga_disk disk(.clk(clk_28m),.rst_n(~por),.guest_reset(nanomig_reset),
 .wr_stb(host_wr),.wr_addr(host_addr),.wr_data(host_data),.rd_addr(13'h61),.rd_data(disk_status),
+.rd_clk(clk_28m),.tx_q(),.floppy_wrprot(floppy_wrprot),.guest_data(sd_wr_data),
 .request_rd(sd_rd),.request_wr(sd_wr),.request_sector(sd_sector),
 .image_mounted(sd_img_mounted),.image_size(sd_img_size),.busy(sd_busy),.done(sd_done),
 .byte_strobe(sd_rd_byte_strobe),.byte_addr(sd_byte_index),.byte_data(sd_rd_data));
@@ -78,7 +84,7 @@ assert len(rom)==524288
 sources=[]
 for name in re.findall(r'^add_file (.+)$',(root/'build.tcl').read_text(),re.M):
     if name.startswith('upstream/src/minimig-aga/') or name in (
-        'fpga/nanomig.v','fpga/cpu_wrapper.v','fpga/amiga_debug.sv','fpga/amiga_disk.sv','fpga/Amber.v',
+        'fpga/minimig.v','fpga/nanomig.v','fpga/cpu_wrapper.v','fpga/amiga_debug.sv','fpga/amiga_disk.sv','fpga/Amber.v',
         'upstream/src/misc/amiga_keymap.v','fpga/sdram.sv'):
         sources.append(name)
 sources+=['upstream/sim/TG68KdotC_Kernel.v']
@@ -110,7 +116,7 @@ if not args.no_build:
     (stage/'sources.json').write_text(json.dumps(hashes,indent=2)+'\n')
 else:
     assert json.loads((stage/'sources.json').read_text())==hashes,'Sources changed; rebuild required'
-run([stage/'boot_test.exe',str(args.seconds),str(['28-first','85-first','together'].index(args.clock_order))]+([str(args.adf.resolve())] if args.adf else []),'run.log',3600)
+run([stage/'boot_test.exe',str(args.seconds),str(['28-first','85-first','together'].index(args.clock_order))]+[str(args.adf.resolve()) if args.adf else '-']+([str(args.hdf.resolve())] if args.hdf else []),'run.log',3600)
 report=json.loads((stage/'boot.json').read_text())
 report.update(source_sha256=hashes,rom_sha256=hashlib.sha256(rom).hexdigest(),hardware=False,clock_order=args.clock_order,
     simulator_adjustments=['Translated CPU skipFetch and berr wired as in synthesized VHDL branch'],
