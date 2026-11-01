@@ -64,6 +64,29 @@
 
 #include "ft_copro.h"
 
+/* Горячий код 3D — в ITCM, не из XIP flash (прошивка 36: растеризатор; 37: подготовка кадра, TEXMESH,
+   разбор команд): на плате промахи кэша команд модель rvsim не видит, замер только там. */
+#if defined(__riscv) && defined(FTC3D_TCM)
+#define FTC3D_HOT __attribute__((section(".tcm_code.ft3d")))
+#define FTC3D_RODATA __attribute__((section(".tcm_const.ft3d")))
+#else
+#define FTC3D_HOT
+#define FTC3D_RODATA
+#endif
+
+/* Константа float в горячем коде (прошивка 37). Обычную GCC кладёт в .rodata, а она — во flash:
+   полоса (z 32 КБ и точки 16 КБ) больше кэша данных (16 КБ), строку с константами вытесняет, и
+   чтение идёт по QSPI. Здесь разряды числа — сразу в команде: lui и fmv.w.x, без обращения к памяти. */
+#if defined(__riscv)
+#define FTC3D_K(v) __extension__({ \
+        const union { float f; uint32_t u; } k_ = {.f = (v)}; \
+        float r_; \
+        __asm__("fmv.w.x %0,%1" : "=f"(r_) : "r"(k_.u)); \
+        r_; })
+#else
+#define FTC3D_K(v) (v)
+#endif
+
 #define CMD_3D_TARGET    0xFFFFFFA0u
 #define CMD_3D_PROJECT   0xFFFFFFA1u
 #define CMD_3D_IDENTITY  0xFFFFFFA2u
@@ -89,7 +112,7 @@
 #define GUARD 8192.0f           /* отсечение по сторонам: ±GUARD точек от центра цели */
 
 /* SSAA 2×2: отсчёты в точке, 1/16 точки (повёрнутая сетка RGSS; среднее — центр 8, 8) */
-static const int32_t AA_X[4] = {6, 14, 2, 10}, AA_Y[4] = {2, 6, 10, 14};
+static const int32_t AA_X[4] FTC3D_RODATA = {6, 14, 2, 10}, AA_Y[4] FTC3D_RODATA = {2, 6, 10, 14};
 #define AA_MIN 2
 #define AA_MAX 14
 
@@ -241,24 +264,24 @@ static float plane_d(const ftc3d_t *g, int k, const cv_t *v)
 {
     switch (k) {
     case 0: return v->z - g->znear;
-    case 1: return GUARD * v->z - g->focal * v->x;
-    case 2: return GUARD * v->z + g->focal * v->x;
-    case 3: return GUARD * v->z - g->focal * v->y;
-    default: return GUARD * v->z + g->focal * v->y;
+    case 1: return FTC3D_K(GUARD) * v->z - g->focal * v->x;
+    case 2: return FTC3D_K(GUARD) * v->z + g->focal * v->x;
+    case 3: return FTC3D_K(GUARD) * v->z - g->focal * v->y;
+    default: return FTC3D_K(GUARD) * v->z + g->focal * v->y;
     }
 }
 
 static int32_t to_fix(float v)
 {
-    float f=v*16.0f+0.5f;
+    float f=v*FTC3D_K(16.0f)+FTC3D_K(0.5f);
     int32_t n=(int32_t)f;
     return n-((float)n>f);     /* exact floor; guarded screen coordinates fit int32 */
 }
 
-static void add_tri(ftc3d_t *g, const cv_t *a, const cv_t *b, const cv_t *c, uint16_t color)
+static FTC3D_HOT void add_tri(ftc3d_t *g, const cv_t *a, const cv_t *b, const cv_t *c, uint16_t color)
 {
     const cv_t *p[3] = {a, b, c};
-    float cx = 0.5f * (float)g->w, cy = 0.5f * (float)g->h;
+    float cx = FTC3D_K(0.5f) * (float)g->w, cy = FTC3D_K(0.5f) * (float)g->h;
     int32_t X[3], Y[3];
     float iz[3];
     uint8_t sh[3];
@@ -268,7 +291,7 @@ static void add_tri(ftc3d_t *g, const cv_t *a, const cv_t *b, const cv_t *c, uin
         if(cached && (g->vsh[origin-1]&2)) {
             X[i]=(int32_t)cached->nx;Y[i]=(int32_t)cached->ny;iz[i]=cached->nz;
         } else {
-            float inv = 1.0f / p[i]->z;
+            float inv = FTC3D_K(1.0f) / p[i]->z;
             X[i] = to_fix(cx + g->focal * p[i]->x * inv);
             Y[i] = to_fix(cy - g->focal * p[i]->y * inv);
             iz[i] = g->znear * inv;
@@ -284,7 +307,7 @@ static void add_tri(ftc3d_t *g, const cv_t *a, const cv_t *b, const cv_t *c, uin
 #endif
         }
         float s = p[i]->s;
-        sh[i] = (uint8_t)(s <= 0.0f ? 0 : s >= 255.0f ? 255 : (int)(s + 0.5f));
+        sh[i] = (uint8_t)(s <= FTC3D_K(0.0f) ? 0 : s >= FTC3D_K(255.0f) ? 255 : (int)(s + FTC3D_K(0.5f)));
     }
     int64_t area = (int64_t)(X[1] - X[0]) * (Y[2] - Y[0]) - (int64_t)(X[2] - X[0]) * (Y[1] - Y[0]);
     if (area == 0)
@@ -332,7 +355,7 @@ static void add_tri(ftc3d_t *g, const cv_t *a, const cv_t *b, const cv_t *c, uin
 }
 
 /* Треугольник камеры → отсечение (ближняя плоскость и края охранной зоны) → в кадр. */
-static void clip_tri(ftc3d_t *g, const cv_t *a, const cv_t *b, const cv_t *c, uint16_t color)
+static FTC3D_HOT void clip_tri(ftc3d_t *g, const cv_t *a, const cv_t *b, const cv_t *c, uint16_t color)
 {
     int out = 0;
     const cv_t *p3[3] = {a, b, c};
@@ -398,7 +421,7 @@ static float shade(const ftc3d_t *g, float nx, float ny, float nz)
 /* Слова RAM_G [addr, addr + 4·words): из кэша (флаг MESH_STATIC), иначе чтением в tmp. Под
    нагрузкой растеризатора Tang (SDRAM занята кадром FT) чтение сетки на каждом кадре стоило
    десятки миллисекунд. Без флага кусок читается заново, а его копия в кэше выбрасывается. */
-static const uint32_t *mesh_words(ftc_t *c, uint32_t addr, uint32_t words, uint32_t *tmp, int keep)
+static FTC3D_HOT const uint32_t *mesh_words(ftc_t *c, uint32_t addr, uint32_t words, uint32_t *tmp, int keep)
 {
     ftc3d_t *g = &c->g3d;
     for (uint32_t i = 0; i < g->ncached; i++)
@@ -514,7 +537,7 @@ static int texture(ftc_t *c)
 
 /* Q8.8 XYZ, unsigned Q12.4 UV, unsigned Q4.12 RGB: 16 bytes per vertex.
    Faces are three uint16 indices and a reserved zero uint16. */
-static int texmesh(ftc_t *c)
+static FTC3D_HOT int texmesh(ftc_t *c)
 {
     ftc3d_t *g = &c->g3d;
     uint32_t nv = c->p[2] & 65535u, nf = c->p[2] >> 16, flags = c->p[3];
@@ -546,7 +569,8 @@ static int texmesh(ftc_t *c)
             const uint32_t *r = raw + ids[i] * 4;
             ftc3d_vtx_t *cached=&g->v[ids[i]];
             if(!g->vsh[ids[i]]) {
-                float x=(int16_t)r[0]/256.0f,y=(int16_t)(r[0]>>16)/256.0f,z=(int16_t)r[1]/256.0f;
+                const float k256=FTC3D_K(1.0f/256.0f);
+                float x=(int16_t)r[0]*k256,y=(int16_t)(r[0]>>16)*k256,z=(int16_t)r[1]*k256;
                 const float *m=g->m;
                 cached->x=m[0]*x+m[1]*y+m[2]*z+m[3];
                 cached->y=m[4]*x+m[5]*y+m[6]*z+m[7];
@@ -557,7 +581,7 @@ static int texmesh(ftc_t *c)
 #endif
             }
             v[i].x=cached->x;v[i].y=cached->y;v[i].z=cached->z;
-            v[i].s=255;v[i].textured=1;v[i].origin=ids[i]+1;
+            v[i].s=FTC3D_K(255.0f);v[i].textured=1;v[i].origin=ids[i]+1;
         }
         if (flags & 1) {
             float ax=v[2].x-v[0].x, ay=v[2].y-v[0].y, az=v[2].z-v[0].z;
@@ -567,11 +591,12 @@ static int texmesh(ftc_t *c)
         /* атрибуты — только у лицевых граней (прошивка 36) */
         for (int i = 0; i < 3; i++) {
             const uint32_t *r = raw + ids[i] * 4;
-            v[i].attr[0] = (r[1] >> 16) / 16.0f;
-            v[i].attr[1] = (r[2] & 65535u) / 16.0f;
-            v[i].attr[2] = (r[2] >> 16) / 4096.0f;
-            v[i].attr[3] = (r[3] & 65535u) / 4096.0f;
-            v[i].attr[4] = (r[3] >> 16) / 4096.0f;
+            const float k16=FTC3D_K(1.0f/16.0f), k4096=FTC3D_K(1.0f/4096.0f);
+            v[i].attr[0] = (r[1] >> 16) * k16;
+            v[i].attr[1] = (r[2] & 65535u) * k16;
+            v[i].attr[2] = (r[2] >> 16) * k4096;
+            v[i].attr[3] = (r[3] & 65535u) * k4096;
+            v[i].attr[4] = (r[3] >> 16) * k4096;
         }
         clip_tri(g, &v[0], &v[1], &v[2], 0xffff);
     }
@@ -1014,14 +1039,6 @@ static inline __attribute__((always_inline)) uint32_t tex_channel(float value, f
     return (uint32_t)clampi(value*255+0.5f,0,255);
 }
 
-/* Горячий код растеризатора — в ITCM, не из XIP flash (прошивка 36): на плате промахи кэша команд
-   на переходах render → raster_tex_fast → fast_run модель rvsim не видит, замер только там. */
-#if defined(__riscv) && defined(FTC3D_TCM)
-#define FTC3D_HOT __attribute__((section(".tcm_code.ft3d")))
-#else
-#define FTC3D_HOT
-#endif
-
 /* Conservative upper bound for the depth produced by repeated float adds.
    n <= 1023. The error allowance exceeds gamma_n*(|z|+n*|step|), including
    rounding of the endpoint/bound itself. One depth unit covers subnormals.
@@ -1031,10 +1048,14 @@ static FTC3D_HOT uint32_t tex_depth_upper(float z,float step,int n)
     float end=z+step*(float)n;
     /* Explicit builtins retain native FPU absolute value with -fno-builtin. */
     float magnitude=__builtin_fabsf(z)+__builtin_fabsf(step)*(float)n;
-    float margin=magnitude*(4.0f*FLT_EPSILON*(float)(n+1))+1.0f/16777216.0f;
+    float margin=magnitude*(FTC3D_K(4.0f*FLT_EPSILON)*(float)(n+1))+FTC3D_K(1.0f/16777216.0f);
     float upper=(z>end?z:end)+margin;
-    if(!(upper>0 && upper<1.0f))return 1u<<24;
-    return (uint32_t)clampi(upper*16777216.0f,1,1<<24);
+    if(!(upper>0 && upper<FTC3D_K(1.0f)))return 1u<<24;
+    /* то же, что clampi(…, 1, 1 << 24), только границы — без чтения из flash */
+    const float depth_upper=upper*FTC3D_K(16777216.0f);
+    if(!(depth_upper>FTC3D_K(1.0f)))return 1;
+    if(depth_upper>=FTC3D_K(16777216.0f))return 1u<<24;
+    return (uint32_t)(int32_t)depth_upper;
 }
 
 static FTC3D_HOT int tex_hidden(const uint32_t *depth,int stride,int count,float z,float step)
@@ -1276,7 +1297,7 @@ static inline __attribute__((always_inline)) float fast_run(const fast_seg_t *q,
     /* z и шаг сразу в единицах z-буфера (прошивка 36): умножение на 2^24 меняет только порядок
        числа, поэтому сумма даёт те же разряды, что и прежняя в долях. Вызывающий ручается, что весь
        кусок лежит внутри (0, 1) с запасом: fmin.s и поправка нуля не нужны. */
-    float az=q->az*16777216.0f; const float dz=q->dz*16777216.0f;
+    float az=q->az*FTC3D_K(16777216.0f); const float dz=q->dz*FTC3D_K(16777216.0f);
     int32_t U=q->U, V=q->V; const int32_t dU=q->dU, dV=q->dV;
     uint32_t Kr=q->Kr, Kg=q->Kg, Kb=q->Kb; const int32_t dKr=q->dKr, dKg=q->dKg, dKb=q->dKb;
     /* Счётчика точек нет (прошивка 29): конец — по указателю, номер точки для редкого текселя
@@ -1310,7 +1331,7 @@ static inline __attribute__((always_inline)) float fast_run(const fast_seg_t *q,
         }
         az+=dz;U+=dU;V+=dV;Kr+=(uint32_t)dKr;Kg+=(uint32_t)dKg;Kb+=(uint32_t)dKb;
     }
-    return az*(1.0f/16777216.0f);
+    return az*FTC3D_K(1.0f/16777216.0f);
 }
 /* Варианты: порядок, шаг отсчёта и округление ступени. С ним — цвет без квантования: rnd = kr_round
    (прошивка 36, раньше такие кадры шли через fast_run_safe с проверкой на каждой точке). */
@@ -1391,34 +1412,85 @@ static int tex_edges32(const tex_edge_t edge[3], int rows, tex_edge32_t out[3])
    наклона (side 0) остаток 0, шаг остатка 0, делитель 0xFFFFFFFF: общий шаг строки
    (tex_span32) тогда не переносит в q ничего лишнего. Дальних (отсечённых у znear) вершин —
    0: путь через tex_edges. */
-static FTC3D_HOT int tex_edges32_direct(const ftc3d_tri_t *t, int ox, int oy, int y, int rows, tex_edge32_t out[3])
+static FTC3D_HOT int tex_direct_ok(const ftc3d_tri_t *t, int y)
 {
     for (int i=0;i<3;i++)
         if (t->x[i]<=-0x2000||t->x[i]>=0x2000||t->y[i]<=-0x2000||t->y[i]>=0x2000) return 0;
-    if (y<0||y>=0x800) return 0;
-    for (int e=0;e<3;e++) {
-        const int b=(e+1)%3;
-        const int32_t dx=t->x[b]-t->x[e], dy=t->y[b]-t->y[e];
-        const int32_t sx=-16*dy, sy=16*dx;
-        int32_t ce=dx*(16*y+oy-t->y[e])-dy*(ox-t->x[e]);
-        if (!(dy<0 || (dy==0 && dx>0))) ce--;
-        tex_edge32_t *p=&out[e];
-        p->side=sx>0?1:sx<0?-1:0;
-        if (!sx) {
-            p->q=ce;p->delta=sy;p->rem=0;p->delta_rem=0;p->divisor=0xFFFFFFFFu;
-        } else {
-            const int32_t numerator=sx>0?-ce:ce, step=sx>0?-sy:sy, divisor=sx>0?sx:-sx;
-            const int32_t q=numerator>=0?numerator/divisor:-((-numerator+divisor-1)/divisor);   /* floor_div */
-            p->q=q;p->rem=(uint32_t)(numerator-q*divisor);p->divisor=(uint32_t)divisor;
-            p->delta=step/divisor;
-            int32_t remainder=step-p->delta*divisor;
-            if (remainder<0) {remainder+=divisor;p->delta--;}
-            p->delta_rem=(uint32_t)remainder;
-        }
-        /* та же граница, что в tex_edges32: q и шаги на строках полосы — в int32 */
-        const int64_t aq=p->q<0?-(int64_t)p->q:p->q, ad=p->delta<0?-(int64_t)p->delta:(int64_t)p->delta;
-        if (aq+(ad+1)*(int64_t)(rows+1)>=0x40000000LL) return 0;
+    return y>=0&&y<0x800;
+}
+
+/* Одно ребро e (от вершины e к следующей) на строке y; 0 — на rows строках не помещается в int32 */
+static FTC3D_HOT int tex_edge32_direct(const ftc3d_tri_t *t, int e, int ox, int oy, int y, int rows, tex_edge32_t *p)
+{
+    const int b=(e+1)%3;
+    const int32_t dx=t->x[b]-t->x[e], dy=t->y[b]-t->y[e];
+    const int32_t sx=-16*dy, sy=16*dx;
+    int32_t ce=dx*(16*y+oy-t->y[e])-dy*(ox-t->x[e]);
+    if (!(dy<0 || (dy==0 && dx>0))) ce--;
+    p->side=sx>0?1:sx<0?-1:0;
+    if (!sx) {
+        p->q=ce;p->delta=sy;p->rem=0;p->delta_rem=0;p->divisor=0xFFFFFFFFu;
+    } else {
+        const int32_t numerator=sx>0?-ce:ce, step=sx>0?-sy:sy, divisor=sx>0?sx:-sx;
+        const int32_t q=numerator>=0?numerator/divisor:-((-numerator+divisor-1)/divisor);   /* floor_div */
+        p->q=q;p->rem=(uint32_t)(numerator-q*divisor);p->divisor=(uint32_t)divisor;
+        p->delta=step/divisor;
+        int32_t remainder=step-p->delta*divisor;
+        if (remainder<0) {remainder+=divisor;p->delta--;}
+        p->delta_rem=(uint32_t)remainder;
     }
+    /* та же граница, что в tex_edges32: q и шаги на строках полосы — в int32 */
+    const int64_t aq=p->q<0?-(int64_t)p->q:p->q, ad=p->delta<0?-(int64_t)p->delta:(int64_t)p->delta;
+    return aq+(ad+1)*(int64_t)(rows+1)<0x40000000LL;
+}
+
+static FTC3D_HOT int tex_edges32_direct(const ftc3d_tri_t *t, int ox, int oy, int y, int rows, tex_edge32_t out[3])
+{
+    if (!tex_direct_ok(t,y)) return 0;
+    for (int e=0;e<3;e++)
+        if (!tex_edge32_direct(t,e,ox,oy,y,rows,&out[e])) return 0;
+    return 1;
+}
+
+/* Два ребра на строку (прошивка 37). Вершины по высоте: A ≤ B ≤ C. Длинное ребро AC есть на каждой
+   строке, короткое — AB до высоты B и BC после неё; третье считать незачем, и в счёт, и в шаг.
+   Почему покрытие то же самое: E1, E2, E3 — целые функции рёбер, точка внутри, когда все ≥ 0 (у
+   «неправого» ребра E − 1 ≥ 0). Пусть отсчёт строки S лежит в высоте треугольника, но вне высоты
+   ребра e3. Тогда сечение клина E1 ≥ 0, E2 ≥ 0 на этой строке — это и есть сечение самого
+   треугольника, а на e3 его точек нет: E3 > 0, то есть E3 − 1 ≥ 0, и условие e3 выполнено само.
+   Нужна площадь > 0: у вырожденного клин не сводится к сечению (его ведёт старый путь).
+   Отсчёт ровно на высоте B лежит на всех трёх рёбрах: на этой строке работают оба коротких.
+   Строки вне высоты треугольника всегда пусты: они и не считаются. */
+typedef struct tex_two {
+    int first, last;               /* строки с отсчётом в высоте треугольника */
+    int mid, both;                 /* на строке mid короткое ребро сменится на lower; both — S = B */
+    tex_edge32_t lng, sh, lower;
+} tex_two_t;
+
+/* 0 — не подходит (остаётся путь с тремя рёбрами); first > last — строк нет. */
+static FTC3D_HOT int tex_two_setup(const ftc3d_tri_t *t, int ox, int oy, int ya, int yb, tex_two_t *p)
+{
+    if (!tex_direct_ok(t,ya)) return 0;
+    int ia=0,ib=1,ic=2,s;
+    if (t->y[ia]>t->y[ib]) {s=ia;ia=ib;ib=s;}
+    if (t->y[ib]>t->y[ic]) {s=ib;ib=ic;ic=s;}
+    if (t->y[ia]>t->y[ib]) {s=ia;ia=ib;ib=s;}
+    const int ytop=(t->y[ia]-oy+15)>>4, ybot=(t->y[ic]-oy)>>4, mid=(t->y[ib]-oy+15)>>4;
+    p->first=ytop>ya?ytop:ya;
+    p->last=ybot<yb?ybot:yb;
+    if (p->first>p->last) return 1;
+    p->both=16*mid+oy==t->y[ib];
+    p->mid=0x7fffffff;
+    const int rows=p->last-p->first+1;
+    /* ребро напротив вершины k — от вершины k + 1 */
+    if (!tex_edge32_direct(t,(ib+1)%3,ox,oy,p->first,rows,&p->lng)) return 0;
+    if (p->first<mid || (p->first==mid && p->both)) {
+        if (!tex_edge32_direct(t,(ic+1)%3,ox,oy,p->first,rows,&p->sh)) return 0;
+        if (mid<=p->last) {
+            if (!tex_edge32_direct(t,(ia+1)%3,ox,oy,mid,p->last-mid+1,&p->lower)) return 0;
+            p->mid=mid;
+        }
+    } else if (!tex_edge32_direct(t,(ia+1)%3,ox,oy,p->first,rows,&p->sh)) return 0;
     return 1;
 }
 
@@ -1434,12 +1506,47 @@ static FTC3D_HOT int tex_edges32_direct(const ftc3d_tri_t *t, int ox, int oy, in
         (R) = r_ - (c_ ? (E).divisor : 0u); (Q) += (E).delta + (int32_t)c_; \
     } while (0)
 
+/* Строка y при двух рёбрах: Q0, R0 — длинное, Q1, R1 — короткое */
+#define FAST_TWO_ROW(TW, Q0, R0, Q1, R1, Y, LO, HI) do { \
+        if ((Y) == (TW).mid) { \
+            if ((TW).both) FAST_EDGE(Q1, R1, (TW).sh, LO, HI); \
+            (TW).sh = (TW).lower; (Q1) = (TW).lower.q; (R1) = (TW).lower.rem; \
+        } \
+        FAST_EDGE(Q0, R0, (TW).lng, LO, HI); FAST_EDGE(Q1, R1, (TW).sh, LO, HI); \
+    } while (0)
+
+#ifdef FTC3D_PROBE
+/* Проверка на ПК: границы строк ya…yb двумя и тремя рёбрами; пустая строка — lo > hi. Возвращает
+   1, если путь двух рёбер подошёл (для площади > 0 и близких вершин). */
+int ftc3d_two_edges_probe(const ftc3d_tri_t *t, int ox, int oy, int ya, int yb, int w, int *lo2, int *hi2, int *lo3, int *hi3)
+{
+    tex_two_t tw;
+    tex_edge32_t e[3];
+    if (!tex_two_setup(t,ox,oy,ya,yb,&tw) || !tex_edges32_direct(t,ox,oy,ya,yb-ya+1,e)) return 0;
+    int32_t q0=0,q1=0;
+    uint32_t r0=0,r1=0;
+    if (tw.first<=tw.last) {q0=tw.lng.q;q1=tw.sh.q;r0=tw.lng.rem;r1=tw.sh.rem;}
+    int32_t a0=e[0].q,a1=e[1].q,a2=e[2].q;
+    uint32_t b0=e[0].rem,b1=e[1].rem,b2=e[2].rem;
+    for (int y=ya;y<=yb;y++) {
+        int32_t lo=0,hi=w-1;
+        FAST_EDGE(a0,b0,e[0],lo,hi);FAST_EDGE(a1,b1,e[1],lo,hi);FAST_EDGE(a2,b2,e[2],lo,hi);
+        lo3[y-ya]=lo;hi3[y-ya]=hi;
+        lo=0;hi=w-1;
+        if (y<tw.first||y>tw.last) hi=-1;
+        else FAST_TWO_ROW(tw,q0,r0,q1,r1,y,lo,hi);
+        lo2[y-ya]=lo;hi2[y-ya]=hi;
+    }
+    return 1;
+}
+#endif
+
 /* Границы z куска для fast_run: с запасом на ошибку накопления, чтобы z остался внутри [1, 2^24) */
-#define FAST_Z_MIN 2e-7f
-#define FAST_Z_MAX 0.999f
+#define FAST_Z_MIN FTC3D_K(2e-7f)
+#define FAST_Z_MAX FTC3D_K(0.999f)
 
 /* 1/n для куска из n точек */
-static const float fast_rcp[FAST_SEG + 1] = {
+static const float fast_rcp[FAST_SEG + 1] FTC3D_RODATA = {
     0, 1.0f, 1.0f / 2, 1.0f / 3, 1.0f / 4, 1.0f / 5, 1.0f / 6, 1.0f / 7, 1.0f / 8,
     1.0f / 9, 1.0f / 10, 1.0f / 11, 1.0f / 12, 1.0f / 13, 1.0f / 14, 1.0f / 15, 1.0f / 16};
 
@@ -1452,7 +1559,7 @@ static FTC3D_HOT __attribute__((noinline)) void raster_tex_fast(ftc3d_t *g, cons
     int64_t area=(int64_t)(t->x[1]-t->x[0])*(t->y[2]-t->y[0])-
                  (int64_t)(t->x[2]-t->x[0])*(t->y[1]-t->y[0]);
     /* площадь — во float; в int32 она почти всегда помещается, и перевод тогда аппаратный */
-    float inv=1.0f/(area>=-0x7fffffffLL && area<=0x7fffffffLL?(float)(int32_t)area:(float)area), gx[6], gy[6], base[6];
+    float inv=FTC3D_K(FTC3D_K(1.0f))/(area>=-0x7fffffffLL && area<=0x7fffffffLL?(float)(int32_t)area:(float)area), gx[6], gy[6], base[6];
     for (int k=0;k<6;k++) {
         const float *a=k ? t->attr[k-1] : t->iz;
         base[k]=a[0];
@@ -1462,11 +1569,11 @@ static FTC3D_HOT __attribute__((noinline)) void raster_tex_fast(ftc3d_t *g, cons
     const int w=(int)g->w;
     const float znear=g->znear, fog_far=g->fog_far;
     const int fog_on=(g->material&1)!=0, smooth=(g->material&2)!=0;
-    const float inv_fog=fog_on?1.0f/(g->fog_far-g->fog_near):0;
+    const float inv_fog=fog_on?FTC3D_K(FTC3D_K(1.0f))/(g->fog_far-g->fog_near):0;
     /* K = свет · туман · S/255 · 2^20, где S — ступеней (без квантования — 255 и округление:
        прибавка kr_round перед сдвигом). Свет ≤ 16, S ≤ 255: тексель · K < 2^32. Если 16 · S + 1 <
        FAST_QN, ступень всегда внутри таблицы, и обрезать её не нужно. */
-    const float S=g->color_steps>0?g->color_steps:255.0f;
+    const float S=g->color_steps>0?g->color_steps:FTC3D_K(FTC3D_K(255.0f));
     fast_seg_t q;
     fast_end_t ends[2];
     q.s=&ends[0];q.e=&ends[1];
@@ -1474,8 +1581,8 @@ static FTC3D_HOT __attribute__((noinline)) void raster_tex_fast(ftc3d_t *g, cons
     q.qr=g->fast_q565[0];q.qg=g->fast_q565[1];q.qb=g->fast_q565[2];
     q.tex_width=g->tex_w;q.tex_right=g->tex_w-1;q.tex_bottom=g->tex_h-1;
     q.wmax=(uint32_t)g->fast_wmax;q.kr_round=g->color_steps>0?0u:1u<<(FAST_KSHIFT-1);q.primitive=primitive;
-    q.ks=S/255.0f*(float)(1u<<FAST_KSHIFT);
-    const int wfits=16.0f*S+1.0f<(float)FAST_QN;
+    q.ks=S/FTC3D_K(FTC3D_K(255.0f))*FTC3D_K((float)(1u<<FAST_KSHIFT));
+    const int wfits=FTC3D_K(FTC3D_K(16.0f))*S+FTC3D_K(FTC3D_K(1.0f))<FTC3D_K((float)FAST_QN);
     /* Иначе (цвет без квантования) — проверка на кусок: (255·K + rnd) >> 20 ≤ FAST_QN − 1 при K < kmax */
     const uint32_t kmax=(((uint32_t)FAST_QN-1u)<<FAST_KSHIFT)/255u-4096u;
     /* вариант цикла точек — один на весь треугольник */
@@ -1483,7 +1590,7 @@ static FTC3D_HOT __attribute__((noinline)) void raster_tex_fast(ftc3d_t *g, cons
         ?(g->aa?(ordered?fast_run_o4r:fast_run_u4r):(ordered?fast_run_or:fast_run_ur))
         :(g->aa?(ordered?fast_run_o4:fast_run_u4):(ordered?fast_run_o:fast_run_u));
     const int32_t umax=(int32_t)(q.tex_right<<16|0xffffu), vmax=(int32_t)(q.tex_bottom<<16|0xffffu);
-    const float UV=65536.0f;   /* u, v — тексели · 2^16 */
+    const float UV=FTC3D_K(FTC3D_K(65536.0f));   /* u, v — тексели · 2^16 */
     int ya=t->y0>ys?t->y0:ys, yb=t->y1<ys+rows-1?t->y1:ys+rows-1;
     const uint32_t pump_mask=g->fast_pump_mask;
     /* SSAA (прошивка 36): четыре прохода, по одному на отсчёт, с его смещением; отсчёт s точки i —
@@ -1496,17 +1603,32 @@ static FTC3D_HOT __attribute__((noinline)) void raster_tex_fast(ftc3d_t *g, cons
        полосе значения не помещаются в int32 — шаг строк тоже в 64 битах (tex_span). */
     tex_edge_t edge[3];
     tex_edge32_t e32[3];
-    int narrow=tex_edges32_direct(t,ox,oy,ya,yb-ya+1,e32);
-    if (!narrow) {tex_edges(t,ox,oy,ya,edge);narrow=tex_edges32(edge,yb-ya+1,e32);}
+    tex_two_t tw;
+    const int two=area>0&&tex_two_setup(t,ox,oy,ya,yb,&tw);
+    int narrow=0,row_a=ya,row_b=yb;
     /* то, что меняется по строкам (q и остаток), — в переменных, а не в массиве в памяти */
-    int32_t q0=e32[0].q,q1=e32[1].q,q2=e32[2].q;
-    uint32_t r0=e32[0].rem,r1=e32[1].rem,r2=e32[2].rem;
+    int32_t q0=0,q1=0,q2=0;
+    uint32_t r0=0,r1=0,r2=0;
+    if (two) {
+        row_a=tw.first;row_b=tw.last;
+        if (row_a<=row_b) {q0=tw.lng.q;r0=tw.lng.rem;q1=tw.sh.q;r1=tw.sh.rem;}
+    } else {
+        narrow=tex_edges32_direct(t,ox,oy,ya,yb-ya+1,e32);
+        if (!narrow) {tex_edges(t,ox,oy,ya,edge);narrow=tex_edges32(edge,yb-ya+1,e32);}
+        if (narrow) {q0=e32[0].q;q1=e32[1].q;q2=e32[2].q;r0=e32[0].rem;r1=e32[1].rem;r2=e32[2].rem;}
+    }
 #ifdef FTC3D_STATS
     ftc3d_fast_calls++;
 #endif
-    for (int y=ya;y<=yb;y++) {
+    for (int y=row_a;y<=row_b;y++) {
         int lo,hi;
-        if (narrow) {
+        if (two) {
+            int32_t lo_=0,hi_=w-1;
+            FAST_TWO_ROW(tw,q0,r0,q1,r1,y,lo_,hi_);
+            if (lo_>hi_) continue;
+            lo=lo_;hi=hi_;
+        }
+        else if (narrow) {
             int32_t lo_=0,hi_=w-1;
             FAST_EDGE(q0,r0,e32[0],lo_,hi_);FAST_EDGE(q1,r1,e32[1],lo_,hi_);FAST_EDGE(q2,r2,e32[2],lo_,hi_);
             if (lo_>hi_) continue;
@@ -1520,21 +1642,21 @@ static FTC3D_HOT __attribute__((noinline)) void raster_tex_fast(ftc3d_t *g, cons
         float px=(float)(16*lo+ox-t->x[0]),py=(float)(16*y+oy-t->y[0]);
         float first_z=base[0]+gx[0]*px+gy[0]*py;
         const uint32_t row=(uint32_t)((y-ys)*w);
-        if(tex_hidden(q.zb+((row+(uint32_t)lo)<<ns_shift)+(uint32_t)sample,ns,hi-lo+1,first_z,gx[0]*16))continue;
+        if(tex_hidden(q.zb+((row+(uint32_t)lo)<<ns_shift)+(uint32_t)sample,ns,hi-lo+1,first_z,gx[0]*FTC3D_K(16.0f)))continue;
 #ifdef FTC3D_STATS
         ftc3d_fast_rows++;ftc3d_fast_tested+=(unsigned)(hi-lo+1);
 #endif
         float az=first_z,au=base[1]+gx[1]*px+gy[1]*py,av=base[2]+gx[2]*px+gy[2]*py;
         float ar=base[3]+gx[3]*px+gy[3]*py,ag=base[4]+gx[4]*px+gy[4]*py,ab=base[5]+gx[5]*px+gy[5]*py;
-        const float dz=gx[0]*16,du=gx[1]*16,dv=gx[2]*16,dr=gx[3]*16,dg=gx[4]*16,db=gx[5]*16;
+        const float dz=gx[0]*FTC3D_K(16.0f),du=gx[1]*FTC3D_K(16.0f),dv=gx[2]*FTC3D_K(16.0f),dr=gx[3]*FTC3D_K(16.0f),dg=gx[4]*FTC3D_K(16.0f),db=gx[5]*FTC3D_K(16.0f);
         /* Значения в точке по атрибутам/z и z (z > 0) */
 #define FAST_AT(P, Z, A_U, A_V, A_R, A_G, A_B) do { \
-            const float iz_=1.0f/(Z); \
-            const float r_=fast_fmax(0.0f,fast_fmin(16.0f,(A_R)*iz_)); \
-            const float g_=fast_fmax(0.0f,fast_fmin(16.0f,(A_G)*iz_)); \
-            const float b_=fast_fmax(0.0f,fast_fmin(16.0f,(A_B)*iz_)); \
-            float f_=1.0f; \
-            if (fog_on) { f_=fast_fmax(0.0f,fast_fmin(1.0f,(fog_far-znear*iz_)*inv_fog)); if (smooth) f_=f_*f_*(3-2*f_); } \
+            const float iz_=FTC3D_K(FTC3D_K(1.0f))/(Z); \
+            const float r_=fast_fmax(FTC3D_K(0.0f),fast_fmin(FTC3D_K(16.0f),(A_R)*iz_)); \
+            const float g_=fast_fmax(FTC3D_K(0.0f),fast_fmin(FTC3D_K(16.0f),(A_G)*iz_)); \
+            const float b_=fast_fmax(FTC3D_K(0.0f),fast_fmin(FTC3D_K(16.0f),(A_B)*iz_)); \
+            float f_=FTC3D_K(FTC3D_K(1.0f)); \
+            if (fog_on) { f_=fast_fmax(FTC3D_K(0.0f),fast_fmin(FTC3D_K(1.0f),(fog_far-znear*iz_)*inv_fog)); if (smooth) f_=f_*f_*(FTC3D_K(3.0f)-FTC3D_K(2.0f)*f_); } \
             (P)->u=(A_U)*iz_*UV; (P)->v=(A_V)*iz_*UV; (P)->r=r_; (P)->g=g_; (P)->b=b_; (P)->f=f_; \
             const float fk_=f_*q.ks; \
             (P)->kr=r_*fk_; (P)->kg=g_*fk_; (P)->kb=b_*fk_; } while (0)
@@ -1548,14 +1670,14 @@ static FTC3D_HOT __attribute__((noinline)) void raster_tex_fast(ftc3d_t *g, cons
             float azE=az+dz*(float)n;
             while (n>2) {
                 const float m=az<azE?az:azE, dd=azE-az;
-                if (!(m>0) || (dd<0?-dd:dd)<=0.03f*m) break;
+                if (!(m>0) || (dd<0?-dd:dd)<=FTC3D_K(FTC3D_K(0.03f))*m) break;
                 n=(n+1)>>1;
                 azE=az+dz*(float)n;
             }
 #ifdef FTC3D_STATS
             ftc3d_fast_segments++;
 #endif
-            const float fn=(float)n, azL=az+dz*(fn-1);
+            const float fn=(float)n, azL=az+dz*(fn-FTC3D_K(1.0f));
             /* атрибуты в конце куска — они же начало следующего: считаются один раз */
             const float auE=au+du*fn, avE=av+dv*fn, arE=ar+dr*fn, agE=ag+dg*fn, abE=ab+db*fn;
             if (!(az>0) && !(azL>0)) {
@@ -1574,7 +1696,7 @@ static FTC3D_HOT __attribute__((noinline)) void raster_tex_fast(ftc3d_t *g, cons
             if (azE>0) {
                 FAST_AT(q.e, azE, auE, avE, arE, agE, abE);
             } else {
-                const float fl=fn-1, zl=azL>0?azL:az;
+                const float fl=fn-FTC3D_K(1.0f), zl=azL>0?azL:az;
                 FAST_AT(q.e, zl, au+du*fl, av+dv*fl, ar+dr*fl, ag+dg*fl, ab+db*fl);
                 span=n>1?n-1:1;
             }
@@ -1611,7 +1733,7 @@ static FTC3D_HOT __attribute__((noinline)) void raster_tex_fast(ftc3d_t *g, cons
 /* Front-to-back ordering reduces expensive shading of hidden texels. Stable
    radix sorting is bounded; original primitive IDs preserve first-wins Z ties.
    Mixed legacy/textured frames retain their original submission order. */
-static int order_textured(ftc3d_t *g)
+static FTC3D_HOT int order_textured(ftc3d_t *g)
 {
 #ifdef FTC3D_PROBE
     if (ftc3d_disable_order) return 0;
@@ -1683,7 +1805,7 @@ static void ftc3d_diag(ftc_t *c, uint32_t total, uint32_t prep, uint32_t clear, 
 /* Заливка n слов значением v, по 8 слов за проход. memset SDK BL616 (nuttx, без
    CONFIG_MEMSET_OPTSPEED) пишет по байту: полосы и z-буфер кадра — 512 КБ, и на плате это было
    11 мс из 59 мс RENDER (замер прошивки 26). Указатель выровнен на слово, n — любое. */
-static void fill32(uint32_t *p, uint32_t v, uint32_t n)
+static FTC3D_HOT void fill32(uint32_t *p, uint32_t v, uint32_t n)
 {
     uint32_t *const end8 = p + (n & ~7u);
     while (p < end8) {
@@ -1740,7 +1862,7 @@ static uint32_t render_variant(ftc3d_t *g)
    начало полосы s — start[s]. Обход полосы больше не смотрит на все треугольники. Не вошло — 0: тогда
    обход старым способом. */
 #define FTC3D_STRIPS_MAX 128u
-static int strip_lists(ftc3d_t *g, int ordered, uint32_t h, uint32_t lines, uint16_t *start)
+static FTC3D_HOT int strip_lists(ftc3d_t *g, int ordered, uint32_t h, uint32_t lines, uint16_t *start)
 {
     const uint32_t nstrips = (h + lines - 1) / lines;
     if (nstrips > FTC3D_STRIPS_MAX)
@@ -1781,7 +1903,7 @@ static int strip_lists(ftc3d_t *g, int ordered, uint32_t h, uint32_t lines, uint
     return 1;
 }
 
-static int render(ftc_t *c)
+static FTC3D_HOT int render(ftc_t *c)
 {
     ftc3d_t *g = &c->g3d;
     if (!g->w)
@@ -1903,7 +2025,7 @@ static int render(ftc_t *c)
 }
 
 /* --- команды ----------------------------------------------------------------------------------- */
-int ftc3d_exec(ftc_t *c)
+FTC3D_HOT int ftc3d_exec(ftc_t *c)
 {
 #ifdef FTC3D_DIFFERENTIAL
     if(ftc3d_reference)return ftc3d_exec_reference(c);
