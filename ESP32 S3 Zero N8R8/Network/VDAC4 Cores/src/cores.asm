@@ -20,6 +20,8 @@
 ;      Evo (shared/weather/rtc.asm) для часов DS1307 ядра — NextZXOS берёт из них время; затем
 ;      SD_ON (#75, ядро 0.39+): карта Evo — вторая SD Next (evo_sd.asm), сектора просит ESP в
 ;      ответе на INPUT. Другим ядрам (NES: у NES.ELF #74…#79 — свои команды) их не шлём;
+;      Ядру Amiga (личность 05) — тоже TIME: часы RTC в Kickstart и Workbench, AMIGA.ELF 0.5+.
+;      .adf с панели WC (0.14) — как .nes: файл уходит в PSRAM ESP, затем START ядра AMIGA.
 ;   6. F12 (код набора 2 #07 без префикса) — EXIT (#73): ESP возвращает Tang в слот 0
 ;      (TS-Config); плагин ждёт этого по STATUS, затем APP_STOP и выход в WC.
 ; Пока ядро работает, Evo — в режиме FT812 (VCONFIG #04, M_SEL = 1): видеошина Evo на IDE-40
@@ -94,6 +96,7 @@ PLUGIN:
         ld (SdWrote),a
         ld (SdBurst),a
         ld (NesMenu),a
+        ld (AdfCall),a
         call Proto_ResetRx
         ld a,1
         call WC_INT_PL                   ; WC не перерисовывает своё под окном
@@ -131,9 +134,19 @@ PLUGIN:
         jp c,.done                       ; Esc — назад в WC
         jr .start_app
 .nes_file:
+        call Adf_IsFile                  ; расширение .adf — ядро AMIGA, иначе NES
+        jr nc,.adf_file
         ld hl,NesName
         ld de,CrName
         ld bc,4
+        ldir
+        jr .start_app
+.adf_file:
+        ld a,1
+        ld (AdfCall),a
+        ld hl,AdfName
+        ld de,CrName
+        ld bc,6
         ldir
 .start_app:
         call Cr_LoadText
@@ -709,13 +722,40 @@ Nx_Input:
         ret c
         jp Ev_Service                    ; в ответе может быть запрос меню F1 (evo_menu.asm)
 
+; Часы ESP от часов Evo (SYS_CLOCK): [год LE16][месяц][число][часы][минуты][секунды]
+Nx_EspClock:
+        ld hl,(RtcYear)
+        ld (ClockBuf),hl
+        ld a,(RtcMonth)
+        ld (ClockBuf+2),a
+        ld a,(RtcDay)
+        ld (ClockBuf+3),a
+        ld a,(RtcHour)
+        ld (ClockBuf+4),a
+        ld a,(RtcMin)
+        ld (ClockBuf+5),a
+        ld a,(RtcSec)
+        ld (ClockBuf+6),a
+        ld hl,ClockBuf
+        ld bc,7
+        ld a,CMD_SYS_CLOCK
+        call Proto_Send
+        ld a,RESP_SYS_CLOCK
+        ld de,NX_WAIT
+        jp Proto_WaitCmd
+ClockBuf:       ds 7
+
 ; Время Evo для часов DS1307 ядра (NEXT.ELF 0.8+, ядро Next 0.38+): часы Gluk -> TIME (#74)
 ; [секунды, минуты, часы, число, месяц, год 0…99], двоичные; день недели слой считает по дате.
 ; Только ядру ZX Next с часами (0.38+): у других слоёв #74 — своя команда. Выход: CF=1 — нет ответа.
 Nx_SendTime:
+        ld a,(NxVersion+3)
+        cp 5                             ; Amiga 0.5+: у AMIGA.ELF #74 — те же часы
+        jr z,.send
         ld de,RTC_CORE
         call Nx_IsNext
         ret c
+.send:
         call Rtc_Open
         call Rtc_Read
         ld hl,TimeBuf
@@ -741,6 +781,9 @@ Nx_SendTime:
         ld a,l
         pop hl
         ld (hl),a
+        ld a,(NxVersion+3)
+        cp 5
+        call z,Nx_EspClock               ; Amiga: дата файлов на карте Tang — по тем же часам
         ld hl,TimeBuf
         ld bc,6
         ld a,CMD_NX_TIME

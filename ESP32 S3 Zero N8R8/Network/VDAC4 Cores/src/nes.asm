@@ -35,7 +35,57 @@ Nes_File:
         call Ui_Status
         call Nes_Send
         ret c
+        ld a,(AdfCall)                   ; у дискеты сохранений .sav нет
+        or a
+        ret nz
         jp Nes_SavePrepare
+
+; Файл панели WC — .adf? HL — имя от WC, 0 в конце. Выход: CF=0 — да. Без имени — нет.
+Adf_IsFile:
+        ld hl,(NesNamePtr)
+        ld a,h
+        or l
+        scf
+        ret z
+        ld b,0
+.len:
+        ld a,(hl)
+        or a
+        jr z,.ext
+        inc hl
+        inc b
+        jr nz,.len
+        scf
+        ret
+.ext:
+        ld a,b
+        cp 5
+        ret c                            ; короче "x.adf": CF=1
+        dec hl
+        ld a,(hl)
+        or #20
+        cp 'f'
+        scf
+        ret nz
+        dec hl
+        ld a,(hl)
+        or #20
+        cp 'd'
+        scf
+        ret nz
+        dec hl
+        ld a,(hl)
+        or #20
+        cp 'a'
+        scf
+        ret nz
+        dec hl
+        ld a,(hl)
+        cp '.'
+        scf
+        ret nz
+        or a
+        ret
 
 ; Файл открытого потока (NesSize байт) — в PSRAM ESP: #77 размер, #78 блоки по 512 с CRC16,
 ; #79 конец (и для меню F1 — evo_menu.asm). Выход: CF=0 — принят; CF=1, HL — текст ошибки
@@ -223,6 +273,8 @@ NesTries:       db 0
 NesNoEsc:       db 0
 NesPacket:      ds 4+512+2
 NesName:        db "NES",0
+AdfName:        db "AMIGA",0
+AdfCall:        db 0                    ; 1 — .adf с панели WC
 NesLoading:     db "Reading cartridge from the Evo SD...",0
 NesCancelled:   db "Cartridge loading cancelled",0
 NesErrRead:     db "ERROR: could not read cartridge file",0

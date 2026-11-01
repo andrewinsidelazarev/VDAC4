@@ -20,14 +20,15 @@
 
         ds 16
         db "NES"
-        ds 31*3
+        db "ADF"
+        ds 30*3
         db 0
         dd #FFFFFFFF                  ; файл читает плагин, WC не грузит его в RAM
 
 .plugin_name
-        db "VDAC4 Cores v0.13"
+        db "VDAC4 Cores v0.14"
         ds 32-($-.plugin_name),' '
-        db #05                        ; меню F10, просмотрщик и расширение .NES
+        db #05                        ; меню F10, просмотрщик и расширения .NES и .ADF
         ds 6
-        db "Play NES cartridge      "
+        db "Play NES cartridge / ADF"
         ds 32

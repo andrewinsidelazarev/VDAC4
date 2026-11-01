@@ -240,28 +240,33 @@ Ev_Next:
 .ext:
         ld a,b
         cp 5
-        jr c,Ev_Next                    ; короче "x.nes"
+        jp c,Ev_Next                    ; короче "x.nes"
+        ld de,EvExtNes
+        ld a,(NxVersion+3)
+        cp 5
+        jr nz,.check
+        ld de,EvExtAdf                  ; у ядра Amiga — дискеты
+.check:
+        ld b,3
+.letter:
         dec hl
         ld a,(hl)
         or #20
-        cp 's'
-        jr nz,Ev_Next
-        dec hl
-        ld a,(hl)
-        or #20
-        cp 'e'
-        jr nz,Ev_Next
-        dec hl
-        ld a,(hl)
-        or #20
-        cp 'n'
-        jr nz,Ev_Next
+        ex de,hl
+        cp (hl)
+        ex de,hl
+        jp nz,Ev_Next
+        inc de
+        djnz .letter
         dec hl
         ld a,(hl)
         cp '.'
         jr nz,Ev_Next
         or a                            ; NZ ('.')
         ret
+
+EvExtNes:       db "sen"                ; расширение с конца
+EvExtAdf:       db "fda"
 
 ; --- LIST ----------------------------------------------------------------------------------
 Ev_List:
