@@ -103,6 +103,33 @@ static void shift_bits(const uint8_t *tx, uint8_t *rx, int n)
     }
 }
 
+/* Сдвиг битстрима, n бит младшим вперёд, TMS уже 0. С прошивки 38 — из ITCM и прямой записью в регистры
+   установки и сброса GPIO: в цикле по биту было четыре вызова bflb_gpio_* из XIP flash с проверкой вывода
+   в каждом, и время загрузки ядра зависело от всей остальной прошивки (ядро Amiga 907 КБ: 9,8 с при
+   прошивке 36, 25 с при 37, при пределе ESP 15 с). Две паузы держат такт JTAG около 5 МГц. */
+#ifdef CORE_JTAG_HOST_TEST
+#define shift_stream(tx, n) shift_bits((tx), NULL, (int)(n))
+#else
+#define GPIO_SET ((volatile uint32_t *)(uintptr_t)0x20000AECu)   /* gpio_cfg138: запись 1 — вывод в 1 */
+#define GPIO_CLR ((volatile uint32_t *)(uintptr_t)0x20000AF4u)   /* gpio_cfg140: запись 1 — вывод в 0 */
+#define JTAG_PAUSE() __asm__ volatile("nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop;nop")
+__attribute__((section(".tcm_code.jtag"), noinline))
+static void shift_stream(const uint8_t *tx, uint32_t n)
+{
+    volatile uint32_t *const set = GPIO_SET, *const clr = GPIO_CLR;
+    for (uint32_t i = 0; i < n; i++) {
+        if ((tx[i >> 3] >> (i & 7)) & 1)
+            *set = 1u << PIN_TDI;
+        else
+            *clr = 1u << PIN_TDI;
+        JTAG_PAUSE();
+        *set = 1u << PIN_TCK;
+        JTAG_PAUSE();
+        *clr = 1u << PIN_TCK;
+    }
+}
+#endif
+
 /* такты в Run-Test/Idle: ПЛИС работает над командой (стирание, проверка) */
 static void idle_us(uint32_t us)
 {
@@ -269,6 +296,7 @@ int core_jtag_load(core_jtag_read_fn read, void *ctx, uint32_t size, uint32_t *u
     ir(GW_INIT_ADDR);
     ir(GW_XFER_WRITE);
     enter_shift_dr();
+    bflb_gpio_reset(gpio, PIN_TMS);
     for (uint32_t at = 0; at < size;) {
         uint32_t n = size - at > sizeof buf ? (uint32_t)sizeof buf : size - at;
         if (read(ctx, at, buf, n) != 0) {
@@ -279,9 +307,9 @@ int core_jtag_load(core_jtag_read_fn read, void *ctx, uint32_t size, uint32_t *u
             buf[i] = reverse(buf[i]);
         at += n;
         if (at < size) {
-            shift_bits(buf, NULL, (int)(8 * n));
+            shift_stream(buf, 8 * n);
         } else {
-            shift_bits(buf, NULL, (int)(8 * n - 1));
+            shift_stream(buf, 8 * n - 1);
             tms_seq((buf[n - 1] >> 7) & 1, 0x01u, 1);   /* последний бит — с выходом в Exit1-DR */
             tms_seq(1, 0x01u, 2);
         }

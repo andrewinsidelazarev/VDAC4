@@ -80,7 +80,7 @@
 #ifdef FTC_BRIDGE
 #define FW_VERSION 0x0A
 #else
-#define FW_VERSION 0x25
+#define FW_VERSION 0x26
 #endif
 
 #ifndef FTC_BRIDGE
