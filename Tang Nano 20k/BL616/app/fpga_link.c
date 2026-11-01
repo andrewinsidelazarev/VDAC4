@@ -321,7 +321,9 @@ static void chunk_dma(uint32_t a, const uint32_t *w, uint32_t n)
     aw.cn = n;
 }
 
-void fpga_pump(void)
+/* Шаг передачи. may_wait = 0 (прошивка 36) — из счёта полосы: один снимок, и если места в очереди
+   ПЛИС ещё мало, растеризатор считает дальше, а не стоит в wait_room. */
+static void pump_step(int may_wait)
 {
     if (aw.busy) {
         if (bflb_dma_channel_isbusy(dma_rx) || bflb_dma_channel_isbusy(dma_tx))
@@ -342,7 +344,14 @@ void fpga_pump(void)
         /* Start once a useful packet fits, then consume available capacity.
            Do not wait for an entirely empty queue just to send a larger packet. */
         uint32_t minimum=aw.n<DMA_MIN?aw.n:DMA_MIN;
-        wait_room(minimum+1);
+        if (may_wait) {
+            wait_room(minimum+1);
+        } else if (free_words<minimum+1) {
+            snap_t s;
+            snap(&s);
+            if (free_words<minimum+1)
+                return;
+        }
         uint32_t k=aw.n<WRITE_CHUNK?aw.n:WRITE_CHUNK;
         if(k>=free_words)k=free_words-1;
         const uint32_t *w = aw.w;
@@ -357,10 +366,15 @@ void fpga_pump(void)
     }
 }
 
+void fpga_pump(void)
+{
+    pump_step(0);
+}
+
 void fpga_wr_wait(void)
 {
     while (aw.busy || aw.n)
-        fpga_pump();
+        pump_step(1);
 }
 
 static void b_wr_async(void *ctx, uint32_t a, const uint32_t *w, uint32_t n)
@@ -370,7 +384,7 @@ static void b_wr_async(void *ctx, uint32_t a, const uint32_t *w, uint32_t n)
     aw.a = a;
     aw.w = w;
     aw.n = n;
-    fpga_pump();
+    pump_step(0);
 }
 
 static void b_pump(void *ctx)
@@ -687,6 +701,9 @@ int fpga_speed_test(void)
     uint32_t whz = (rep[9] == 0 || rep[4] == 0) ? 80000000u : 40000000u;
     int r32 = rep[18] == 0;
     uint32_t rhz = (r32 && rep[20] == 0 && (rep[22] == 0 || rep[24] == 0)) ? 40000000u : READ_HZ;
+    /* Прошивка 36: чтение на 53,3 МГц, только если сошлись обе несимметричные фазы — это и есть запас;
+       иначе, как раньше, 40 МГц при одной из них. Чтение на 53,3 МГц быстрее на 19 % (64 КБ: 18,47 → 14,94 мс). */
+    const uint32_t rph = (rhz != READ_HZ && rep[22] == 0 && rep[24] == 0) ? 0x0001u : 0u;
     rep[1] = whz;
     rep[2] = rhz;
     rep[3] = (uint32_t)use_cont | ((uint32_t)r32 << 1);
@@ -695,6 +712,7 @@ int fpga_speed_test(void)
     cont(use_cont);
     write_hz = whz;
     rdata_hz = rhz;
+    rdata_ph = rph;
     rd32_on = r32;
     checked = 0;                             /* первые посылки на новой частоте — снова с проверкой */
     return whz == 80000000u ? 3 : 2;
