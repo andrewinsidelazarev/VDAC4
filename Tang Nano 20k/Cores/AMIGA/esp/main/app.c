@@ -21,7 +21,7 @@
 #define HD0_CFG "/AMIGA/HD0.CFG"
 #define HD0_PATH_MAX 512u
 #define HDF_MAX_SECTORS 8388607u    /* размер в регистре ядра — 32 бита в байтах */
-#define VERSION 0x05010006u
+#define VERSION 0x0501000Au
 #define R_DISK_SIZE 0x180u
 #define R_DISK_STATUS 0x184u
 #define R_DISK_SECTOR 0x188u
@@ -97,7 +97,18 @@ static int load_disk(uint8_t **disk) {
     }
     return 1;
 }
+static int disk_step(int *served);
+/* Смену носителя ядро принимает только в простое (amiga_disk.sv), запись в занятый ящик молча теряется: прежний диск уже снят,
+ * новый не подключён, и система не видит диска. Меню держит этот поток, запрос гостя ждёт ответа: сначала обслужить его. */
 static int mount_unit(unsigned unit,uint32_t bytes) {
+    for (unsigned tries=0;tries<500u;tries++) {
+        uint32_t status=0;
+        int served=0;
+        if (!rd(R_DISK_STATUS,&status)) return 0;
+        if (!(status&2)) break;
+        if ((status&1) && !disk_step(&served)) return 0;
+        if (!served) core->delay(1);
+    }
     return wr(R_DISK_UNIT,unit) && wr(R_DISK_SIZE,bytes) && wr(R_DISK_UNIT,0);
 }
 static int mount_disk(const uint8_t *disk) {
@@ -177,7 +188,7 @@ static void rx_discard(void) {
 }
 /* Новая дискета: снять прежнюю (система должна это увидеть), вставить через DF0_SWAP_MS. */
 static void df0_change(uint8_t *data,void *file,int read_only,const char *name) {
-    wr(R_DISK_SIZE,0);
+    mount_unit(0,0);
     if (df0_data) core->free(df0_data);
     df0_close_file();
     df0_data=data; df0_file=file; df0_ro=read_only;
@@ -188,7 +199,7 @@ static void df0_change(uint8_t *data,void *file,int read_only,const char *name) 
 }
 static void df0_eject(void) {
     df0_swap_at=0;
-    wr(R_DISK_SIZE,0);
+    mount_unit(0,0);
     if (df0_data) core->free(df0_data);
     df0_data=NULL; df0_close_file(); df0_ro=1; df0_name[0]=0;
 }
@@ -241,8 +252,16 @@ static const char *hd0_attach(const char *path) {
 static int hd0_read_config(void) {
     uint8_t *text=NULL; size_t size=0;
     strcpy(hd0_path,HDF_PATH);
-    if (!sd_disk_api() || core->sd_read(HD0_CFG,&text,&size,HD0_PATH_MAX-1u,&running)!=ZM_OK) {
+    if (!sd_disk_api()) return 0;
+    /* Нет файла — диск не выбран. Занятая карта — это ещё не «не выбран»: подождать, иначе Amiga молча стартует без диска. */
+    int r=core->sd_read(HD0_CFG,&text,&size,HD0_PATH_MAX-1u,&running);
+    for (unsigned tries=0;r==ZM_BUSY && tries<20u && running;tries++) {
+        core->delay(100u);
+        r=core->sd_read(HD0_CFG,&text,&size,HD0_PATH_MAX-1u,&running);
+    }
+    if (r!=ZM_OK) {
         if (text) core->free(text);
+        if (r!=ZM_NOT_FOUND) core->log("amiga: cannot read %s: %d",HD0_CFG,r);
         return 0;
     }
     size_t n=0;
@@ -639,7 +658,7 @@ static void stop(void) {
 #ifndef AMIGA_HOST_TEST
 int main(int argc,char **argv) {
     static const zm_app_t app={sizeof(zm_app_t),ZM_APP_ABI_MAJOR,ZM_APP_ABI_MINOR,
-        "amiga","0.8",0x6E,0x7A,start,stop,command,NULL,NULL,NULL};
+        "amiga","0.14",0x6E,0x7A,start,stop,command,NULL,NULL,NULL};
     if (argc!=3) return 0;
     *(const zm_app_t **)argv[2]=&app;
     return ZM_APP_ABI_MAJOR;

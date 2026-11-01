@@ -17,8 +17,11 @@ int main(int argc,char **argv) {
     std::vector<uint8_t> hdf;
     if(argc>4){std::ifstream disk(argv[4],std::ios::binary);hdf.assign(std::istreambuf_iterator<char>(disk),{});if(hdf.empty()||hdf.size()%512)return 3;}
     unsigned hdf_reads=0,hdf_writes=0;bool serve_hdf=false;
+    // FLOPPY_FAST: дискета отвечает без задержки, как ESP на плате, а не раз в 4 мс.
+    const bool floppy_fast=getenv("FLOPPY_FAST")!=nullptr;
     unsigned sectors_served=0,transfer_word=0;uint32_t sector=0,token=0;bool transferring=false;
     std::ofstream disklog("disk.csv");disklog<<"seconds,sector,token\n";
+    std::ofstream written("written.bin",std::ios::binary);
     VerilatedContext ctx;Vboot_top q{&ctx};
     // DIV3 uses CLKOUTP at 180 degrees; its rise aligns with CLKOUT rise.
     q.clk_28m=0;q.clk_85m=1;q.por=1;q.rom_done=0;q.trace_index=0;q.eval();
@@ -33,25 +36,40 @@ int main(int argc,char **argv) {
     for(uint64_t n=0;n<cycles;n++) {
         q.host_wr=0;
         if(n==3000){q.host_wr=1;q.host_addr=0x60;q.host_data=unsigned(adf.size());}
-        if(!hdf.empty()&&n==6000){q.host_wr=1;q.host_addr=0x65;q.host_data=4;}
-        if(!hdf.empty()&&n==6100){q.host_wr=1;q.host_addr=0x60;q.host_data=unsigned(hdf.size());}
-        if(!hdf.empty()&&n==6200){q.host_wr=1;q.host_addr=0x65;q.host_data=0;}
+        // Как hd0_attach: снять образ, подключить новый. HDF_ATTACH_S — на работающей Amiga, HDF_RESET_S — затем сброс, как меню F11.
+        static const uint64_t attach_at=getenv("HDF_ATTACH_S")?uint64_t(atof(getenv("HDF_ATTACH_S"))*28500000):6000;
+        static const uint64_t reset_at=getenv("HDF_RESET_S")?uint64_t(atof(getenv("HDF_RESET_S"))*28500000):0;
+        q.soft_reset=reset_at&&n>=reset_at&&n<reset_at+300;
+        if(!hdf.empty()&&n==attach_at){q.host_wr=1;q.host_addr=0x65;q.host_data=4;}
+        if(!hdf.empty()&&n==attach_at+100){q.host_wr=1;q.host_addr=0x60;q.host_data=0;}
+        if(!hdf.empty()&&n==attach_at+200){q.host_wr=1;q.host_addr=0x60;q.host_data=unsigned(hdf.size());}
+        if(!hdf.empty()&&n==attach_at+300){q.host_wr=1;q.host_addr=0x65;q.host_data=0;}
         if(q.disk_status&4){printf("FAIL disk mailbox error %08X\n",q.disk_status);return 4;}
         // Poll at the real app's 4 ms cadence; bound host transfer rate too.
         // Опрос как у настоящего приложения: дискета раз в 4 мс; к диску — сразу, как при HD0.HDF.
-        if(!transferring && (q.disk_status&1) && (((q.disk_status>>8)&255)==0x10 || n%114000==0)) {
+        if(!transferring && (q.disk_status&1) && (((q.disk_status>>8)&255)==0x10 || floppy_fast || n%114000==0)) {
             unsigned drive=(q.disk_status>>8)&255;
             if(drive==1){if(adf.empty()||(q.disk_status&8)||q.disk_sector>=1760)return 5;}
             else if(drive==0x10){
                 if(hdf.empty()||q.disk_sector>=hdf.size()/512)return 5;
-                if(q.disk_status&8){hdf_writes++;q.host_wr=1;q.host_addr=0x64;q.host_data=q.disk_token;goto clocks;}
+                if(q.disk_status&8){
+                    // Как хост: окно передачи целиком в образ, в порядке байт ESP; копия — в written.bin для проверки.
+                    uint8_t *p=hdf.data()+size_t(q.disk_sector)*512;
+                    for(unsigned i=0;i<128;i++){
+                        q.tx_index=i;q.eval();
+                        for(unsigned k=0;k<4;k++)p[i*4+k]=uint8_t(q.tx_word>>(8*k));
+                    }
+                    const uint32_t number=q.disk_sector;
+                    written.write((const char *)&number,4);written.write((const char *)p,512);written.flush();
+                    hdf_writes++;q.host_wr=1;q.host_addr=0x64;q.host_data=q.disk_token;goto clocks;
+                }
                 hdf_reads++;
             } else return 5;
             serve_hdf=drive==0x10;
             sector=q.disk_sector;token=q.disk_token;transfer_word=0;transferring=true;
             disklog<<double(n)/28500000<<","<<sector<<","<<token<<"\n";disklog.flush();
         }
-        if(transferring && (serve_hdf || n%228==0)){
+        if(transferring && (serve_hdf || floppy_fast || n%228==0)){
             q.host_wr=1;
             if(transfer_word<128){
                 auto p=(serve_hdf?hdf:adf).data()+sector*512+transfer_word*4;q.host_addr=0x1400+transfer_word;

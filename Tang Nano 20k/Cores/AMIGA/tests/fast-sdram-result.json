@@ -4,7 +4,7 @@
   "hardware": false,
   "electrical_timing": false,
   "source_sha256": {
-    "fpga/sdram.sv": "de96bed219af5b0656d7c5fbb918479c5ea34ba89eb5808e579ff3c1fd1a5dd8",
+    "fpga/sdram.sv": "71ff7f8f86798580e909e26afc50706edd862add8845ff4bd0a04ecc010848e9",
     "upstream/sim/sdr_chip_model.v": "dc5bbaa9296d99d5c72358dd7f3532929c39426a2c7b7e65b40b9739c3158a4f",
     "tests/run_fast_sdram.py": "8a72916438b03d04bcb2355a5ff0a4f333c3c3fcb328cec19a27c53565e63ea8"
   }

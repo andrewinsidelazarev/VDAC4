@@ -10,6 +10,7 @@ ap=argparse.ArgumentParser();ap.add_argument('--seconds',type=float,default=.12)
 ap.add_argument('--clock-order',choices=['28-first','85-first','together'],default='together')
 ap.add_argument('--adf',type=Path)
 ap.add_argument('--hdf',type=Path)
+ap.add_argument('--rom',type=Path,help='свой образ ROM 512 КБ вместо Kickstart (run_ide_write.py)')
 ap.add_argument('--no-build',action='store_true');args=ap.parse_args()
 root=Path(__file__).resolve().parents[1]
 stage=root/'tests/boot-build';stage.mkdir(exist_ok=True)
@@ -25,12 +26,12 @@ wrapper=defines+'''module boot_top(input clk_28m,clk_85m,por,rom_done,input [8:0
 output hs_n,vs_n,output [7:0] red,green,blue,
 output [31:0] cpu_debug [0:23],output [31:0] cpu_trace [0:3],output sdram_ready,output reset_out,
 output timing_publish,timing_latch,output [15:0] timing_data,timing_latched,output [21:0] timing_address,
-input host_wr,input [17:0] host_addr,input [31:0] host_data,
-output [31:0] disk_status,disk_sector,disk_token);
+input soft_reset,input host_wr,input [17:0] host_addr,input [31:0] host_data,
+output [31:0] disk_status,disk_sector,disk_token,input [6:0] tx_index,output [31:0] tx_word);
 wire [31:0] trace_start=0;
 wire rst_sdram_n=~por;
 wire rst_28m=por || !sdram_ready;
-wire [1:0] btn=0;wire soft_reset=0;
+wire [1:0] btn=0;
 wire floppy_wrprot;wire [11:0] rtc=0;
 wire clk7_en,clk7n_en,rom_write=0;
 wire [17:0] rom_address=0;wire [15:0] rom_value=0;
@@ -51,9 +52,9 @@ amiga_disk disk(.clk(clk_28m),.rst_n(~por),.guest_reset(nanomig_reset),
 .wr_stb(host_wr),.wr_addr(host_addr),.wr_data(host_data),.rd_addr(13'h61),.rd_data(disk_status),
 .rd_clk(clk_28m),.tx_q(),.floppy_wrprot(floppy_wrprot),.guest_data(sd_wr_data),
 .request_rd(sd_rd),.request_wr(sd_wr),.request_sector(sd_sector),
-.image_mounted(sd_img_mounted),.image_size(sd_img_size),.busy(sd_busy),.done(sd_done),
+.image_mounted(sd_img_mounted),.image_size(sd_img_size),.busy(sd_busy),.served_ide(sd_served_ide),.done(sd_done),
 .byte_strobe(sd_rd_byte_strobe),.byte_addr(sd_byte_index),.byte_data(sd_rd_data));
-assign disk_sector=disk.sector,disk_token=disk.token;
+assign disk_sector=disk.sector,disk_token=disk.token,tx_word=disk.tx[tx_index];
 '''+memory+'''
 sdr_chip_model chip(.clk(clk_85m),.dq(IO_sdram_dq),.addr(O_sdram_addr),.dqm(O_sdram_dqm),
 .ba(O_sdram_ba),.cs_n(O_sdram_cs_n),.ras_n(O_sdram_ras_n),.cas_n(O_sdram_cas_n),.we_n(O_sdram_wen_n));
@@ -78,7 +79,7 @@ cpu=(root/'fpga/cpu_wrapper.v').read_text(encoding='utf-8')
 assert cpu.count('.ipl_autovector(1),')==1
 cpu=cpu.replace('.ipl_autovector(1),',".ipl_autovector(1'b1),\n  .berr(1'b0),\n  .skipFetch(skip_fetch_i),")
 (stage/'cpu_wrapper_sim.v').write_text(cpu)
-rom=(root/'ROM/kickstart-3.1-a500_a600_a2000.rom').read_bytes()
+rom=(args.rom or root/'ROM/kickstart-3.1-a500_a600_a2000.rom').read_bytes()
 assert len(rom)==524288
 (stage/'kick32.hex').write_text('@1e0000\n'+'\n'.join(rom[n:n+4].hex() for n in range(0,len(rom),4))+'\n')
 sources=[]
@@ -132,5 +133,5 @@ if (stage/'frame.ppm').exists():
     png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',width,height,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(pixels))+chunk(b'IEND',b'')
     (stage/'frame.png').write_bytes(png)
 print(json.dumps({k:v for k,v in report.items() if k!='source_sha256'},indent=2),flush=True)
-if not all(report[k] for k in ['reset_released','cpu_reset_released','sdram_ready','reset_vectors_match']):
+if not all(report[k] for k in ['reset_released','cpu_reset_released','sdram_ready']+([] if args.rom else ['reset_vectors_match'])):
     raise SystemExit('FAIL reset release or ROM reset vectors; artifacts retained')

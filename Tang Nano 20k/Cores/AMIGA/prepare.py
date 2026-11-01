@@ -75,7 +75,7 @@ wire midi_in=1; wire midi_out;
 wire [7:0] sd_img_mounted, sd_rd_data;
 wire [7:0] sd_rd, sd_wr, sd_wr_data;
 wire [63:0] sd_img_size; wire [31:0] sd_sector;
-wire [8:0] sd_byte_index; wire sd_busy, sd_done, sd_rd_byte_strobe;
+wire [8:0] sd_byte_index; wire sd_busy, sd_served_ide, sd_done, sd_rd_byte_strobe;
 // S2 (pin 87 / btn[1]) is active high; an idle low button must release reset.
 reg [1:0] button_reset_sync=0;
 always @(posedge clk_28m) begin
@@ -132,7 +132,7 @@ amiga_link link(.clk(clk_28m),.rst_n(rst_28m_n),.sck(link_sck),.cs_n(link_cs_n),
     .osd_wr(osd_wr),.osd_addr(osd_addr),.osd_data(osd_data),.osd_show(osd_show),.osd_sel(osd_sel),
     .osd_band(osd_band),.osd_rule(osd_rule),.osd_bar(osd_bar),.rtc(rtc),.floppy_wrprot(floppy_wrprot),
     .disk_reset(nanomig_reset),.disk_rd(sd_rd),.disk_wr(sd_wr),.disk_sector(sd_sector),
-    .disk_mounted(sd_img_mounted),.disk_size(sd_img_size),.disk_busy(sd_busy),.disk_done(sd_done),
+    .disk_mounted(sd_img_mounted),.disk_size(sd_img_size),.disk_busy(sd_busy),.disk_served_ide(sd_served_ide),.disk_done(sd_done),
     .disk_strobe(sd_rd_byte_strobe),.disk_addr(sd_byte_index),.disk_data(sd_rd_data),.disk_guest_data(sd_wr_data),
     .hid_strobe(hid_strobe),.hid_start(hid_start),.hid_data(hid_data),.hid_reset(hid_reset),
     .sd_cs_n(SD_CS),.sd_sck(SD_SCK),.sd_mosi(SD_MOSI),.sd_miso(SD_MISO),
@@ -145,6 +145,8 @@ hid hid(.clk(clk_28m),.reset(rst_28m | hid_reset),.data_in_strobe(hid_strobe),
     .kbd_reset(kbd_reset),.joystick0(joystick0),.joystick1(joystick1),.key_free(key_free));
 '''
 top += '// Minimig ram/rom interface' + section('// Minimig ram/rom interface', 'wire flash_ready;')
+assert top.count('.sdc_busy(sd_busy),')==1
+top=top.replace('.sdc_busy(sd_busy),','.sdc_busy(sd_busy),\n .sdc_served_ide(sd_served_ide),')
 top=top.replace('.por(rst_28m),','.por(rst_28m),\n .debug_words(cpu_debug),\n .trace_index(trace_index),.trace_start(trace_start),.trace_words(cpu_trace),\n .rtc(rtc),')
 top += '''
 wire sdram_sync=clk7_en;
@@ -260,6 +262,172 @@ sdram=sdram.replace(old,'      case (sdram_port)')
 old="    STATE_RAS_WAIT_0: begin\n"
 assert sdram.count(old)==1
 sdram=sdram.replace(old,old+"      sd_addr <= sd_addr_cas;\n")
+# Адрес SDRAM — в регистрах вывода, как команды и DQ. Адрес удерживал значение через обратную связь (Q заведён в свою же
+# логику), такой триггер Gowin в IOB не кладёт, и адрес шёл по кристаллу. Строка уходила на одном фронте с ACTIVE и приходила
+# к выводу примерно за 1,0 нс до фронта SDRAM при tAS 1,5 нс (W9864G2, -6), запас зависел от раскладки. Удержание не нужно:
+# адрес важен только на фронте команды, поэтому значение считается заново на каждом такте.
+for old in ("        sd_addr[10] <= 1'b1;\n","        sd_addr <= MODE;\n",
+            "        sd_addr <= addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH];\n","        sd_addr <= p2_addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH];\n",
+            "      sd_addr <= sd_addr_cas;\n"):
+    assert sdram.count(old)==1,old
+    sdram=sdram.replace(old,'')
+assert 'sd_addr <=' not in sdram and 'sd_addr[' not in sdram
+marker='always @(negedge clk) begin\n  sd_cmd <= CMD_NOP;'
+assert sdram.count(marker)==1
+sdram=sdram.replace(marker,'''// Вне команд значение не важно: по умолчанию адрес столбца, он уходит на такт раньше READ/WRITE.
+reg [RAS_WIDTH-1:0] sd_addr_next;
+always @* begin
+  sd_addr_next = sd_addr_cas;
+  case (state)
+    STATE_INIT: begin
+      sd_addr_next = {RAS_WIDTH{1'b0}};
+      if (init_counter == CLOCK_CYCLES_UNTIL_INIT_PRECHARGE[INIT_COUNTER_WIDTH-1:0])
+        sd_addr_next[10] = 1'b1;
+      else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH2_END[INIT_COUNTER_WIDTH-1:0])
+        sd_addr_next = MODE;
+    end
+    STATE_RAS:
+      sd_addr_next = cs ? addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH] : p2_addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH];
+    default: ;
+  endcase
+end
+always @(negedge clk) sd_addr <= sd_addr_next;
+
+'''+marker)
+# Приём данных: dq_q защёлкивается по фронту, dout/dout48 по спаду — бюджет полтакта, 5,85 нс. SDC не учитывает скважность PLL:
+# DS226 даёт точность 50 mUI, при 85,5 МГц это 0,585 нс как раз на полутакте. Сборки с запасом 0,05…0,48 нс на плате дают красный
+# экран Kickstart (контрольная сумма ROM), с запасом от 0,88 нс работают. В пути стояли три LUT: case по состоянию и порту шёл
+# в данные, а приёмники тянуло к чипсету и кэшу через весь кристалл. Теперь разрешения считаются на такт раньше и идут на CE,
+# а на полутакте остаются только dq_r (у выводов) и 16 бит dout чипсета.
+old='''    STATE_READ_DATA: begin
+      case (sdram_port)
+        PORT_1 : begin
+          dout <= ram_dout;
+        end
+        PORT_2 : begin
+          p2_dout <= ram_dout;
+        end
+        default: ;
+      endcase
+    end
+'''
+assert sdram.count(old)==1
+sdram=sdram.replace(old,'')
+old='''        STATE_READ_0: begin
+          case (sdram_port)
+            PORT_1: dout48[47:32] <= ram_dout_lo;
+            PORT_2: begin
+              if (!ram_we && !CHIP48_BURST) p2_ack_i <= ~p2_ack_i;
+              p2_dout48[47:32] <= ram_dout_lo;
+            end
+            default: ;
+          endcase
+        end
+        STATE_READ_1: begin
+          case (sdram_port)
+            PORT_1: begin
+              if (addr_0)
+                dout48[47:16] <= {ram_dout_hi, ram_dout_lo};
+              else
+                dout48[31: 0] <= {ram_dout_hi, ram_dout_lo};
+            end
+            PORT_2: begin
+              if (addr_0)
+                p2_dout48[47:16] <= {ram_dout_hi, ram_dout_lo};
+              else
+                p2_dout48[31: 0] <= {ram_dout_hi, ram_dout_lo};
+            end
+            default: ;
+          endcase
+        end
+        STATE_READ_2: begin
+          case (sdram_port)
+            PORT_1: begin
+              if (addr_0)
+                dout48[15:0] <= {ram_dout_hi};
+              else
+                /* no-op */;
+            end
+            PORT_2: begin
+              if (!ram_we && CHIP48_BURST) p2_ack_i <= ~p2_ack_i;
+              if (addr_0)
+                p2_dout48[15:0] <= {ram_dout_hi};
+              else
+                /* no-op */;
+            end
+            default: ;
+          endcase
+        end
+'''
+assert sdram.count(old)==1
+sdram=sdram.replace(old,'''        STATE_READ_0: begin
+          if (sdram_port == PORT_2 && !ram_we && !CHIP48_BURST) p2_ack_i <= ~p2_ack_i;
+        end
+        STATE_READ_2: begin
+          if (sdram_port == PORT_2 && !ram_we && CHIP48_BURST) p2_ack_i <= ~p2_ack_i;
+        end
+''')
+old='''    always @(negedge clk) begin
+      sd_dqm <= 0;
+
+      case (state)
+        STATE_CAS: begin
+          case (sdram_port)
+            PORT_1: if (ram_we) sd_dqm <= (addr_0 ?'''
+assert sdram.count(old)==1
+sdram=sdram.replace(old,'''    // Разрешения приёма: порт и addr_0 не меняются от ACTIVE до конца цикла, поэтому всё известно на такт раньше.
+    // dout чипсет забирает через такт после READ_0 (модель: pipeline.csv), он остаётся на полутакте, один мультиплексор и 16 триггеров.
+    // Остальное идёт через dq_r, и у этих путей до потребителя целый такт. Подтверждение порта 2 не сдвинуто: p2_ack выходит
+    // на READ_3, вместе с последним словом; dout48 чипсет не читает раньше следующего clk7_en, а до него ещё один такт.
+    // Данные на такт позже прежних: 47:32 — lo на READ_1, hi на READ_2 при addr_0; 31:16 — на READ_2; 15:0 — lo на READ_2 или hi на READ_3.
+    reg [31:0] dq_r;
+    reg [1:0] rd0_en, rd1_en, rd2_en;   // [0] — порт 1, [1] — порт 2
+    reg [1:0] top_en, low_en;
+    wire [15:0] r_lo = dq_r[15:0];
+    wire [15:0] r_hi = dq_r[31:16];
+    always @(negedge clk) begin
+      dq_r <= {ram_dout_hi, ram_dout_lo};
+      rd0_en <= {sdram_port == PORT_2, sdram_port == PORT_1} & {2{state == STATE_CAS_WAIT_1}};
+      rd1_en <= rd0_en;
+      rd2_en <= rd1_en;
+      top_en <= rd0_en | (rd1_en & {2{addr_0}});
+      low_en <= (rd1_en & {2{~addr_0}}) | (rd2_en & {2{addr_0}});
+    end
+    always @(negedge clk) begin
+      if (rd0_en[0]) dout <= ram_dout;
+      if (rd1_en[1]) p2_dout <= addr_0 ? r_lo : r_hi;
+      if (top_en[0]) dout48[47:32] <= rd1_en[0] ? r_lo : r_hi;
+      if (top_en[1]) p2_dout48[47:32] <= rd1_en[1] ? r_lo : r_hi;
+      if (rd2_en[0]) dout48[31:16] <= addr_0 ? r_lo : r_hi;
+      if (rd2_en[1]) p2_dout48[31:16] <= addr_0 ? r_lo : r_hi;
+      if (low_en[0]) dout48[15:0] <= addr_0 ? r_hi : r_lo;
+      if (low_en[1]) p2_dout48[15:0] <= addr_0 ? r_hi : r_lo;
+    end
+    always @(negedge clk) begin
+      sd_dqm <= 0;
+
+      case (state)
+        STATE_CAS: begin
+          case (sdram_port)
+            PORT_1: if (ram_we) sd_dqm <= (addr_0 ?''')
+# Ветка 16 бит здесь не используется, но dout из общего блока убран: приём остаётся и в ней.
+old='''    always @(negedge clk) begin
+      sd_dqm <= 0;
+
+      case (state)
+        STATE_CAS: begin
+          case (sdram_port)
+            PORT_1: if (ram_we) sd_dqm <= ram_ds;'''
+assert sdram.count(old)==1
+sdram=sdram.replace(old,'''    always @(negedge clk) begin
+      sd_dqm <= 0;
+      if (state == STATE_READ_DATA && sdram_port == PORT_1) dout <= ram_dout;
+      if (state == STATE_READ_DATA && sdram_port == PORT_2) p2_dout <= ram_dout;
+
+      case (state)
+        STATE_CAS: begin
+          case (sdram_port)
+            PORT_1: if (ram_we) sd_dqm <= ram_ds;''')
 (FP/'sdram.sv').write_text('// VDAC4 debug5: контроллер по спаду clk, DQ по фронту; такт SDRAM на 90 градусов после рабочего фронта.\n'+sdram,encoding='utf-8')
 
 # Часы RTC: счётчик секунды рассчитан на 28,375 МГц, здесь такт 28,5 МГц (иначе +6 минут в сутки).
@@ -368,6 +536,39 @@ for channel,color in (('r','red'),('g','green'),('b','blue')):
     old=f"wire [3:0] {channel}_in = (hbl||vbl)?4'h0:{color}[7:4];"
     assert nanomig.count(old)==1
     nanomig=nanomig.replace(old,f"wire [7:0] {channel}_in = (hbl||vbl)?8'h00:{color};")
+# Запись IDE: upstream отдаёт байт 1 сектора прямо из ide_readdata, рассчитывая, что SD-контроллер заберёт его за такт-два
+# после смены адреса; потом IDE уходит на следующее слово. Ящик amiga_disk берёт байт на 16-м такте и получал байт 3:
+# на плате заголовок блока 00000002 ложился как 00020002, AmigaOS — checksum error. Старший байт слова 0 теперь защёлкнут.
+old="(!sdc_byte_addr[0]?ide_readdata[7:0]:((sdc_byte_addr==1)?ide_readdata[15:8]:ide_readdataD)):"
+assert nanomig.count(old)==1
+nanomig=nanomig.replace(old,"(!sdc_byte_addr[0]?ide_readdata[7:0]:((sdc_byte_addr==1)?ide_first_odd:ide_readdataD)):")
+old="reg [7:0] ide_readdataD;\n"
+assert nanomig.count(old)==1
+nanomig=nanomig.replace(old,old+"reg [7:0] ide_first_odd;\nalways @(posedge clk_sys) if(sdc_byte_addr==9'd0) ide_first_odd <= ide_readdata[15:8];\n")
+# Ящик amiga_disk один на дискету и диск, а в upstream IDE и дискета смотрят на общие busy и номер байта. Пока IDE ждёт своей
+# очереди, обмен дискеты двигает sdc_byte_addr, и каждый нечётный адрес продвигает указатель буфера IDE как его собственное слово:
+# за сектор дискеты указатель уходит на 256 слов, сектора блока до конца сдвигаются, последний берётся за данными, из нулей. Это и
+# есть нулевые сектора в файлах при установке Workbench (Prefs/Palette на HD02, ошибка #8000000B). Кроме того, запрос, поданный в
+# такт, когда ящик заняла дискета, снимался как принятый: чужой busy считался подтверждением, чужой done — концом сектора.
+# Теперь у каждого своя занятость, а выбор источника данных и счёт байт IDE идут только в её собственном обмене.
+old="// ===================================== IDE ===================================="
+assert nanomig.count(old)==1
+head,tail=nanomig.split(old)
+ide,rest=tail.split("`else // !`ifndef DISABLE_IDE",1)
+ide,n=re.subn(r'\bsdc_busy\b','sdc_busy_ide',ide)
+assert n==7,n
+nanomig=head+"wire sdc_busy_ide = sdc_busy && sdc_served_ide;\nwire sdc_busy_fdc = sdc_busy && !sdc_served_ide;\n"+old+ide+"`else // !`ifndef DISABLE_IDE"+rest
+old=".sdc_busy           ( sdc_busy              ),"
+assert nanomig.count(old)==1
+nanomig=nanomig.replace(old,".sdc_busy           ( sdc_busy_fdc          ),")
+old="   input\t sdc_busy,\n"
+assert nanomig.count(old)==1
+nanomig=nanomig.replace(old,old+"   input\t sdc_served_ide,\n")
+nanomig,n=re.subn(r"reg ide_active = 0;\nalways @\(posedge clk_sys\) begin\n.*?\nend *\n","wire ide_active = sdc_served_ide;\n",nanomig,count=1,flags=re.S)
+assert n==1
+old="sdc_addr_toggle <= !last_sdc_addr &&  sdc_byte_addr[0];"
+assert nanomig.count(old)==1
+nanomig=nanomig.replace(old,"sdc_addr_toggle <= sdc_busy_ide && !last_sdc_addr &&  sdc_byte_addr[0];")
 (FP/'nanomig.v').write_text('// VDAC4: RGB888 outputs and blanking; generated by prepare.py.\n'+nanomig,encoding='utf-8')
 
 cpu=(UP/'src/minimig-aga/cpu_wrapper.v').read_text(encoding='utf-8')
@@ -461,5 +662,10 @@ shutil.copyfile(ROOT.parents[2]/'ESP32 S3 Zero N8R8/Firmware/modules/sdk/include
 for name in ('CMakeLists.txt','sdkconfig.defaults','tools/build.ps1','main/CMakeLists.txt'):
     text=(nes/'esp'/name).read_text(encoding='utf-8')
     text=text.replace('nes_vdac4','amiga_vdac4').replace('NES.ELF','AMIGA.ELF').replace('NES.','AMIGA.')
+    if name=='main/CMakeLists.txt':
+        # Загрузчик ESP неверно переводит литералы «адрес минус смещение», которые строит ivopts: запись по такому адресу —
+        # паника Cache error (AMIGA.ELF 0.8, take_sector). Проверка готового модуля: tests/check_elf_pointers.py.
+        assert text.count('-O2)')==1
+        text='# Без ivopts: литерал «адрес минус смещение» загрузчик ESP переводит неверно (см. tests/check_elf_pointers.py).\n'+text.replace('-O2)','-O2 -fno-ivopts)')
     (esp/name).write_text(text,encoding='utf-8')
 print('Prepared VDAC4 A1200 wrapper; no device access.')

@@ -133,7 +133,7 @@ wire midi_in=1; wire midi_out;
 wire [7:0] sd_img_mounted, sd_rd_data;
 wire [7:0] sd_rd, sd_wr, sd_wr_data;
 wire [63:0] sd_img_size; wire [31:0] sd_sector;
-wire [8:0] sd_byte_index; wire sd_busy, sd_done, sd_rd_byte_strobe;
+wire [8:0] sd_byte_index; wire sd_busy, sd_served_ide, sd_done, sd_rd_byte_strobe;
 // S2 (pin 87 / btn[1]) is active high; an idle low button must release reset.
 reg [1:0] button_reset_sync=0;
 always @(posedge clk_28m) begin
@@ -190,7 +190,7 @@ amiga_link link(.clk(clk_28m),.rst_n(rst_28m_n),.sck(link_sck),.cs_n(link_cs_n),
     .osd_wr(osd_wr),.osd_addr(osd_addr),.osd_data(osd_data),.osd_show(osd_show),.osd_sel(osd_sel),
     .osd_band(osd_band),.osd_rule(osd_rule),.osd_bar(osd_bar),.rtc(rtc),.floppy_wrprot(floppy_wrprot),
     .disk_reset(nanomig_reset),.disk_rd(sd_rd),.disk_wr(sd_wr),.disk_sector(sd_sector),
-    .disk_mounted(sd_img_mounted),.disk_size(sd_img_size),.disk_busy(sd_busy),.disk_done(sd_done),
+    .disk_mounted(sd_img_mounted),.disk_size(sd_img_size),.disk_busy(sd_busy),.disk_served_ide(sd_served_ide),.disk_done(sd_done),
     .disk_strobe(sd_rd_byte_strobe),.disk_addr(sd_byte_index),.disk_data(sd_rd_data),.disk_guest_data(sd_wr_data),
     .hid_strobe(hid_strobe),.hid_start(hid_start),.hid_data(hid_data),.hid_reset(hid_reset),
     .sd_cs_n(SD_CS),.sd_sck(SD_SCK),.sd_mosi(SD_MOSI),.sd_miso(SD_MISO),
@@ -309,6 +309,7 @@ nanomig nanomig
  .sdc_wr(sd_wr),
  .sdc_sector(sd_sector),
  .sdc_busy(sd_busy),
+ .sdc_served_ide(sd_served_ide),
  .sdc_done(sd_done), 
  .sdc_byte_in_strobe(sd_rd_byte_strobe),
  .sdc_byte_addr(sd_byte_index),

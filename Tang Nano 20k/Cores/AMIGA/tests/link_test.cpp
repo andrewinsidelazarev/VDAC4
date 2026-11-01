@@ -70,7 +70,7 @@ int main(int argc,char **argv) {
     std::vector<uint8_t> rom((std::istreambuf_iterator<char>(f)),{});CHECK(rom.size()==524288);
     unsigned cases=0;
     for(unsigned p:{285u,570u,1140u,5700u})for(unsigned phase=0;phase<400;phase+=40) {
-        Sim s(p,phase);CHECK(s.rd(0)==0x56444334);CHECK(s.rd(4)==0x05010006);
+        Sim s(p,phase);CHECK(s.rd(0)==0x56444334);CHECK(s.rd(4)==0x0501000A);
         for(unsigned i=0;i<36;i++)CHECK(s.rd(0x60+4*i)==0xd1a60000+i);
         s.wr(0x60,0xffffffff);CHECK(s.rd(0x60)==0xd1a60000); // diagnostics are read-only
         CHECK(s.rd(0xf4)==0);CHECK(s.rd(0xf8)==0);
@@ -131,6 +131,13 @@ int main(int argc,char **argv) {
             s.wr(0x194,4);s.wr(0x180,1048576);CHECK(s.q.disk_size==1048576);s.wr(0x194,0);
             s.q.disk_sector=100000;s.q.disk_rd=0x10;s.advance(1600);s.q.disk_rd=0;s.advance(1600);
             CHECK((s.rd(0x184)>>8&255)==0x10);t=s.rd(0x18c);s.write(0x5000,payload);s.wr(0x190,t);s.advance(400ull*2100);
+            CHECK(!s.q.disk_busy);CHECK(!(s.rd(0x184)&4));
+            // Дискета и диск разом: ящик берёт диск, запрос дискеты ждёт своей очереди и не считается принятым.
+            s.disk_bytes.clear();s.q.disk_sector=200;s.q.disk_rd=0x11;s.advance(1600);CHECK(s.q.disk_busy);CHECK(s.q.disk_served_ide);
+            s.q.disk_rd=1;s.advance(1600);CHECK((s.rd(0x184)>>8&255)==0x10);
+            t=s.rd(0x18c);s.write(0x5000,payload);s.wr(0x190,t);s.advance(400ull*2100);
+            CHECK(s.q.disk_busy);CHECK(!s.q.disk_served_ide);CHECK((s.rd(0x184)>>8&255)==1);s.q.disk_rd=0;s.disk_bytes.clear();
+            t=s.rd(0x18c);s.write(0x5000,payload);s.wr(0x190,t);s.advance(400ull*2100);
             CHECK(!s.q.disk_busy);CHECK(!(s.rd(0x184)&4));
         }
         s.wr(0x180,0);CHECK(s.q.disk_size==0);

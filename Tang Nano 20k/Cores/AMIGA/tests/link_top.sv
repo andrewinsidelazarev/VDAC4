@@ -8,7 +8,7 @@ module link_top(
     output sd_cs_n, sd_sck, sd_mosi,
     input disk_reset, input [7:0] disk_rd, disk_wr, input [31:0] disk_sector,
     output [7:0] disk_mounted, disk_data, output [63:0] disk_size,
-    output disk_busy, disk_done, disk_strobe, output [8:0] disk_addr
+    output disk_busy, disk_served_ide, disk_done, disk_strobe, output [8:0] disk_addr
 );
     reg [1:0] phase=0;
     wire [31:0] debug_words [0:35];

@@ -12,7 +12,7 @@ module amiga_disk (
     input wire rd_clk, output reg [31:0] tx_q,
     input wire [7:0] request_rd, request_wr, input wire [31:0] request_sector,
     output reg [7:0] image_mounted, output reg [63:0] image_size, output reg floppy_wrprot,
-    output wire busy, output reg done, byte_strobe,
+    output wire busy, output wire served_ide, output reg done, byte_strobe,
     output reg [8:0] byte_addr, output wire [7:0] byte_data, input wire [7:0] guest_data
 );
     localparam IDLE=0, WAIT_HOST=1, SEND=2, FINISH=3, FETCH=4;
@@ -31,6 +31,12 @@ module amiga_disk (
     wire payload = wr_addr >= 18'h1400 && wr_addr < 18'h1480;
     wire tx_we = state==FETCH && pace==FETCH_LAST && byte_addr[1:0]==2'd3;
     assign busy = state != IDLE;
+    // Ящик один на дискету и диск, обслуживается один запрос. drive меняется на том же фронте, что и busy.
+    assign served_ide = |drive[7:4];
+    // Оба запроса сразу: сначала диск, как и выбор номера сектора в nanomig. Запрос дискеты ждёт, пока ящик не освободится.
+    wire [7:0] request_any = request_rd | request_wr;
+    wire request_ide = |request_any[7:4];
+    wire request_writes = request_ide ? |request_wr[7:4] : |request_wr;
     assign byte_data = rx_q >> (8 * byte_addr[1:0]);
     always @(posedge clk) begin
         if (wr_stb && payload && state==WAIT_HOST && !writing && !guest_reset)
@@ -66,11 +72,11 @@ module amiga_disk (
                 state<=IDLE; filled<=0; pace<=0; byte_addr<=0; error<=0;
             end else begin
                 case (state)
-                    IDLE: if (|request_rd || |request_wr) begin
+                    IDLE: if (|request_any) begin
                         sector<=request_sector;
-                        drive<=request_rd | request_wr; writing<=|request_wr;
+                        drive<=request_ide ? request_any & 8'hF0 : request_any; writing<=request_writes;
                         token<=token+1'b1; filled<=0; pace<=0; byte_addr<=0;
-                        state<=|request_wr ? FETCH : WAIT_HOST;
+                        state<=request_writes ? FETCH : WAIT_HOST;
                     end
                     FETCH: begin
                         pace<=pace+1'b1;

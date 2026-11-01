@@ -85,6 +85,7 @@ module nanomig (
    output [7:0]	 sdc_wr,
    output [31:0] sdc_sector,
    input	 sdc_busy,
+   input	 sdc_served_ide,
    input	 sdc_done,
    input	 sdc_byte_in_strobe,
    input [8:0]	 sdc_byte_addr,
@@ -604,6 +605,8 @@ wire [7:0] sdc_byte_out_data_fdc;
 wire [31:0] sdc_sector_fdc;  // from inside minimig/floppy
 
 // ==============================================================================
+wire sdc_busy_ide = sdc_busy && sdc_served_ide;
+wire sdc_busy_fdc = sdc_busy && !sdc_served_ide;
 // ===================================== IDE ====================================
 // ==============================================================================
 `ifndef DISABLE_IDE
@@ -718,7 +721,7 @@ always @(posedge clk_sys) begin
       end
 
       // check if drive is in state IDE_DRV_STATE_MNT and no sd read is in progress
-      if(!ide_sdc_rd && !sdc_busy) begin
+      if(!ide_sdc_rd && !sdc_busy_ide) begin
          if(ide_drv_state[drv] == IDE_DRV_STATE_MNT) begin
             ide_sdc_sector <= 32'd0;
             ide_sdc_rd[drv] <= 1'b1;
@@ -726,7 +729,7 @@ always @(posedge clk_sys) begin
       end
 
       // check if amiga wants to read a sector
-      if(!sdc_busy && !ide_sdc_rd && ide_exec == IDE_EXEC_READ_SECTOR ) begin
+      if(!sdc_busy_ide && !ide_sdc_rd && ide_exec == IDE_EXEC_READ_SECTOR ) begin
          // this really only works with HW multipliers in the FPGA
          ide_sdc_sector <= (ide_cylinder * heads[ide_drv] + ide_head) * sectors[ide_drv] +
                      ide_sector - 1;
@@ -742,7 +745,7 @@ always @(posedge clk_sys) begin
       end
 
       // check if amiga wants to write
-      if (!sdc_busy && !ide_sdc_wr && ide_exec == IDE_EXEC_WRITE_SECTOR ) begin
+      if (!sdc_busy_ide && !ide_sdc_wr && ide_exec == IDE_EXEC_WRITE_SECTOR ) begin
          // this really only works with HW multipliers in the FPGA
          ide_sdc_sector <= (ide_cylinder * heads[ide_drv] + ide_head) * sectors[ide_drv] +
                      ide_sector - 1;
@@ -756,7 +759,7 @@ always @(posedge clk_sys) begin
       end
 
       // sd card has accepted read request
-      if ( ide_sdc_rd && sdc_busy ) begin
+      if ( ide_sdc_rd && sdc_busy_ide ) begin
          ide_sdc_rd <= 2'b00;
 
          // parse rdb unless the amiga has requested this sector
@@ -765,7 +768,7 @@ always @(posedge clk_sys) begin
       end
 
       // sd card has accepted write request
-      if ( ide_sdc_wr && sdc_busy ) begin
+      if ( ide_sdc_wr && sdc_busy_ide ) begin
          ide_sdc_wr <= 2'b00;
 
       // ...
@@ -971,14 +974,14 @@ always @(posedge clk_sys, posedge reset) begin
 	
 	IDE_EXEC_READ_SECTOR: begin
 	   // sd card has accepted request
-	   if ( ide_sdc_rd && sdc_busy ) begin
+	   if ( ide_sdc_rd && sdc_busy_ide ) begin
 	      ide_exec <= IDE_EXEC_SEND_PAYLOAD;
 	   end
 	end
 
 	IDE_EXEC_WRITE_SECTOR: begin
 	   // sd card has accepted request
-	   if ( ide_sdc_wr && sdc_busy ) begin
+	   if ( ide_sdc_wr && sdc_busy_ide ) begin
 	      ide_exec <= IDE_EXEC_RECV_PAYLOAD;
 	      ide_exec_cnt <= 9'd0;
 	   end
@@ -1329,18 +1332,16 @@ wire ide_read = !ide_exec_cnt[0] &&
      (ide_exec == IDE_EXEC_GET_REGS); 
 
 // signal to toggle between ide and fdc
-reg ide_active = 0;
-always @(posedge clk_sys) begin
-   if( |{sdc_rd[5:4],sdc_wr[5:4]} ) ide_active <= 1'b1;
-   if( |{sdc_rd[3:0],sdc_wr[3:0]} ) ide_active <= 1'b0;
-end   
+wire ide_active = sdc_served_ide;
    
 // IDE payload is being received in 16 bit words from but is being sent
 // as bytes to the SD card
 reg [7:0] ide_readdataD;
+reg [7:0] ide_first_odd;
+always @(posedge clk_sys) if(sdc_byte_addr==9'd0) ide_first_odd <= ide_readdata[15:8];
 assign sdc_byte_out_data = ide_active?
 			   // get all odd bytes from latch except the first one which wasn't latched
-			   (!sdc_byte_addr[0]?ide_readdata[7:0]:((sdc_byte_addr==1)?ide_readdata[15:8]:ide_readdataD)):
+			   (!sdc_byte_addr[0]?ide_readdata[7:0]:((sdc_byte_addr==1)?ide_first_odd:ide_readdataD)):
 			   sdc_byte_out_data_fdc;   
    
 // The sd card just requests addresses and minimig returns matching data. The ide uses ide_write
@@ -1354,7 +1355,7 @@ always @(posedge clk_sys) begin
    last_sdc_addr <= sdc_byte_addr[0];
 
    // generate a ide data trigger whenever an even address was reached
-   sdc_addr_toggle <= !last_sdc_addr &&  sdc_byte_addr[0];
+   sdc_addr_toggle <= sdc_busy_ide && !last_sdc_addr &&  sdc_byte_addr[0];
    // generate a latch signal for the resulting ide read data when
    // an odd address is being reached
    latch_data      <=  last_sdc_addr && !sdc_byte_addr[0];      
@@ -1628,7 +1629,7 @@ minimig minimig
         .sdc_rd             ( sdc_rd[3:0]           ),
         .sdc_wr             ( sdc_wr[3:0]           ),
         .sdc_sector         ( sdc_sector_fdc        ),
-        .sdc_busy           ( sdc_busy              ),
+        .sdc_busy           ( sdc_busy_fdc          ),
         .sdc_done           ( sdc_done              ),
 	.sdc_byte_in_strobe ( sdc_byte_in_strobe    ),
 	.sdc_byte_addr      ( sdc_byte_addr         ),

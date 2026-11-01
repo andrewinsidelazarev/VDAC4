@@ -20,7 +20,7 @@ module amiga_link (
     input wire disk_reset,
     input wire [7:0] disk_rd, disk_wr, input wire [31:0] disk_sector,
     output wire [7:0] disk_mounted, disk_data, output wire [63:0] disk_size,
-    output wire disk_busy, disk_done, disk_strobe, output wire [8:0] disk_addr,
+    output wire disk_busy, disk_served_ide, disk_done, disk_strobe, output wire [8:0] disk_addr,
     input wire [7:0] disk_guest_data,
     output reg hid_strobe, hid_start, hid_reset, output reg [7:0] hid_data,
     output reg boot_req, output wire soft_reset,
@@ -46,7 +46,7 @@ module amiga_link (
         .wr_stb(wr_stb),.wr_addr(wr_addr),.wr_data(wr_data),.rd_addr(rd_addr),.rd_data(disk_status),
         .rd_clk(sck),.tx_q(disk_tx_q),.floppy_wrprot(floppy_wrprot),.guest_data(disk_guest_data),
         .request_rd(disk_rd),.request_wr(disk_wr),.request_sector(disk_sector),
-        .image_mounted(disk_mounted),.image_size(disk_size),.busy(disk_busy),.done(disk_done),
+        .image_mounted(disk_mounted),.image_size(disk_size),.busy(disk_busy),.served_ide(disk_served_ide),.done(disk_done),
         .byte_strobe(disk_strobe),.byte_addr(disk_addr),.byte_data(disk_data));
 
     // Standard VDAC4 microSD SPI bridge, ABI identical to TS-Config and NES.
@@ -190,7 +190,7 @@ module amiga_link (
         else if (rd_addr>=13'h1400 && rd_addr<13'h1480) rd_data=disk_tx_q;   // сектор записи гостя
         else case (rd_addr)
             13'h00: rd_data=32'h56444334;
-            13'h01: rd_data=32'h05010006;
+            13'h01: rd_data=32'h0501000A;
             13'h02: rd_data={29'd0,rom_ready,boot_req,error};
             13'h03: rd_data={24'd0,key_free};
             13'h08: rd_data={22'd0,audio_gray};

@@ -322,7 +322,7 @@ static void menu_status_flush(void) { menu_put_status(); osd_row_flush(ROW_STATU
 static void menu_draw(void) {
     osd_clear();
     osd_band_rows=1u<<ROW_TITLE|1u<<ROW_STATUS;
-    osd_rule_rows=1u<<2|1u<<(MENU_TOP+MENU_LINES)|1u<<(ROW_STATUS+1);
+    osd_rule_rows=1u<<2|1u<<(ROW_TAIL+1)|1u<<(ROW_STATUS+1);   /* линия идёт посреди своей строки: ROW_TAIL занята именем файла */
     osd_put(ROW_TITLE,1,"AMIGA",C_YELLOW,5);
     osd_put(ROW_TITLE,7,menu_card==CARD_HDD?"HD0":"DF0",C_WHITE,3);
     {

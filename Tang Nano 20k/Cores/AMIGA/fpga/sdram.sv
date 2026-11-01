@@ -302,6 +302,25 @@ always @(negedge clk, negedge reset_n) begin
     sd_cke <= 1;
 end
 
+// Вне команд значение не важно: по умолчанию адрес столбца, он уходит на такт раньше READ/WRITE.
+reg [RAS_WIDTH-1:0] sd_addr_next;
+always @* begin
+  sd_addr_next = sd_addr_cas;
+  case (state)
+    STATE_INIT: begin
+      sd_addr_next = {RAS_WIDTH{1'b0}};
+      if (init_counter == CLOCK_CYCLES_UNTIL_INIT_PRECHARGE[INIT_COUNTER_WIDTH-1:0])
+        sd_addr_next[10] = 1'b1;
+      else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH2_END[INIT_COUNTER_WIDTH-1:0])
+        sd_addr_next = MODE;
+    end
+    STATE_RAS:
+      sd_addr_next = cs ? addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH] : p2_addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH];
+    default: ;
+  endcase
+end
+always @(negedge clk) sd_addr <= sd_addr_next;
+
 always @(negedge clk) begin
   sd_cmd <= CMD_NOP;
   sd_dq  <= 0;
@@ -313,19 +332,16 @@ always @(negedge clk) begin
 
       if (init_counter == CLOCK_CYCLES_UNTIL_INIT_PRECHARGE[INIT_COUNTER_WIDTH-1:0]) begin
         sd_cmd <= CMD_PRECHARGE;
-        sd_addr[10] <= 1'b1;
       end else if (init_counter == CLOCK_CYCLES_UNTIL_INIT_PRECHARGE_END[INIT_COUNTER_WIDTH-1:0]) begin
         sd_cmd <= CMD_AUTO_REFRESH;
       end else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH1_END[INIT_COUNTER_WIDTH-1:0]) begin
         sd_cmd <= CMD_AUTO_REFRESH;
       end else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH2_END[INIT_COUNTER_WIDTH-1:0]) begin
         sd_cmd  <= CMD_LOAD_MODE;
-        sd_addr <= MODE;
       end
     end
     STATE_RAS: begin
       if (cs) begin
-        sd_addr <= addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH];
 
         sd_addr_cas[RAS_WIDTH-1:0] <= {RAS_WIDTH{1'b0}};
         sd_addr_cas[CAS_WIDTH-1:0] <= addr32[CAS_WIDTH-1:0];
@@ -340,7 +356,6 @@ always @(negedge clk) begin
         addr_0  <= addr[0];
 
       end else if (p2_cs) begin
-        sd_addr <= p2_addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH];
 
         sd_addr_cas[RAS_WIDTH-1:0] <= {RAS_WIDTH{1'b0}};
         sd_addr_cas[CAS_WIDTH-1:0] <= p2_addr32[CAS_WIDTH-1:0];
@@ -376,7 +391,6 @@ always @(negedge clk) begin
       end
     end
     STATE_RAS_WAIT_0: begin
-      sd_addr <= sd_addr_cas;
       // Выводы DQ включаются на такт раньше WRITE: шина свободна, а такт SDRAM теперь ближе.
       if (ram_we && (sdram_port == PORT_1 || sdram_port == PORT_2))
         sd_dq <= 1;
@@ -401,17 +415,6 @@ always @(negedge clk) begin
         default: ;
       endcase
     end
-    STATE_READ_DATA: begin
-      case (sdram_port)
-        PORT_1 : begin
-          dout <= ram_dout;
-        end
-        PORT_2 : begin
-          p2_dout <= ram_dout;
-        end
-        default: ;
-      endcase
-    end
     STATE_LAST: begin
       sdram_port <= PORT_IDLE;
     end
@@ -421,6 +424,34 @@ end
 
 generate
   if (WIDTH32) begin
+    // Разрешения приёма: порт и addr_0 не меняются от ACTIVE до конца цикла, поэтому всё известно на такт раньше.
+    // dout чипсет забирает через такт после READ_0 (модель: pipeline.csv), он остаётся на полутакте, один мультиплексор и 16 триггеров.
+    // Остальное идёт через dq_r, и у этих путей до потребителя целый такт. Подтверждение порта 2 не сдвинуто: p2_ack выходит
+    // на READ_3, вместе с последним словом; dout48 чипсет не читает раньше следующего clk7_en, а до него ещё один такт.
+    // Данные на такт позже прежних: 47:32 — lo на READ_1, hi на READ_2 при addr_0; 31:16 — на READ_2; 15:0 — lo на READ_2 или hi на READ_3.
+    reg [31:0] dq_r;
+    reg [1:0] rd0_en, rd1_en, rd2_en;   // [0] — порт 1, [1] — порт 2
+    reg [1:0] top_en, low_en;
+    wire [15:0] r_lo = dq_r[15:0];
+    wire [15:0] r_hi = dq_r[31:16];
+    always @(negedge clk) begin
+      dq_r <= {ram_dout_hi, ram_dout_lo};
+      rd0_en <= {sdram_port == PORT_2, sdram_port == PORT_1} & {2{state == STATE_CAS_WAIT_1}};
+      rd1_en <= rd0_en;
+      rd2_en <= rd1_en;
+      top_en <= rd0_en | (rd1_en & {2{addr_0}});
+      low_en <= (rd1_en & {2{~addr_0}}) | (rd2_en & {2{addr_0}});
+    end
+    always @(negedge clk) begin
+      if (rd0_en[0]) dout <= ram_dout;
+      if (rd1_en[1]) p2_dout <= addr_0 ? r_lo : r_hi;
+      if (top_en[0]) dout48[47:32] <= rd1_en[0] ? r_lo : r_hi;
+      if (top_en[1]) p2_dout48[47:32] <= rd1_en[1] ? r_lo : r_hi;
+      if (rd2_en[0]) dout48[31:16] <= addr_0 ? r_lo : r_hi;
+      if (rd2_en[1]) p2_dout48[31:16] <= addr_0 ? r_lo : r_hi;
+      if (low_en[0]) dout48[15:0] <= addr_0 ? r_hi : r_lo;
+      if (low_en[1]) p2_dout48[15:0] <= addr_0 ? r_hi : r_lo;
+    end
     always @(negedge clk) begin
       sd_dqm <= 0;
 
@@ -436,49 +467,10 @@ generate
           endcase
         end
         STATE_READ_0: begin
-          case (sdram_port)
-            PORT_1: dout48[47:32] <= ram_dout_lo;
-            PORT_2: begin
-              if (!ram_we && !CHIP48_BURST) p2_ack_i <= ~p2_ack_i;
-              p2_dout48[47:32] <= ram_dout_lo;
-            end
-            default: ;
-          endcase
-        end
-        STATE_READ_1: begin
-          case (sdram_port)
-            PORT_1: begin
-              if (addr_0)
-                dout48[47:16] <= {ram_dout_hi, ram_dout_lo};
-              else
-                dout48[31: 0] <= {ram_dout_hi, ram_dout_lo};
-            end
-            PORT_2: begin
-              if (addr_0)
-                p2_dout48[47:16] <= {ram_dout_hi, ram_dout_lo};
-              else
-                p2_dout48[31: 0] <= {ram_dout_hi, ram_dout_lo};
-            end
-            default: ;
-          endcase
+          if (sdram_port == PORT_2 && !ram_we && !CHIP48_BURST) p2_ack_i <= ~p2_ack_i;
         end
         STATE_READ_2: begin
-          case (sdram_port)
-            PORT_1: begin
-              if (addr_0)
-                dout48[15:0] <= {ram_dout_hi};
-              else
-                /* no-op */;
-            end
-            PORT_2: begin
-              if (!ram_we && CHIP48_BURST) p2_ack_i <= ~p2_ack_i;
-              if (addr_0)
-                p2_dout48[15:0] <= {ram_dout_hi};
-              else
-                /* no-op */;
-            end
-            default: ;
-          endcase
+          if (sdram_port == PORT_2 && !ram_we && CHIP48_BURST) p2_ack_i <= ~p2_ack_i;
         end
         default: ;
       endcase
@@ -487,6 +479,8 @@ generate
   end else begin
     always @(negedge clk) begin
       sd_dqm <= 0;
+      if (state == STATE_READ_DATA && sdram_port == PORT_1) dout <= ram_dout;
+      if (state == STATE_READ_DATA && sdram_port == PORT_2) p2_dout <= ram_dout;
 
       case (state)
         STATE_CAS: begin
