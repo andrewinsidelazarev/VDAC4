@@ -19,6 +19,7 @@
 #include "zifi/core_store.hpp"
 #include "zifi/ft_host.hpp"
 #include "zifi/ft_rom.hpp"
+#include "zifi/net_console.hpp"
 #include "zifi/sha256.hpp"
 #include "zifi/tang_flash.hpp"
 #include "zifi/tang_link.hpp"
@@ -32,7 +33,7 @@ constexpr uint16_t kPort = 8268;
 constexpr uint32_t kMaxImage = tang_flash::kSettingsBlock;
 constexpr size_t kChunk = 4096;
 constexpr uint32_t kTaskStack = 6144;
-constexpr UBaseType_t kTaskPriority = 1;
+constexpr UBaseType_t kTaskPriority = 2;     // как консоль; с 1 её вытесняли задачи ядра 0
 constexpr BaseType_t kTaskCore = 0;
 // Заголовок битстрима GW2AR-18: команда 0x06 «проверить IDCODE» и сам IDCODE
 constexpr uint8_t kIdcodeCheck[] = {0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x1B};
@@ -639,6 +640,9 @@ void serve(int client) {
   timeval timeout = {30, 0};
   setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
   setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+  const int noDelay = 1;
+  setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));   // ответы — строками, сразу
+  netServiceSocketOptions(client);
   if (!sendLine(client, "ZIFI-TANG/1 %s %u", ZIFI_BUILD_VERSION, static_cast<unsigned>(kMaxImage))) {
     return;
   }
@@ -788,7 +792,9 @@ void updateTask(void*) {
       server = -1;
       continue;
     }
+    netServiceClient(true);
     serve(client);
+    netServiceClient(false);
     shutdown(client, SHUT_RDWR);
     close(client);
   }

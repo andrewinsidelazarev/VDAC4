@@ -46,6 +46,16 @@ bool mounted();
 // Сырые блоки по 512 байт (консоль: проверка скорости); карта должна быть смонтирована.
 bool readBlocks(uint32_t lba, uint8_t* data, uint32_t count);
 
+// Файл как диск: секторы по 512 байт на месте, длина не меняется. Вызывающий держит Session.
+// diskOpen: 0 — открыт, 1 — файла нет, 2 — отказ.
+struct DiskFile;
+int diskOpen(const char* path, bool writable, DiskFile** file, uint32_t* sectors);
+bool diskRead(DiskFile* file, uint32_t sector, uint8_t* data, uint32_t count);
+bool diskWrite(DiskFile* file, uint32_t sector, const uint8_t* data, uint32_t count);
+void diskClose(DiskFile* file);
+// Новый файл длиной sectors: 0 — создан, 1 — уже есть, 2 — отказ, 3 — нет места на карте.
+int diskCreate(const char* path, uint32_t sectors);
+
 // Для консоли: состояние карты.
 void describe(char* out, size_t size);
 

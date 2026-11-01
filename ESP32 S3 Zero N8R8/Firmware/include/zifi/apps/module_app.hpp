@@ -157,6 +157,11 @@ class ModuleApp : public App {
                         uint32_t*, int*, const volatile int*);
   static int coreSdRead(const char*, uint8_t**, size_t*, size_t, const volatile int*);
   static int coreSdWrite(const char*, const uint8_t*, size_t, const volatile int*);
+  static int coreSdOpen(const char*, int, uint32_t*, void**);
+  static int coreSdPread(void*, uint32_t, uint8_t*, uint32_t);
+  static int coreSdPwrite(void*, uint32_t, const uint8_t*, uint32_t);
+  static void coreSdClose(void*);
+  static int coreSdCreate(const char*, uint32_t);
   bool coreLoaded_ = false;               // приложение загрузило ядро из кэша: при выгрузке — слот 0
   int sockets_[kMaxSockets] = {-1, -1, -1, -1, -1};
   portMUX_TYPE sockLock_ = portMUX_INITIALIZER_UNLOCKED;
@@ -192,7 +197,7 @@ class ModuleApp : public App {
   AudioPlayer& player_;
   class LittleFsStorage* storage_ = nullptr;
   ZmCache* cache_ = nullptr;
-  zm_core_t core_ = {};
+  static zm_core_t core_;  // одна таблица на прошивку: вне Application, у неё бюджет статической памяти
 
   // Доставка файла от плагина.
   char deliveryName_[13] = {};

@@ -2,6 +2,7 @@
 
 #if ZIFI_HAS_SPI_LINK
 
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <esp_vfs_fat.h>
 #include <freertos/FreeRTOS.h>
@@ -27,6 +28,9 @@ constexpr uint32_t kPersonalityTs = 0x01;      // VERSION[31:24]: TS-Config (к�
 // образа и снимки во время игры (nes-vdac4/fpga/nes_link.sv). Мост проверяется и по метке SD_STAT.
 constexpr uint32_t kPersonalityNes = 0x04;
 constexpr uint32_t kMinNes = 0x0007;
+// Amiga 0.1+: the same fb_sdspi LINK registers, checked by SD_STAT below.
+constexpr uint32_t kPersonalityAmiga = 0x05;
+constexpr uint32_t kMinAmiga = 0x0001;
 
 bool linkRead(void*, uint32_t address, uint32_t* words, size_t count) {
   return tang::read(address, words, count);
@@ -38,6 +42,16 @@ uint32_t nowMs(void*) { return static_cast<uint32_t>(esp_timer_get_time() / 1000
 void yieldMs(void*) { vTaskDelay(1); }  // 1 тик (1 мс): ядру ESP — его фоновая задача IDLE
 
 const SdBridgeIo g_io = {nullptr, linkRead, linkWrite, nowMs, yieldMs};
+
+// Длинные проходы FatFs (выделение места под образ в сотни МБ) не отдают процессор сами: задача ядра 0
+// не должна держать его дольше сторожа IDLE.
+void diskPause() {
+  static uint32_t operations = 0;
+  if (++operations >= 32) {
+    operations = 0;
+    vTaskDelay(1);
+  }
+}
 SdBridgeCard g_card(g_io);
 FATFS* g_fs = nullptr;
 BYTE g_pdrv = 0xFF;
@@ -54,6 +68,7 @@ DRESULT diskRead(BYTE, BYTE* buff, uint32_t sector, unsigned count) {
   if (!sameCore()) {
     return RES_NOTRDY;
   }
+  diskPause();
   tang::LinkGuard guard;
   return g_card.read(sector, buff, count) ? RES_OK : RES_ERROR;
 }
@@ -62,6 +77,7 @@ DRESULT diskWrite(BYTE, const BYTE* buff, uint32_t sector, unsigned count) {
   if (!sameCore()) {
     return RES_NOTRDY;
   }
+  diskPause();
   tang::LinkGuard guard;
   return g_card.write(sector, buff, count) ? RES_OK : RES_ERROR;
 }
@@ -136,17 +152,18 @@ const char* mount() {
   const uint32_t version = tang::coreVersion();
   const bool ts = (version >> 24) == kPersonalityTs && (version & 0xFFFF) >= kMinCore;
   const bool nes = (version >> 24) == kPersonalityNes && (version & 0xFFFF) >= kMinNes;
-  if (!ts && !nes) {
-    return "the Tang core has no SD bridge (TS-Config 1.30+ in slot 0 or NES 0.7+ needed)";
+  const bool amiga = (version >> 24) == kPersonalityAmiga && (version & 0xFFFF) >= kMinAmiga;
+  if (!ts && !nes && !amiga) {
+    return "the Tang core has no SD bridge (TS-Config 1.30+, NES 0.7+ or Amiga 0.1+ needed)";
   }
-  if (nes) {
+  if (nes || amiga) {
     bool present = false;
     {
       tang::LinkGuard guard;
       present = g_card.present();
     }
     if (!present) {
-      return "the NES core does not answer as an SD bridge";
+      return "the Tang core does not answer as an SD bridge";
     }
   }
   g_reloads = tang::reloads();
@@ -274,6 +291,115 @@ bool rawWrite(uint32_t lba, const uint8_t* data) {
   }
   tang::LinkGuard guard;
   return g_card.write(lba, data, 1);
+}
+
+// Быстрый поиск FatFs: без таблицы переход назад по большому файлу проходит цепочку кластеров
+// с начала. Таблица на 512 кусков файла; образ сильнее разбит — работает и без неё, медленнее.
+constexpr uint32_t kDiskTableWords = 1024;
+
+struct DiskFile {
+  FIL fil;
+  uint32_t sectors;
+  bool writable;
+  DWORD table[kDiskTableWords];
+};
+
+int diskOpen(const char* path, bool writable, DiskFile** file, uint32_t* sectors) {
+  *file = nullptr;
+  *sectors = 0;
+  auto* made = static_cast<DiskFile*>(heap_caps_calloc(1, sizeof(DiskFile), MALLOC_CAP_SPIRAM));
+  if (made == nullptr) {
+    return 2;
+  }
+  char name[528];
+  snprintf(name, sizeof(name), "%s%s", g_drive, path);
+  const FRESULT fr = f_open(&made->fil, name, FA_READ | FA_OPEN_EXISTING | (writable ? FA_WRITE : 0));
+  if (fr != FR_OK) {
+    heap_caps_free(made);
+    return fr == FR_NO_FILE || fr == FR_NO_PATH ? 1 : 2;
+  }
+  const FSIZE_t size = f_size(&made->fil);
+  if (size == 0 || (size & 511) != 0 || (size >> 9) > 0xFFFFFFFFull) {
+    f_close(&made->fil);
+    heap_caps_free(made);
+    return 2;
+  }
+  made->sectors = static_cast<uint32_t>(size >> 9);
+  made->writable = writable;
+#if FF_USE_FASTSEEK
+  made->table[0] = kDiskTableWords;
+  made->fil.cltbl = made->table;
+  if (f_lseek(&made->fil, CREATE_LINKMAP) != FR_OK) {
+    made->fil.cltbl = nullptr;
+  }
+#endif
+  *file = made;
+  *sectors = made->sectors;
+  return 0;
+}
+
+bool diskRead(DiskFile* file, uint32_t sector, uint8_t* data, uint32_t count) {
+  if (file == nullptr || !mounted() || count > file->sectors || sector > file->sectors - count) {
+    return false;
+  }
+  UINT done = 0;
+  return f_lseek(&file->fil, static_cast<FSIZE_t>(sector) << 9) == FR_OK &&
+         f_read(&file->fil, data, count << 9, &done) == FR_OK && done == count << 9;
+}
+
+bool diskWrite(DiskFile* file, uint32_t sector, const uint8_t* data, uint32_t count) {
+  if (file == nullptr || !file->writable || !mounted() || count > file->sectors ||
+      sector > file->sectors - count) {
+    return false;
+  }
+  UINT done = 0;
+  return f_lseek(&file->fil, static_cast<FSIZE_t>(sector) << 9) == FR_OK &&
+         f_write(&file->fil, data, count << 9, &done) == FR_OK && done == count << 9;
+}
+
+void diskClose(DiskFile* file) {
+  if (file == nullptr) {
+    return;
+  }
+  if (mounted()) {
+    f_close(&file->fil);        // ядро сменилось — карта уже размонтирована, закрывать нечего
+  }
+  heap_caps_free(file);
+}
+
+int diskCreate(const char* path, uint32_t sectors) {
+  if (sectors == 0 || sectors > 0x7FFFFFu) {
+    return 2;
+  }
+  auto* fil = static_cast<FIL*>(heap_caps_calloc(1, sizeof(FIL), MALLOC_CAP_SPIRAM));
+  if (fil == nullptr) {
+    return 2;
+  }
+  char name[528];
+  snprintf(name, sizeof(name), "%s%s", g_drive, path);
+  FRESULT fr = f_open(fil, name, FA_CREATE_NEW | FA_WRITE);
+  if (fr != FR_OK) {
+    heap_caps_free(fil);
+    return fr == FR_EXIST ? 1 : 2;
+  }
+  const FSIZE_t size = static_cast<FSIZE_t>(sectors) << 9;
+  fr = f_expand(fil, size, 1);          // одним куском: быстрее и выделение, и работа с образом
+  if (fr == FR_DENIED) {
+    fr = f_lseek(fil, size);            // сплошного места нет: по кластерам
+    if (fr == FR_OK && f_tell(fil) != size) {
+      fr = FR_DENIED;
+    }
+  }
+  const FRESULT closed = f_close(fil);
+  heap_caps_free(fil);
+  if (fr == FR_OK) {
+    fr = closed;
+  }
+  if (fr != FR_OK) {
+    f_unlink(name);
+    return fr == FR_DENIED ? 3 : 2;
+  }
+  return 0;
 }
 
 uint32_t rawSectors() { return heldByWc() ? g_card.sectors() : 0; }

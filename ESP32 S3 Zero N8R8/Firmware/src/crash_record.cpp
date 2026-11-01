@@ -193,6 +193,8 @@ void crashRecordModule(const char* name, const void* base, size_t size, uint32_t
 
 void crashRecordTemperature(int16_t tenths) { g_temperature = tenths; }
 
+int16_t crashRecordTemperatureTenths() { return g_temperature; }
+
 void crashRecordModuleGone(const void* base) {
   for (ModuleRange& range : g_modules) {
     if (range.base == reinterpret_cast<uint32_t>(base)) {

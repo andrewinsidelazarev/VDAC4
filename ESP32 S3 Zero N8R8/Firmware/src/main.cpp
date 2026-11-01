@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
@@ -683,13 +684,15 @@ bool Application::appsBlockFlashWrites() const {
 // kWifiAwakeIdleMs без обмена) и всё время, пока приложение работает с сетью
 // (appAwake: обновление WC, поток радио модуля). До 0.1.34 приложения шли тем же
 // путём, что сервер, и через kWifiAwakeIdleMs Wi-Fi засыпал посреди радио. Кристалл
-// горячее kWifiHotTenths — энергосбережение в любом случае (до kWifiCoolTenths).
+// горячее kWifiHotTenths — энергосбережение (до kWifiCoolTenths), но не при клиенте консоли или порта
+// 8268 (0.1.108): под сном ответ клиента ждёт маяка точки, и на горячем кристалле службы рвали связь.
 void Application::updateWifiPowerSave(bool fileServerRunning, bool appAwake, uint32_t now) {
   if (fileServerRunning && !fileServerWasRunning_) {
     fileActivityMs_ = now;  // запуск сервера — тоже обмен
   }
   fileServerWasRunning_ = fileServerRunning;
-  bool awake = appAwake;
+  const bool serviceClient = netServiceClientActive();
+  bool awake = appAwake || serviceClient;
   if (!awake && fileServerRunning) {
     // Обмен — это и событие клиента, и любой файловый запрос к Z80: мост
     // запоминает время каждой заявки. Длинная передача FTP идёт без команд,
@@ -714,7 +717,7 @@ void Application::updateWifiPowerSave(bool fileServerRunning, bool appAwake, uin
     }
   }
 #endif
-  if (wifiHot_) {
+  if (wifiHot_ && !serviceClient) {
     awake = false;
   }
   if (awake == wifiAwake_) {
@@ -750,6 +753,12 @@ void Application::networkTaskLoop() {
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
+  // Только 20 МГц (0.1.110). Меандр mux_sel ядра TS-Config — 28 МГц, гармоники 2408 и 2436 МГц; на канале 1
+  // шириной 40 МГц (2402–2442) обе в полосе приёма: пинг шёл волнами только при этом ядре (01.11.2026).
+  const esp_err_t bandwidth = esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW20);
+  diagnosticLogEvent("NET wifi bandwidth 20 MHz: %s", esp_err_to_name(bandwidth));
+  WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) { netWifiDropped(info.wifi_sta_disconnected.reason); },
+               ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   if (config_.ssid()[0] != 0) {
     const char* password = config_.password();
     WiFi.begin(config_.ssid(), password);
@@ -802,6 +811,7 @@ void Application::networkTaskLoop() {
       wifiSignalActive = false;
     }
     updateWifiPowerSave(fileServerRunning, appsKeepWifiAwake(), signalNow);
+    netDiagnosticPoll(signalNow);
     for (App* app : apps_) {
       app->pollNetworkCore(signalNow);
     }

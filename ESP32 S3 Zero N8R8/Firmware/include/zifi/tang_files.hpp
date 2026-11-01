@@ -32,6 +32,7 @@ inline bool pathOf(const char* in, char out[528]) {
   return true;
 }
 
+constexpr uint32_t kWriteLimitMs = 120000;   // запись и чтение обратно образа до 7 МиБ
 inline bool alive(const volatile int* active, Clock now, uint32_t started) {
   return (!active || *active) && now() - started < 15000;
 }
@@ -113,6 +114,7 @@ inline int read(const char* path, uint8_t** data, size_t* size, size_t maximum,
 // Транспорт не разбирает содержимое и не знает ядер/картриджей/настроек.
 // Файл заменяется после закрытия и побайтового чтения обратно.
 // Имена path.tmp/path.bak зарезервированы для временного файла и предыдущей копии.
+// Недостающие папки пути создаются. Дата файла — по часам ESP (SYS_CLOCK от Evo или NTP).
 inline int write(const char* path, const uint8_t* data, size_t size,
                  const volatile int* active, Clock now, Delay pause) {
   char file[528], temp[536], backup[536];
@@ -120,11 +122,16 @@ inline int write(const char* path, const uint8_t* data, size_t size,
   snprintf(temp,sizeof temp,"%s.tmp",file);
   snprintf(backup,sizeof backup,"%s.bak",file);
   const uint32_t started = now();
+  for (char* slash = strchr(file + strlen("/tangsd/"), '/'); slash != nullptr; slash = strchr(slash + 1, '/')) {
+    *slash = 0;
+    if (mkdir(file, 0775) && errno != EEXIST) { *slash = '/'; return ZM_ERROR; }
+    *slash = '/';
+  }
   FILE* f=fopen(temp,"wb");
   if (!f) return ZM_ERROR;
   int result=ZM_OK;
   for(size_t at=0;at<size;) {
-    if(!alive(active,now,started)) { result=ZM_TIMEOUT; break; }
+    if((active && !*active) || now()-started>=kWriteLimitMs) { result=ZM_TIMEOUT; break; }
     const size_t count=size-at>4096 ? 4096 : size-at;
     if(fwrite(data+at,1,count,f)!=count) { result=ZM_ERROR; break; }
     at+=count; pause(1);
@@ -138,7 +145,7 @@ inline int write(const char* path, const uint8_t* data, size_t size,
       uint8_t buffer[512];
       for(size_t at=0;at<size && result==ZM_OK;) {
         const size_t count=size-at>sizeof buffer ? sizeof buffer : size-at;
-        if(!alive(active,now,started)) result=ZM_TIMEOUT;
+        if((active && !*active) || now()-started>=kWriteLimitMs) result=ZM_TIMEOUT;
         else if(fread(buffer,1,count,f)!=count || memcmp(buffer,data+at,count)) result=ZM_ERROR;
         at+=count; pause(1);
       }

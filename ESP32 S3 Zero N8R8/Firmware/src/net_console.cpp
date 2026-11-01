@@ -7,17 +7,20 @@
 #include <esp_random.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <errno.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <dirent.h>
 #include <lwip/sockets.h>
 #include <sys/stat.h>
+#include <atomic>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "zifi/core_store.hpp"
+#include "zifi/crash_record.hpp"
 #include "zifi/diagnostic_log.hpp"
 #include "zifi/ft_host.hpp"
 #include "zifi/player_overlay.hpp"
@@ -34,6 +37,30 @@ constexpr size_t kLineBytes = 256;
 constexpr uint32_t kTaskStack = 6144;   // 4096 переполнялся (0.1.85: tang sd/core, FatFs, LittleFS)
 constexpr UBaseType_t kTaskPriority = 2;      // ниже звука и обмена с Z80
 constexpr BaseType_t kTaskCore = 0;
+// Сколько ждать, пока клиент не примет ни байта, прежде чем считать его потерянным. Таймаут сокета
+// (2 с) — только шаг ожидания: потерянный пакет lwIP повторяет не раньше чем через 1,5–3 с, и
+// раньше одна такая потеря закрывала соединение с непрочитанными данными клиента — у него RST.
+constexpr uint32_t kSendStallMs = 30000;
+
+std::atomic<int> g_serviceClients{0};
+std::atomic<uint32_t> g_wifiDrops{0};
+std::atomic<uint32_t> g_wifiLastReason{0};
+
+// Загрузка по задачам: считает только сетевая задача, консоль читает готовую строку
+constexpr uint32_t kCpuSampleMs = 5000;
+constexpr uint32_t kDiagnosticLogMs = 30000;
+constexpr UBaseType_t kCpuTasks = 40;
+constexpr size_t kCpuShown = 9;
+TaskStatus_t g_cpuTasks[kCpuTasks];
+struct CpuRun {
+  TaskHandle_t task;
+  uint32_t run;
+};
+CpuRun g_cpuRuns[kCpuTasks];
+UBaseType_t g_cpuRunCount = 0;
+uint32_t g_cpuTotal = 0;
+char g_cpuText[160] = "not measured yet";
+portMUX_TYPE g_cpuTextLock = portMUX_INITIALIZER_UNLOCKED;
 
 // Кольцо вывода: пишут задачи через ESP_LOG*, читает задача консоли.
 uint8_t* ring = nullptr;
@@ -71,13 +98,25 @@ int consoleVprintf(const char* format, va_list arguments) {
 
 bool sendAll(int client, const void* data, size_t length) {
   const uint8_t* bytes = static_cast<const uint8_t*>(data);
+  uint32_t stalledSince = 0;
   while (length > 0) {
     const int sent = send(client, bytes, length, 0);
-    if (sent <= 0) {
-      return false;
+    if (sent > 0) {
+      bytes += sent;
+      length -= static_cast<size_t>(sent);
+      stalledSince = 0;
+      continue;
     }
-    bytes += sent;
-    length -= static_cast<size_t>(sent);
+    if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      const uint32_t now = millis();
+      if (stalledSince == 0) {
+        stalledSince = now | 1;
+      }
+      if (now - stalledSince < kSendStallMs) {
+        continue;
+      }
+    }
+    return false;
   }
   return true;
 }
@@ -479,19 +518,29 @@ bool runCommand(int client, const char* command) {
                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
   }
   if (strcmp(command, "ver") == 0) {
-    return sendText(client, "%s, up %u s, %u tasks\n", firmwareName,
-                    static_cast<unsigned>(millis() / 1000),
-                    static_cast<unsigned>(uxTaskGetNumberOfTasks()));
+    const int16_t tenths = crashRecordTemperatureTenths();
+    return sendText(client, "%s, up %u s, %u tasks; chip %d.%d C, RSSI %d dBm, wifi drops %u (last reason %u)\n",
+                    firmwareName, static_cast<unsigned>(millis() / 1000),
+                    static_cast<unsigned>(uxTaskGetNumberOfTasks()), tenths / 10, tenths % 10,
+                    static_cast<int>(WiFi.RSSI()), static_cast<unsigned>(g_wifiDrops.load()),
+                    static_cast<unsigned>(g_wifiLastReason.load()));
   }
   if (strcmp(command, "log") == 0) {
     return sendStoredLog(client);
+  }
+  if (strcmp(command, "top") == 0) {
+    char text[sizeof(g_cpuText)];
+    portENTER_CRITICAL(&g_cpuTextLock);
+    memcpy(text, g_cpuText, sizeof(text));
+    portEXIT_CRITICAL(&g_cpuTextLock);
+    return sendText(client, "cpu %% of one core, 5 s: %s\n", text);
   }
   if (strncmp(command, "tang", 4) == 0 && (command[4] == 0 || command[4] == ' ')) {
     return runTang(client, command + 4);
   }
   if (command[0] != 0) {
     return sendText(client,
-                    "commands: help, mem, ver, log (stored log from flash), "
+                    "commands: help, mem, ver, top (CPU by task, 100 = one core), log (stored log from flash), "
                     "tang [rd ADDR | wr ADDR VALUE] (Tang registers over LINK)\n");
   }
   return true;
@@ -503,6 +552,7 @@ void serve(int client) {
   setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
   const int noDelay = 1;
   setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &noDelay, sizeof(noDelay));
+  netServiceSocketOptions(client);
   if (!sendText(client, "VDAC4 console, %s. Commands: help, mem, ver, log, tang\n",
                 firmwareName)) {
     return;
@@ -595,13 +645,99 @@ void consoleTask(void*) {
       server = -1;
       continue;
     }
+    netServiceClient(true);
     serve(client);
+    netServiceClient(false);
     shutdown(client, SHUT_RDWR);
     close(client);
   }
 }
 
 }  // namespace
+
+void netServiceClient(bool active) { g_serviceClients.fetch_add(active ? 1 : -1); }
+
+bool netServiceClientActive() { return g_serviceClients.load() > 0; }
+
+void netServiceSocketOptions(int client) {
+  const int on = 1, idle = 15, interval = 5, count = 3;
+  setsockopt(client, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+  setsockopt(client, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+  setsockopt(client, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+  setsockopt(client, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+}
+
+void netWifiDropped(unsigned reason) {
+  g_wifiDrops.fetch_add(1);
+  g_wifiLastReason.store(reason);
+  diagnosticLogEvent("NET wifi dropped: reason %u, chip %d C", reason, crashRecordTemperatureTenths() / 10);
+}
+
+void netDiagnosticPoll(uint32_t now) {
+  static uint32_t lastSample = 0;
+  static uint32_t lastLog = 0;
+  if (now - lastSample < kCpuSampleMs) {
+    return;
+  }
+  lastSample = now;
+  uint32_t total = 0;
+  const UBaseType_t count = uxTaskGetSystemState(g_cpuTasks, kCpuTasks, &total);
+  const uint32_t elapsed = total - g_cpuTotal;
+  char text[sizeof(g_cpuText)];
+  size_t length = 0;
+  text[0] = 0;
+  // Доля задачи — за время с прошлого счёта; новая задача считается от нуля
+  uint32_t percent[kCpuTasks];
+  for (UBaseType_t i = 0; i < count; ++i) {
+    uint32_t before = 0;
+    for (UBaseType_t k = 0; k < g_cpuRunCount; ++k) {
+      if (g_cpuRuns[k].task == g_cpuTasks[i].xHandle) {
+        before = g_cpuRuns[k].run;
+        break;
+      }
+    }
+    const uint32_t spent = g_cpuTasks[i].ulRunTimeCounter - before;
+    percent[i] = elapsed != 0 ? static_cast<uint32_t>(100ULL * spent / elapsed) : 0;
+  }
+  bool shown[kCpuTasks] = {};
+  for (size_t place = 0; place < kCpuShown; ++place) {
+    int best = -1;
+    for (UBaseType_t i = 0; i < count; ++i) {
+      if (!shown[i] && percent[i] != 0 && (best < 0 || percent[i] > percent[best])) {
+        best = static_cast<int>(i);
+      }
+    }
+    if (best < 0) {
+      break;
+    }
+    shown[best] = true;
+    const int wrote = snprintf(text + length, sizeof(text) - length, "%s%s %u", length != 0 ? ", " : "",
+                               g_cpuTasks[best].pcTaskName, static_cast<unsigned>(percent[best]));
+    if (wrote <= 0 || static_cast<size_t>(wrote) >= sizeof(text) - length) {
+      text[length] = 0;
+      break;
+    }
+    length += static_cast<size_t>(wrote);
+  }
+  for (UBaseType_t i = 0; i < count; ++i) {
+    g_cpuRuns[i] = {g_cpuTasks[i].xHandle, g_cpuTasks[i].ulRunTimeCounter};
+  }
+  g_cpuRunCount = count;
+  g_cpuTotal = total;
+  portENTER_CRITICAL(&g_cpuTextLock);
+  memcpy(g_cpuText, text, sizeof(text));
+  portEXIT_CRITICAL(&g_cpuTextLock);
+  if (now - lastLog < kDiagnosticLogMs) {
+    return;
+  }
+  lastLog = now;
+  const int16_t tenths = crashRecordTemperatureTenths();
+  diagnosticLogEvent("NET diag chip %d.%d C, RSSI %d, sleep %u, wifi %d, drops %u (last %u), clients %d", tenths / 10,
+                     tenths % 10, static_cast<int>(WiFi.RSSI()), WiFi.getSleep() ? 1U : 0U,
+                     static_cast<int>(WiFi.status()), static_cast<unsigned>(g_wifiDrops.load()),
+                     static_cast<unsigned>(g_wifiLastReason.load()), g_serviceClients.load());
+  diagnosticLogEvent("NET cpu %s", text);
+}
 
 void netConsoleBegin(const char* firmware) {
   if (ring != nullptr) {

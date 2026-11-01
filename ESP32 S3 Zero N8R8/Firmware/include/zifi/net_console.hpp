@@ -17,9 +17,26 @@ namespace zifi {
 // с него); сервер ждёт Wi-Fi сам.
 void netConsoleBegin(const char* firmware);
 
+// Службы платы (консоль, порт 8268) с клиентом: пока клиент есть, Wi-Fi не спит (main.cpp).
+void netServiceClient(bool active);
+bool netServiceClientActive();
+// Сокет клиента службы: мёртвого клиента (его FIN потерялся) TCP заметит сам за ~30 с. Без этого
+// задача ждала бы его вечно, а при listen(…, 1) следующий клиент соединяется и не получает ничего.
+void netServiceSocketOptions(int client);
+// Wi-Fi оборвался: счёт и причина для команды ver и журнала.
+void netWifiDropped(unsigned reason);
+// Из сетевой задачи, часто: раз в 5 с счёт загрузки по задачам (команда top), раз в минуту —
+// температура, RSSI, сон Wi-Fi, обрывы и загрузка во flash-журнал; он переживает пропажу связи.
+void netDiagnosticPoll(uint32_t now);
+
 #else
 
 inline void netConsoleBegin(const char*) {}
+inline void netServiceClient(bool) {}
+inline bool netServiceClientActive() { return false; }
+inline void netServiceSocketOptions(int) {}
+inline void netWifiDropped(unsigned) {}
+inline void netDiagnosticPoll(uint32_t) {}
 
 #endif
 

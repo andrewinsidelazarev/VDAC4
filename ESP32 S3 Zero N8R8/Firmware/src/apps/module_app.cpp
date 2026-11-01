@@ -29,6 +29,12 @@
 #include "zifi/tang_link.hpp"
 #include "zifi/tang_sd.hpp"
 #include "zifi/tang_files.hpp"
+
+namespace {
+// Файлы-диски приложения (sd_open): вне ModuleApp, у Application бюджет статической памяти ядра 1.
+constexpr size_t kMaxDiskFiles = 4;
+void* g_diskFiles[kMaxDiskFiles] = {};
+}  // namespace
 #include "zifi/flash_fs.hpp"
 #include "zifi/http_stream.hpp"
 #include "zifi/player_overlay.hpp"
@@ -182,6 +188,7 @@ volatile int16_t g_temperature = ZM_TEMPERATURE_UNKNOWN;
 
 }  // namespace
 
+zm_core_t ModuleApp::core_ = {};
 ModuleApp* ModuleApp::instance_ = nullptr;
 ModuleApp::CoreJob ModuleApp::coreJob_ = {};
 SemaphoreHandle_t ModuleApp::coreJobGo_ = nullptr;
@@ -247,6 +254,11 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.sd_list = coreSdList;
   core_.sd_read = coreSdRead;
   core_.sd_write = coreSdWrite;
+  core_.sd_open = coreSdOpen;
+  core_.sd_pread = coreSdPread;
+  core_.sd_pwrite = coreSdPwrite;
+  core_.sd_close = coreSdClose;
+  core_.sd_create = coreSdCreate;
 }
 
 void ModuleApp::begin() {
@@ -1004,6 +1016,11 @@ void ModuleApp::stopApp() {
   for (size_t i = 0; i < kMaxSockets; ++i) {
     coreSockClose(static_cast<int>(i));
   }
+  for (size_t i = 0; i < kMaxDiskFiles; ++i) {
+    if (g_diskFiles[i] != nullptr) {
+      coreSdClose(g_diskFiles[i]);
+    }
+  }
   // Приложение загрузило ядро из кэша BL616 (ZX Next): Tang — назад в TS-Config. Ядро ещё грузится —
   // вернёт задача загрузки, когда кончит. Возврат не вышел — ядро остаётся без хозяина, и задача
   // LINK через несколько секунд повторит BOOT сама (tang::kOrphanMs).
@@ -1716,6 +1733,78 @@ int ModuleApp::coreSdWrite(const char* path, const uint8_t* data, size_t size,
   if (!session.ok()) return ZM_BUSY;
   if (tang_sd::mount()) return ZM_ERROR;
   return tang_files::write(path, data, size, active, coreMillis, coreDelay);
+#else
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreSdOpen(const char* path, int writable, uint32_t* sectors, void** file) {
+#if ZIFI_HAS_SPI_LINK
+  if (file == nullptr || sectors == nullptr) return ZM_ERROR;
+  *file = nullptr;
+  *sectors = 0;
+  char checked[528];
+  if (!tang_files::pathOf(path, checked)) return ZM_ERROR;
+  size_t slot = 0;
+  while (slot < kMaxDiskFiles && g_diskFiles[slot] != nullptr) ++slot;
+  if (slot == kMaxDiskFiles) return ZM_ERROR;
+  tang_sd::Session session(tang_sd::kQuickMs);
+  if (!session.ok()) return ZM_BUSY;
+  if (tang_sd::mount()) return ZM_ERROR;
+  tang_sd::DiskFile* opened = nullptr;
+  const int result = tang_sd::diskOpen(path, writable != 0, &opened, sectors);
+  if (result != 0) return result == 1 ? ZM_NOT_FOUND : ZM_ERROR;
+  g_diskFiles[slot] = opened;
+  *file = opened;
+  return ZM_OK;
+#else
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreSdPread(void* file, uint32_t sector, uint8_t* data, uint32_t count) {
+#if ZIFI_HAS_SPI_LINK
+  tang_sd::Session session(tang_sd::kQuickMs);
+  if (!session.ok()) return ZM_BUSY;
+  return tang_sd::diskRead(static_cast<tang_sd::DiskFile*>(file), sector, data, count) ? ZM_OK : ZM_ERROR;
+#else
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreSdPwrite(void* file, uint32_t sector, const uint8_t* data, uint32_t count) {
+#if ZIFI_HAS_SPI_LINK
+  tang_sd::Session session(tang_sd::kQuickMs);
+  if (!session.ok()) return ZM_BUSY;
+  return tang_sd::diskWrite(static_cast<tang_sd::DiskFile*>(file), sector, data, count) ? ZM_OK : ZM_ERROR;
+#else
+  return ZM_ERROR;
+#endif
+}
+
+void ModuleApp::coreSdClose(void* file) {
+#if ZIFI_HAS_SPI_LINK
+  if (file == nullptr) return;
+  for (size_t i = 0; i < kMaxDiskFiles; ++i) {
+    if (g_diskFiles[i] == file) {
+      g_diskFiles[i] = nullptr;
+      tang_sd::Session session;
+      tang_sd::diskClose(static_cast<tang_sd::DiskFile*>(file));
+      return;
+    }
+  }
+#endif
+}
+
+int ModuleApp::coreSdCreate(const char* path, uint32_t sectors) {
+#if ZIFI_HAS_SPI_LINK
+  char checked[528];
+  if (!tang_files::pathOf(path, checked)) return ZM_ERROR;
+  tang_sd::Session session(tang_sd::kQuickMs);
+  if (!session.ok()) return ZM_BUSY;
+  if (tang_sd::mount()) return ZM_ERROR;
+  const int result = tang_sd::diskCreate(path, sectors);
+  return result == 0 ? ZM_OK : result == 3 ? ZM_NO_MEMORY : ZM_ERROR;
 #else
   return ZM_ERROR;
 #endif

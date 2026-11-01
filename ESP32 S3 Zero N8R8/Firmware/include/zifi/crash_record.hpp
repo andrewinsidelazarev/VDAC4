@@ -23,11 +23,13 @@ void crashRecordModule(const char* name, const void* base, size_t size, uint32_t
 void crashRecordModuleGone(const void* base);
 // Последняя температура кристалла (десятые доли °C) — в запись о панике.
 void crashRecordTemperature(int16_t tenths);
+int16_t crashRecordTemperatureTenths();
 #else
 inline void crashRecordReport() {}
 inline void crashRecordModule(const char*, const void*, size_t, uint32_t, const void* = nullptr) {}
 inline void crashRecordModuleGone(const void*) {}
 inline void crashRecordTemperature(int16_t) {}
+inline int16_t crashRecordTemperatureTenths() { return INT16_MIN; }
 #endif
 
 }  // namespace zifi
