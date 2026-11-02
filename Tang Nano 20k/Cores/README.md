@@ -19,6 +19,12 @@ NES и Amiga — здесь, в [`Next`](Next), [`NES`](NES) и [`AMIGA`](AMIGA)
 Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит в `/WC/ESP` карты Evo рядом с модулями плеера,
 в ESP его отдаёт плагин [FTVIEW4](../FTVIEW4).
 
+[`SD/CORES/COREMENU.ELF`](SD/CORES/COREMENU.ELF) — не ядро, а экран плагина VDAC4 Cores 0.16 на HDMI
+Tang: меню ядер, загрузка и ошибки ([описание](../../ESP32%20S3%20Zero%20N8R8/Network/VDAC4%20Cores/README.md)).
+Картинку, название, год и клавишу меню ядра («Manage - F1») экран берёт из ELF самого ядра —
+раздел `.vdac4.card`; его вставляет сборка слоя (`esp/tools/build.ps1`) из `esp/card/card.bin`
+ядра. Новому ядру — своя папка `esp/card` (формат и инструменты — `cores_ui/CARD.md` плагина).
+
 ## Что нужно
 
 - Прошивка ESP **vdac4-0.1.105**: мост к карте Tang, кэш ядер, запуск слоёв `.ELF`, ядро видео из

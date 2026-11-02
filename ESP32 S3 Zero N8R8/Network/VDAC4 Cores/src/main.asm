@@ -23,6 +23,7 @@ mainStart:
         INCLUDE "cores.asm"
         INCLUDE "../../shared/weather/rtc.asm"   ; часы Gluk Evo (TIME для часов ядра Next)
         INCLUDE "ui.asm"
+        INCLUDE "screen.asm"                     ; экран на HDMI Tang (COREMENU.ELF)
         INCLUDE "nes.asm"
         INCLUDE "evo_menu.asm"
         INCLUDE "evo_sd.asm"                     ; карта Evo — SD1 ZX Next

@@ -16,6 +16,8 @@ Esc после START — не выход (0.4): загрузка идёт дал
 из очереди AVR по событию клавиши за кадр, пока плагин не выключит это функцией INT_PL (A' = 2):
 пока ядро работает, все байты очереди — только в INPUT; ошибка ядра после этого — окно и Esc из
 самой очереди PS/2.
+С 0.16 — экран на HDMI Tang (COREMENU.ELF, команды #47…#49): окна WC нет, меню, «Loading» и ошибки
+рисует экран; нет COREMENU.ELF или Tang без оверлеев — окно WC, как прежде.
 Нужна сборка: "VDAC4 Cores\\build.bat".
 """
 import struct
@@ -32,6 +34,9 @@ CMD_APP_STOP = 0x6D
 CMD_CORE_LIST, CMD_CORE_APP = 0x2C, 0x2D
 CMD_START, CMD_INPUT, CMD_STATUS, CMD_EXIT, CMD_TIME = 0x70, 0x71, 0x72, 0x73, 0x74
 CMD_SD_ON, CMD_SD_DONE, CMD_SD_PART = 0x75, 0x76, 0x77
+CMD_SCR_LIST, CMD_SCR_STATE, CMD_SCR_LEAVE = 0x47, 0x48, 0x49      # экран COREMENU.ELF
+SCR_F_TANG, SCR_F_SHOWN, SCR_F_DRAWN, SCR_F_GONE = 1, 2, 4, 8
+SCR_MENU, SCR_LOADING, SCR_ERROR, SCR_ERR_TEXT, SCR_ERR_CORE = 2, 5, 7, 6, 4
 SD_READ, SD_WRITE = 7, 8
 NEXT_SD = 0x03010027                     # VERSION ядра Next 0.39: часы и SD1
 RDD, SDD = 0x400C, 0x400F                # внутренние входы ядра WildDOS: абсолютные сектора
@@ -52,8 +57,19 @@ class CoresEsp:
 
     def __init__(self, cores=(("NEXT", 907418, True), ("DEMO", 300000, False)), *, list_error=None,
                  app_error=None, load_polls=5, core_error=None, back_polls=3, run_error=None,
-                 run_inputs=20, version=NEXT_SD, sd_requests=(), part_fail=False) -> None:
+                 run_inputs=20, version=NEXT_SD, sd_requests=(), part_fail=False, screen=False,
+                 tang=True) -> None:
         self.version = version
+        # экран COREMENU.ELF: есть ли он на карте Tang и Tang с оверлеями
+        self.screen = screen
+        self.tang = tang
+        self.app_cores: list[str] = []        # все CORE_APP по порядку
+        self.scr_lists: list[bytes] = []
+        self.scr_states: list[bytes] = []
+        self.scr_leaves: list[int] = []
+        self.scr_shown = False
+        self.scr_gone = True
+        self.scr_polls = 0
         # запросы SD1 ядра: (операция, номер, LBA, сектор записи) — по одному в ответе INPUT
         self.sd_queue = [list(r) for r in sd_requests]
         self.sd_on: list[bytes] = []          # SD_ON
@@ -91,6 +107,14 @@ class CoresEsp:
             return frame(0xAC, body)
         if command == CMD_CORE_APP:
             self.app_core = payload[:payload.index(0)].decode()
+            self.app_cores.append(self.app_core)
+            if self.app_core == "COREMENU":
+                if not self.screen:           # COREMENU.ELF нет — общий слой прошивки
+                    self.app = "CORE"
+                    return frame(0xAD, b"\0core\0" + b"0.1\0")
+                self.app = "COREMENU"
+                self.scr_shown, self.scr_gone, self.scr_polls = False, True, 0
+                return frame(0xAD, b"\0coremenu\0" + b"0.1\0")
             if self.app_error:
                 return frame(0xAD, b"\xff\0" + self.app_error.encode() + b"\0")
             own = any(n == self.app_core and elf for n, _, elf in self.cores)
@@ -101,6 +125,8 @@ class CoresEsp:
             return frame(CMD_APP_STOP | 0x80, b"\1")
         if self.app is None:
             return frame(0xEE, b"no app")
+        if self.app == "COREMENU":
+            return self.screen_command(command, payload)
         if command == CMD_START:
             self.core = payload[:payload.index(0)].decode()
             self.state = 1
@@ -156,6 +182,44 @@ class CoresEsp:
             return frame(0xF3, b"\1")
         return frame(0xEE, b"unsupported")
 
+    def screen_flags(self) -> int:
+        if not self.tang:
+            return SCR_F_GONE
+        if self.scr_gone:
+            return SCR_F_TANG | SCR_F_GONE
+        return SCR_F_TANG | (SCR_F_SHOWN | SCR_F_DRAWN if self.scr_shown else 0)
+
+    def screen_command(self, command: int, payload: bytes) -> bytes:
+        """COREMENU.ELF: экран проявляется за три STATE и уходит за три LEAVE 0."""
+        if command == CMD_SCR_LIST:
+            self.scr_lists.append(payload)
+            return frame(0xC7, b"\1")
+        if command == CMD_SCR_STATE:
+            self.scr_states.append(payload)
+            if self.tang and self.scr_lists:
+                if self.scr_gone:
+                    self.scr_gone, self.scr_polls = False, 0
+                self.scr_polls += 1
+                self.scr_shown = self.scr_shown or self.scr_polls >= 3 or bool(payload[0] & 0x80)
+            return frame(0xC8, bytes([self.screen_flags()]))
+        if command == CMD_SCR_LEAVE:
+            self.scr_leaves.append(payload[0])
+            if payload[0] == 2:
+                flags = self.screen_flags()
+                self.app = None               # app_done: ядро ESP выгружает экран
+                return frame(0xC9, bytes([flags]))
+            if payload[0] == 0 and not self.scr_gone:
+                self.scr_polls -= 1
+                if self.scr_polls <= 0:
+                    self.scr_gone, self.scr_shown = True, False
+            return frame(0xC9, bytes([self.screen_flags()]))
+        return frame(0xEE, b"unsupported")
+
+
+def last(items: list, value) -> int:
+    """Индекс последнего value."""
+    return len(items) - 1 - items[::-1].index(value)
+
 
 NES_CORE = 0x04010008                    # VERSION ядра NES 0.8 (личность 04)
 NES_BROWSER_AND_IMAGE = {0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A}   # браузер SD Tang плагина, образ, CAPS
@@ -176,6 +240,61 @@ class NesMenuEsp(CoresEsp):
         if self.app is not None and command == CMD_START and self.refuse:
             self.commands.append(command)
             return frame(0xF0, b"\0")
+        return super().__call__(command, payload)
+
+
+AMIGA_CORE = 0x0501000B                  # VERSION ядра Amiga 0.11 (личность 05)
+CMD_SYS_CLOCK, CMD_EV_LIST = 0x29, 0x6E
+
+
+class AmigaEsp(CoresEsp):
+    """Слой AMIGA.ELF 0.18: карта Evo — том EVO в Workbench, только чтение. В ответе INPUT — по одному
+    запросу из очереди: ("sd", номер, LBA, число) — [1][7][номер][LBA LE32][число], на каждый сектор
+    плагин шлёт SD_DONE подряд; ("list",) — LIST корня, как меню F11 (ответ плагина — #6E)."""
+
+    def __init__(self, requests=(), version=AMIGA_CORE, **kwargs) -> None:
+        super().__init__(cores=(("AMIGA", 907418, True),), version=version, **kwargs)
+        self.requests = [list(r) for r in requests]
+        self.got: list[bytes] = []           # SD_DONE как пришли
+        self.lists: list[bytes] = []         # ответы LIST (#6E)
+        self.batches: list[int] = []         # секторов на каждый запрос в ответе INPUT
+
+    def __call__(self, command: int, payload: bytes) -> bytes:
+        if self.app is None:
+            return super().__call__(command, payload)
+        if command == CMD_SYS_CLOCK:
+            self.commands.append(command)
+            return frame(0xA9, b"\1")
+        if command == CMD_INPUT and self.state == 2 and self.requests:
+            self.commands.append(command)
+            self.inputs.append(payload)
+            if self.harness is not None:
+                self.input_frames.append(self.harness.interrupts)
+            head = self.requests[0]
+            if head[0] == "list":
+                self.requests.pop(0)
+                return frame(0xF1, bytes([1, 1, 0, 0, 8]) + b"\0")
+            _, tag, lba, count = head
+            self.batches.append(0)
+            return frame(0xF1, bytes([1, SD_READ, tag]) + struct.pack("<I", lba) + bytes([count]))
+        if command == CMD_EV_LIST:
+            self.commands.append(command)
+            self.lists.append(payload)
+            return frame(0xEE, b"\1")
+        if command == CMD_SD_DONE:
+            self.commands.append(command)
+            self.got.append(payload)
+            head = self.requests[0] if self.requests and self.requests[0][0] == "sd" else None
+            ok = head is not None and payload[0] == head[1] and struct.unpack("<I", payload[2:6])[0] == head[2]
+            if ok and payload[1]:
+                self.requests.pop(0)         # отказ: в модели запрос снят
+            elif ok:
+                self.batches[-1] += 1
+                head[2] += 1
+                head[3] -= 1
+                if head[3] <= 0:
+                    self.requests.pop(0)
+            return frame(0xF6, b"\1" if ok else b"\0")
         return super().__call__(command, payload)
 
 
@@ -343,7 +462,7 @@ class CoresPluginTest(unittest.TestCase):
 
     def test_header_names_the_plugin(self) -> None:
         data = CORES_WMF.read_bytes()
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.13")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.16")
         self.assertEqual(data[34], 1, "одна страница")
         self.assertEqual(len(data) % 512, 0, "файл — целыми секторами")
 
@@ -374,7 +493,10 @@ class CoresPluginTest(unittest.TestCase):
         self.assertLess(h.calls.index(FN_GVMOD), len(h.calls) - h.calls[::-1].index(base.FN_INT_PL),
                         "INT_PL 2 — когда ядро уже работает")
         self.assertEqual((h.queue_resets, h.queue_enables), (1, 1), "очередь AVR включена один раз")
-        self.assertLess(esp.commands.index(CMD_EXIT), esp.commands.index(CMD_APP_STOP))
+        self.assertLess(esp.commands.index(CMD_EXIT), last(esp.commands, CMD_APP_STOP))
+        # экрана нет (COREMENU.ELF нет): общий слой снят сразу, дальше — окно WC
+        self.assertEqual(esp.app_cores, ["COREMENU", "NEXT"])
+        self.assertEqual(esp.commands[:2], [CMD_CORE_APP, CMD_APP_STOP])
         # время Evo — один раз, когда ядро уже работает, до первого INPUT
         self.assertEqual(esp.times, [bytes([56, 34, 12, 27, 10, 26])])
         self.assertLess(esp.commands.index(CMD_START), esp.commands.index(CMD_TIME))
@@ -457,6 +579,61 @@ class CoresPluginTest(unittest.TestCase):
         self.assertEqual((esp.times, esp.sd_on), ([], []), "у слоя NES #74…#79 — свои команды")
         self.assertNotIn((1, 0, 0), h.streams)
 
+    def amiga_reads(self, h: CoresHarness) -> list[int]:
+        return [lba for n, lba, _, page in h.sd_io if n == "RDD" and page == STREAM1_PAGE]
+
+    def test_amiga_reads_evo_sectors(self) -> None:
+        # 0.15: Amiga — карта Evo томом EVO; сектора подряд по запросу, LBA переходит через #FFFF
+        esp = AmigaEsp(requests=[("sd", 0x51, 0x2000, 3), ("sd", 0x52, 0xFFFF, 2)])
+        h = self.sd_session(esp)
+        self.assertEqual(esp.requests, [], "все запросы исполнены")
+        want = [(0x51, 0x2000), (0x51, 0x2001), (0x51, 0x2002), (0x52, 0xFFFF), (0x52, 0x10000)]
+        self.assertEqual(esp.got, [bytes([tag, 0]) + struct.pack("<I", lba) + sector(lba) for tag, lba in want])
+        self.assertEqual(self.amiga_reads(h), [lba for _, lba in want])
+        self.assertEqual([n for n, *_ in h.sd_io].count("SDD"), 0, "записи нет")
+        self.assertEqual(h.streams.count((1, 0, 0)), 1, "поток 1 на SD-ZC создан один раз")
+        self.assertEqual(esp.sd_on, [], "SD_ON — только Next")
+        self.assertEqual((h.memory[0x6000], h.page0), (PANEL_PAGE, PANEL_PAGE), "окно #0000 — прежнее")
+        self.assertEqual(h.machine.a, 0, "карта не менялась — WC перечитывать нечего")
+        # после запроса — 40 ВВОДов без кадра (SD_BURST): второй запрос и хвост
+        same = sum(1 for a, b in zip(esp.input_frames, esp.input_frames[1:]) if a == b)
+        self.assertEqual(same, 1 + 1 + 40)
+        self.assertEqual(esp.state, 3)
+
+    def test_amiga_sector_count_limits(self) -> None:
+        esp = AmigaEsp(requests=[("sd", 0x61, 100, 0), ("sd", 0x62, 200, 40)])
+        h = self.sd_session(esp)
+        # 0 — один сектор; больше 16 — по 16 за запрос, остальное ESP спрашивает снова
+        self.assertEqual(esp.batches, [1, 16, 16, 8])
+        self.assertEqual(self.amiga_reads(h), [100] + list(range(200, 240)))
+
+    def test_amiga_driver_failure_stops_request(self) -> None:
+        esp = AmigaEsp(requests=[("sd", 0x71, 9, 4)])
+        h = CoresHarness()
+        h.rdd_fail = True
+        self.sd_session(esp, h)
+        self.assertEqual(esp.got, [bytes([0x71, 2]) + struct.pack("<I", 9)], "отказ — без сектора, дальше не читать")
+        self.assertEqual(self.amiga_reads(h), [9])
+
+    def test_amiga_menu_clone_then_sector_recreates_stream(self) -> None:
+        # меню F11 клонирует панель в поток 1 — следующее чтение снова создаёт поток на SD-ZC
+        esp = AmigaEsp(requests=[("sd", 0x81, 5, 1), ("list",), ("sd", 0x82, 6, 1)])
+        h = self.sd_session(esp)
+        self.assertEqual(esp.requests, [])
+        self.assertEqual(len(esp.lists), 1)
+        created = [i for i, s in enumerate(h.streams) if s == (1, 0, 0)]
+        clones = [i for i, s in enumerate(h.streams) if s[0] == 0xFE]
+        self.assertEqual(len(created), 2)
+        self.assertEqual(len(clones), 1)
+        self.assertLess(created[0], clones[0])
+        self.assertLess(clones[0], created[1])
+        self.assertEqual(self.amiga_reads(h), [5, 6])
+
+    def test_other_core_ignores_amiga_sector_request(self) -> None:
+        esp = AmigaEsp(requests=[("sd", 0x91, 5, 1)], version=NES_CORE)
+        h = self.sd_session(esp)
+        self.assertEqual((esp.got, h.sd_io), ([], []), "операция 7 не у Amiga — не исполняется")
+
     def test_nes_from_menu_starts_without_browser(self) -> None:
         # 0.13: NES из меню — сразу START без образа; картридж выбирают в меню F1 ядра (NES.ELF 0.7)
         esp = NesMenuEsp()
@@ -513,7 +690,7 @@ class CoresPluginTest(unittest.TestCase):
         h = CoresHarness()
         esp = CoresEsp()
         h.start(esp, esc=10)
-        self.assertNotIn(CMD_CORE_APP, esp.commands)
+        self.assertEqual(esp.app_cores, ["COREMENU"], "слоя ядра нет")
         self.assertNotIn(CMD_START, esp.commands)
         self.assertEqual(h.calls.count(base.FN_RRESB), 1)
 
@@ -529,7 +706,7 @@ class CoresPluginTest(unittest.TestCase):
     def test_list_error(self) -> None:
         esp = CoresEsp(list_error="the Tang core has no SD bridge")
         self.fatal(esp, "ERR: the Tang core has no SD bridge", esc=5)
-        self.assertNotIn(CMD_CORE_APP, esp.commands)
+        self.assertEqual(esp.app_cores, ["COREMENU"], "слоя ядра нет")
 
     def test_no_cores(self) -> None:
         esp = CoresEsp(cores=())
@@ -560,7 +737,7 @@ class CoresPluginTest(unittest.TestCase):
         self.assertEqual(b"".join(p[4:] for p in esp.inputs), F12)
         self.assertEqual(h.video, [(FN_GVMOD, 0x04), (FN_MNGV_PL, 0)])
         self.assertEqual(h.int_pl, [1, 2])
-        self.assertLess(esp.commands.index(CMD_EXIT), esp.commands.index(CMD_APP_STOP))
+        self.assertLess(esp.commands.index(CMD_EXIT), last(esp.commands, CMD_APP_STOP))
         self.assertEqual(esp.state, 3)
         self.assertEqual(h.calls.count(base.FN_RRESB), 1)
 
@@ -582,6 +759,91 @@ class CoresPluginTest(unittest.TestCase):
         self.assertIn(CMD_APP_STOP, esp.commands)
         self.assertGreaterEqual(h.interrupts, 300, "выход — только по самому Esc (#76 без префиксов)")
         self.assertEqual(h.wc_events, b"")
+
+    # --- экран на HDMI Tang (COREMENU.ELF, 0.16) ---
+
+    def test_screen_menu_and_core(self) -> None:
+        h = CoresHarness()
+        esp = CoresEsp(screen=True)
+        h.start(esp, keys={8: FN_DOWN, 12: FN_UP, 16: FN_ENTER}, ps2={150: F12})
+        self.assertEqual(h.prwow_windows, [], "окна WC нет: всё рисует экран")
+        self.assertEqual(esp.app_cores, ["COREMENU", "NEXT"])
+        body = b"".join(n.encode().ljust(16, b"\0") + struct.pack("<I", s) + bytes([1 if e else 0])
+                        for n, s, e in esp.cores)
+        self.assertEqual(esp.scr_lists, [bytes([len(esp.cores)]) + body], "LIST — тело CORE_LIST")
+        states = [(p[0], p[1]) for p in esp.scr_states]
+        self.assertEqual(states[0], (SCR_MENU, 0))
+        self.assertIn((SCR_MENU, 1), states, "↓ — выбор у экрана")
+        self.assertEqual(states[-1], (SCR_LOADING, 0), "перед запуском — «Loading» выбранного")
+        self.assertGreaterEqual(states.count((SCR_MENU, 0)) + states.count((SCR_MENU, 1)), 14,
+                                "STATE — раз в кадр меню")
+        self.assertTrue(all(p[2] == 0xFF and p[-1] == 0 for p in esp.scr_states))
+        # картинка остаётся: LEAVE 1 до «кадр на экране», затем CORE_APP ядра; LEAVE 2 нет
+        self.assertEqual(set(esp.scr_leaves), {1})
+        self.assertLess(last(esp.commands, CMD_SCR_LEAVE), last(esp.commands, CMD_CORE_APP))
+        self.assertEqual(esp.core, "NEXT")
+        self.assertTrue(esp.inputs, "ядро работало")
+        self.assertEqual(esp.state, 3)
+        self.assertIsNone(esp.app)
+
+    def test_screen_esc(self) -> None:
+        h = CoresHarness()
+        esp = CoresEsp(screen=True)
+        h.start(esp, esc=10)
+        self.assertEqual(h.prwow_windows, [])
+        self.assertEqual(esp.app_cores, ["COREMENU"])
+        self.assertNotIn(CMD_START, esp.commands)
+        # уход плавно: LEAVE 0, пока экран не скажет «нет», затем LEAVE 2 — выгрузка
+        self.assertEqual(esp.scr_leaves[-1], 2)
+        self.assertGreaterEqual(esp.scr_leaves.count(0), 3)
+        self.assertNotIn(1, esp.scr_leaves)
+        self.assertIsNone(esp.app)
+
+    def test_screen_without_tang_falls_back_to_window(self) -> None:
+        h = CoresHarness()
+        esp = CoresEsp(screen=True, tang=False)
+        h.start(esp, keys={70: FN_ENTER}, ps2={200: F12})
+        self.assertEqual(len(h.prwow_windows), 1, "Tang без оверлеев — окно WC")
+        self.assertIn("Loading NEXT into the Tang...", h.text())
+        self.assertEqual(esp.scr_leaves[-1:], [2], "экран выгружен до окна")
+        self.assertLess(last(esp.commands, CMD_SCR_LEAVE), last(esp.commands, CMD_CORE_APP))
+        self.assertEqual(esp.app_cores, ["COREMENU", "NEXT"])
+        self.assertEqual(esp.core, "NEXT")
+
+    def test_screen_core_error_shows_on_screen(self) -> None:
+        h = CoresHarness()
+        esp = CoresEsp(screen=True, core_error="core not found in the BL616 cache")
+        h.start(esp, keys={8: FN_ENTER}, esc=40)
+        self.assertEqual(h.prwow_windows, [], "ошибка — экраном, без окна WC")
+        # слой ядра снят, экран — снова, сразу непрозрачным (картинка «Loading» ещё на HDMI)
+        self.assertEqual(esp.app_cores, ["COREMENU", "NEXT", "COREMENU"])
+        self.assertLess(last(esp.commands, CMD_APP_STOP), last(esp.commands, CMD_CORE_APP))
+        error = esp.scr_states[-1]
+        self.assertEqual(error[0], SCR_ERROR | 0x80)
+        self.assertEqual(error[3], SCR_ERR_TEXT)
+        self.assertTrue(error[4:].startswith(b"ERR: core not found in the BL616 cache"))
+        self.assertEqual(len(esp.scr_lists), 2, "новому экрану — список снова")
+        self.assertEqual(esp.scr_leaves[-1], 2)
+        self.assertIsNone(esp.app)
+
+    def test_screen_list_error(self) -> None:
+        h = CoresHarness()
+        esp = CoresEsp(screen=True, list_error="no SD card in the Tang")
+        h.start(esp, esc=20)
+        self.assertEqual(h.prwow_windows, [])
+        self.assertEqual(esp.scr_lists, [b"\0"], "список пуст, экрану он нужен всё равно")
+        error = esp.scr_states[-1]
+        self.assertEqual((error[0], error[3]), (SCR_ERROR, SCR_ERR_TEXT))
+        self.assertTrue(error[4:].startswith(b"ERR: no SD card in the Tang"))
+        self.assertEqual(esp.scr_leaves[-1], 2)
+
+    def test_screen_no_cores_has_own_text(self) -> None:
+        h = CoresHarness()
+        esp = CoresEsp(screen=True, cores=())
+        h.start(esp, esc=20)
+        self.assertEqual(h.prwow_windows, [])
+        error = esp.scr_states[-1]
+        self.assertEqual((error[0], error[3], error[4:]), (SCR_ERROR, 0, b"\0"), "код «нет ядер», текст у экрана свой")
 
     def test_no_esp(self) -> None:
         h = CoresHarness()

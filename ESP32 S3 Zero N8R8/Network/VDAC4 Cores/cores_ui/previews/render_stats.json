@@ -1,0 +1,36 @@
+{
+  "animation_frames": 100,
+  "fps": 25,
+  "duration_ms": 4000,
+  "animation_full_frames": 8,
+  "animation_partial_area_max": 5400,
+  "animation_partial_area_mean": 3019.7,
+  "benchmark_pc": {
+    "ordinary_average_ns": 945,
+    "full_rebuild_average_ns": 731227,
+    "ordinary_frames": 2000,
+    "full_frames": 100
+  },
+  "font": {
+    "sizes": [
+      13,
+      16,
+      24
+    ],
+    "glyphs_per_size": 224,
+    "table_bytes_including_glyph_padding": 83922
+  },
+  "art": {
+    "generic": 2206,
+    "generic_small": 382,
+    "palette_bytes": 48,
+    "background_bytes": 4912,
+    "total_without_descriptors": 7548
+  },
+  "canvas_bytes": 460800,
+  "extra_psram_bytes": 460800,
+  "esp_timing_verified": false,
+  "stage2_started": true,
+  "stage3_cards_from_elf": true,
+  "design_approved": true
+}

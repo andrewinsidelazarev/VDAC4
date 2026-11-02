@@ -106,6 +106,102 @@ Sd_Service:
         or a
         ret
 
+; Amiga (личность 05, AMIGA.ELF 0.18+): карта Evo — том EVO в Workbench, только чтение. ESP сам
+; разбирает FAT и показывает Amiga готовый том FFS, сектора просит здесь (Ev_Service):
+;   [1][7][номер][LBA LE32][число 1…AM_SD_MAX] -> на каждый сектор подряд SD_DONE #76
+;   [номер][итог][LBA][512 байтов], как у Next; отказ — SD_DONE без сектора, дальше не читать.
+; Поток 1 — на SD-ZC, как у Next (в панели может стоять SD2 — VFS, карта Tang). Меню F11 клонирует
+; в поток 1 панель (Ev_Walk): поэтому SdStream — поток 1 сейчас наш; клон его снимает, и чтение
+; создаёт поток заново. Записи нет: запрос 8 Amiga не шлёт, а пришёл бы — не исполняется.
+AM_SD_MAX       equ 16
+
+Am_SdRead:
+        ld a,(NxVersion+3)
+        cp 5
+        jp nz,Am_Burst                  ; не Amiga: у других слоёв операция 7 — не своя
+        ld hl,(ProtoRxLen)
+        ld de,8
+        or a
+        sbc hl,de
+        jp nz,Am_Burst
+        ld a,(ProtoBuf+2)
+        ld (SdTag),a
+        ld hl,ProtoBuf+3
+        ld de,SdLba
+        ld bc,4
+        ldir
+        ld a,(ProtoBuf+7)
+        or a
+        jr nz,.some
+        inc a                           ; ноль — один сектор
+.some:
+        cp AM_SD_MAX+1
+        jr c,.count
+        ld a,AM_SD_MAX                  ; больше предела — сколько можно, остальное ESP спросит снова
+.count:
+        ld (SdCount),a
+        ld a,(SdStream)
+        or a
+        jr nz,.sector
+        xor a
+        ld (EvCloned),a                 ; меню потом клонирует панель заново
+        ld d,1
+        ld b,0                          ; SD Z-Controller
+        ld c,0
+        ld a,FN_STREAM
+        call WC_API
+        jr nz,.no_card
+        ld a,1
+        ld (SdStream),a
+.sector:
+        call Sd_Read
+        jr c,.done                      ; ESP не ответил
+        ld a,(SdFrame+1)
+        or a
+        jr nz,.done                     ; отказ драйвера: остальное ESP спросит снова
+        ld a,(ProtoBuf)
+        or a
+        jr z,.done                      ; ESP запрос уже не ждёт
+        ld hl,(SdLba)
+        inc hl
+        ld (SdLba),hl
+        ld a,h
+        or l
+        jr nz,.next
+        ld hl,(SdLba+2)
+        inc hl
+        ld (SdLba+2),hl
+.next:
+        ld hl,SdCount
+        dec (hl)
+        jr nz,.sector
+.done:
+        ld a,SD_BURST
+        ld (SdBurst),a
+        ld a,1
+        ld (EvFast),a
+        or a
+        ret
+.no_card:
+        call Sd_Head
+        ld a,SD_FAIL
+        ld (SdFrame+1),a
+        call Sd_SendHead
+        jr .done
+
+; Ответ на ВВОД без запроса у Amiga: после чтения ещё SD_BURST ВВОДов без кадра — Amiga читает
+; сектора подряд. Выход: CF=0.
+Am_Burst:
+        ld a,(SdBurst)
+        or a
+        ret z
+        dec a
+        ld (SdBurst),a
+        ld a,1
+        ld (EvFast),a
+        or a
+        ret
+
 ; Чтение: сектор -> SdData, SD_DONE с сектором (отказ — без сектора).
 Sd_Read:
         call Sd_Head
@@ -169,10 +265,11 @@ Sd_Write:
         ld a,1
         ld (SdWrote),a                  ; карта меняется: при выходе WC перечитает панели
         call Sd_Io
-        jr z,.done
+        jr z,Sd_SendHead
         ld a,SD_FAIL
         ld (SdFrame+1),a
-.done:
+; SD_DONE без сектора: номер, итог, LBA.
+Sd_SendHead:
         ld hl,SdFrame
         ld bc,6
         ld a,CMD_NX_SD_DONE
@@ -237,6 +334,8 @@ Sd_Map0:
 SdOn:           db 0                    ; 1 — Next видит карту Evo как SD1
 SdWrote:        db 0                    ; 1 — Next писал на карту Evo
 SdBurst:        db 0
+SdStream:       db 0                    ; 1 — поток 1 создан на SD-ZC для Amiga (клон меню его снимает)
+SdCount:        db 0
 SdOp:           db 0
 SdTag:          db 0
 SdPart:         db 0

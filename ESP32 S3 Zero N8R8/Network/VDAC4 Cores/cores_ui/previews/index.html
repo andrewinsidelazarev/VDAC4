@@ -1,0 +1,35 @@
+<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VDAC4 Cores — утверждённый дизайн</title><style>
+body{margin:0;background:#0b131e;color:#eeeede;font:17px/1.5 sans-serif}main{max-width:1280px;margin:auto;padding:32px 24px}
+h1{font-size:32px;margin:0}p{color:#adbdca}a{color:#78d8c6}figure{margin:28px 0 48px}img{display:block;width:100%;height:auto;image-rendering:pixelated;border:1px solid #293d50;box-sizing:border-box}figcaption{padding-top:12px}button{padding:10px 16px;background:#253e49;color:#fff;border:1px solid #5da698;cursor:pointer}
+</style><main><h1>VDAC4 Cores / утверждённый дизайн</h1><p>640 × 360 RGB565 → 1280 × 720, точный масштаб ×2. Карточки NES, NEXT и AMIGA прочитаны из ELF. Результаты этапа 3 — в README.</p>
+<p><a href="../STAGE1.md">Список кадров</a> · <a href="00_overview.png">Обзорный лист</a> · <a href="motion_25fps.apng">Анимация APNG</a></p>
+<figure><img id="motion" src="motion_25fps.apng" width="1280" height="720"><figcaption>4 секунды, 25 кадров/с: NES → NEXT → AMIGA → NEXT → NES → запуск и загрузка.</figcaption></figure>
+<button onclick="document.getElementById('motion').src='01_menu_nes.png'">Остановить</button> <button onclick="document.getElementById('motion').src='motion_25fps.apng?'+Date.now()">Повторить</button>
+<figure><a href="01_menu_nes.png"><img loading="lazy" src="01_menu_nes.png" width="1280" height="720"></a><figcaption>NES — реальные три ядра, Manage - F1</figcaption></figure>
+<figure><a href="02_menu_next.png"><img loading="lazy" src="02_menu_next.png" width="1280" height="720"></a><figcaption>NEXT — карточка ZX Spectrum Next, Manage - F1</figcaption></figure>
+<figure><a href="03_menu_amiga.png"><img loading="lazy" src="03_menu_amiga.png" width="1280" height="720"></a><figcaption>AMIGA — корпус A1200, ядро NanoMig AGA, Manage - F11</figcaption></figure>
+<figure><a href="04_many_unknown_shared.png"><img loading="lazy" src="04_many_unknown_shared.png" width="1280" height="720"></a><figcaption>12 ядер — незнакомое имя, общий ESP, предупреждение о клавиатуре</figcaption></figure>
+<figure><a href="05_many_future_c64.png"><img loading="lazy" src="05_many_future_c64.png" width="1280" height="720"></a><figcaption>12 ядер — C64 без карточки: общий FPGA core, Manage скрыт</figcaption></figure>
+<figure><a href="06_single_core.png"><img loading="lazy" src="06_single_core.png" width="1280" height="720"></a><figcaption>Одно ядро на карте</figcaption></figure>
+<figure><a href="07_connecting.png"><img loading="lazy" src="07_connecting.png" width="1280" height="720"></a><figcaption>Подключение к ESP</figcaption></figure>
+<figure><a href="08_reading_sd.png"><img loading="lazy" src="08_reading_sd.png" width="1280" height="720"></a><figcaption>Чтение карты Tang</figcaption></figure>
+<figure><a href="09_starting_esp.png"><img loading="lazy" src="09_starting_esp.png" width="1280" height="720"></a><figcaption>Запуск слоя ESP выбранного ядра</figcaption></figure>
+<figure><a href="10_cache_45_percent.png"><img loading="lazy" src="10_cache_45_percent.png" width="1280" height="720"></a><figcaption>Копирование в кэш BL616 — реальные 45 %</figcaption></figure>
+<figure><a href="11_loading_unknown.png"><img loading="lazy" src="11_loading_unknown.png" width="1280" height="720"></a><figcaption>Загрузка без процентов — три движущиеся точки, без шкалы</figcaption></figure>
+<figure><a href="12_programming_fpga.png"><img loading="lazy" src="12_programming_fpga.png" width="1280" height="720"></a><figcaption>Загрузка в ПЛИС</figcaption></figure>
+<figure><a href="13_error_no_cores.png"><img loading="lazy" src="13_error_no_cores.png" width="1280" height="720"></a><figcaption>Ошибка — нет ядер в /CORES</figcaption></figure>
+<figure><a href="14_error_esp_text.png"><img loading="lazy" src="14_error_esp_text.png" width="1280" height="720"></a><figcaption>Ошибка — длинный текст от ESP</figcaption></figure>
+<figure><a href="15_error_core.png"><img loading="lazy" src="15_error_core.png" width="1280" height="720"></a><figcaption>Ошибка — ядро не запустилось</figcaption></figure>
+<figure><a href="16_error_update_nes.png"><img loading="lazy" src="16_error_update_nes.png" width="1280" height="720"></a><figcaption>Требуется update CORES/NES.ELF to 0.7+</figcaption></figure>
+<figure><a href="17_error_no_sd.png"><img loading="lazy" src="17_error_no_sd.png" width="1280" height="720"></a><figcaption>Ошибка — нет карты Tang</figcaption></figure>
+<figure><a href="18_error_esp_layer.png"><img loading="lazy" src="18_error_esp_layer.png" width="1280" height="720"></a><figcaption>Ошибка — слой ESP не запустился</figcaption></figure>
+<figure><a href="19_error_timeout.png"><img loading="lazy" src="19_error_timeout.png" width="1280" height="720"></a><figcaption>Ошибка — тайм-аут 180 секунд</figcaption></figure>
+<figure><a href="20_error_esp_lost.png"><img loading="lazy" src="20_error_esp_lost.png" width="1280" height="720"></a><figcaption>Ошибка — ESP перестал отвечать</figcaption></figure>
+<figure><a href="21_error_no_esp.png"><img loading="lazy" src="21_error_no_esp.png" width="1280" height="720"></a><figcaption>Ошибка — ESP отсутствует на SPI</figcaption></figure>
+<figure><a href="22_error_no_answer.png"><img loading="lazy" src="22_error_no_answer.png" width="1280" height="720"></a><figcaption>Ошибка — ESP не отвечает</figcaption></figure>
+<figure><a href="23_fade_alpha_4.png"><img loading="lazy" src="23_fade_alpha_4.png" width="1280" height="720"></a><figcaption>Появление над макетом WC — alpha 4, вес 5/16</figcaption></figure>
+<figure><a href="24_fade_alpha_8.png"><img loading="lazy" src="24_fade_alpha_8.png" width="1280" height="720"></a><figcaption>Появление над макетом WC — alpha 8, вес 9/16</figcaption></figure>
+<figure><a href="25_fade_alpha_12.png"><img loading="lazy" src="25_fade_alpha_12.png" width="1280" height="720"></a><figcaption>Появление над макетом WC — alpha 12, вес 13/16</figcaption></figure>
+<figure><a href="26_wc_background.png"><img loading="lazy" src="26_wc_background.png" width="1280" height="720"></a><figcaption>Исходный демонстрационный фон WC из плеера</figcaption></figure>
+<figure><a href="27_no_card_no_manage.png"><img loading="lazy" src="27_no_card_no_manage.png" width="1280" height="720"></a><figcaption>Ядро без карточки — общий рисунок, Manage скрыт</figcaption></figure></main></html>

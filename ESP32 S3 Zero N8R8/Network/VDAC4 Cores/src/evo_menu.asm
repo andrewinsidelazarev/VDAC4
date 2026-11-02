@@ -36,6 +36,7 @@ Ev_Reset:
         xor a
         ld (EvCloned),a
         ld (EvFast),a
+        ld (SdStream),a
         ld (EvSsOpen),a
         ld (GameKind),a
         ld (GameName),a
@@ -95,9 +96,10 @@ Ev_Service:
         jp z,Ev_SsOpen
         cp EV_SS_PUT
         jp z,Ev_SsPut
+        cp SD_OP_READ
+        jp z,Am_SdRead                  ; Amiga: сектора карты Evo (evo_sd.asm)
 .none:
-        or a
-        ret
+        jp Am_Burst
 
 ; Путь запроса (HL) — в EvPath. CF=1 — длиннее буфера.
 Ev_TakePath:
@@ -131,6 +133,8 @@ Ev_Walk:
         jr nz,.cloned
         inc a
         ld (EvCloned),a
+        xor a
+        ld (SdStream),a                 ; поток 1 больше не на SD-ZC
         ld d,STREAM_CLONE
         ld a,FN_STREAM
         call WC_API
@@ -458,6 +462,8 @@ Ev_GameDir:
         ld a,(GameKind)
         or a
         jr nz,.path
+        xor a
+        ld (SdStream),a
         ld a,1
         ld (EvCloned),a                 ; клон панели заново: поток 1 — в каталог запуска
         ld d,STREAM_CLONE

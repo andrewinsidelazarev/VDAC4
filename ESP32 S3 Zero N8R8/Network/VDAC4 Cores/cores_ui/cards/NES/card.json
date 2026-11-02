@@ -1,0 +1,11 @@
+{
+  "title": "NES",
+  "full_name": "Nintendo Entertainment System / Famicom",
+  "year": "1985",
+  "manufacturer": "Nintendo",
+  "line1": "8-bit",
+  "line2": "home console",
+  "category": "CONSOLE",
+  "manage_key": "F1",
+  "accent": "#ffb870"
+}

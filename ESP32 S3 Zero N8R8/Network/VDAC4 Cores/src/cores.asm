@@ -3,7 +3,8 @@
 ; Порядок:
 ;   1. связь с ESP (ZiFi_Init);
 ;   2. CORE_LIST (#2C): ядра на microSD Tang (\CORES\ИМЯ.BIN) и есть ли у ядра свой слой ESP
-;      (ИМЯ.ELF); меню: ↑/↓, Enter — выбрать, Esc — назад в WC;
+;      (ИМЯ.ELF); меню: ↑/↓, Enter — выбрать, Esc — назад в WC. С 0.16 меню, загрузку и ошибки
+;      рисует экран на HDMI Tang — COREMENU.ELF из \CORES\ (screen.asm); нет его — окно WC;
 ;   3. CORE_APP (#2D) [имя, 0]: ESP ставит ИМЯ.ELF с SD Tang в кэш модулей и запускает его (нет
 ;      своего — общий слой прошивки «CORE»);
 ;      NES из меню (0.13) — START сразу, без образа: картридж выбирают в меню F1 ядра (NES.ELF 0.7+
@@ -97,6 +98,8 @@ PLUGIN:
         ld (SdBurst),a
         ld (NesMenu),a
         ld (AdfCall),a
+        ld (ScrOn),a
+        ld (ScrKept),a
         call Proto_ResetRx
         ld a,1
         call WC_INT_PL                   ; WC не перерисовывает своё под окном
@@ -108,9 +111,8 @@ PLUGIN:
         call Ui_MakeList
         ld hl,UiEmpty
         call Ui_SetHint
-        call Ui_Open
-        ld hl,UiStConnect
-        call Ui_Status
+        ld hl,UiStConnect                ; окно — только без экрана Tang (0.16): откроется позже
+        call Ui_SetStatus
 
         call ZiFi_Init                   ; ESP на SPI и чистый сеанс канала
         ld hl,UiErrNoEsp
@@ -118,6 +120,8 @@ PLUGIN:
         ld a,(NesCall)
         cp 3
         jr nz,.nes_file
+        call Scr_Start                   ; экран на HDMI Tang (COREMENU.ELF); нет — окно WC
+        call c,Ui_Open
         ld hl,UiStList
         call Ui_Status
         call Cr_List
@@ -130,10 +134,12 @@ PLUGIN:
         call Ui_SetStatus
         ld hl,UiHintMenu
         call Ui_SetHint
+        call Scr_Menu                    ; Tang без оверлеев — экран прочь, окно WC
         call Cr_Menu
         jp c,.done                       ; Esc — назад в WC
         jr .start_app
 .nes_file:
+        call Ui_Open
         call Adf_IsFile                  ; расширение .adf — ядро AMIGA, иначе NES
         jr nc,.adf_file
         ld hl,NesName
@@ -152,6 +158,7 @@ PLUGIN:
         call Cr_LoadText
         ld hl,UiStStart
         call Ui_Status
+        call Scr_Keep                    ; «Loading» остаётся на HDMI, CORE_APP ядра выгрузит экран
         call Cr_StartApp
         jp c,.fatal
         ld a,1
@@ -210,6 +217,7 @@ PLUGIN:
         jp c,.fatal_exit
         call Nx_Exit
 .done:
+        call Scr_Close
         call Ui_Close
         ld a,(SdWrote)                   ; Next писал на карту Evo — WC перечитает обе панели
         or a
@@ -224,6 +232,8 @@ PLUGIN:
         call Nx_Exit
         pop hl
 .fatal:
+        call Scr_Fatal                   ; ошибка экраном Tang, если он есть
+        jr nc,.done
         push hl
         ld a,(NxWindowOpen)
         or a
@@ -301,6 +311,9 @@ Cr_Menu:
 .loop:
         ei
         halt
+        ld a,(ScrOn)
+        or a
+        call nz,Scr_State                ; экрану — выбор и знак жизни
         call WC_ESC
         scf
         ret nz
@@ -872,8 +885,8 @@ WC_WAITUP:
         jp WC_API
 
 ; --- данные -------------------------------------------------------------------------------
-CrCount:        db 0
 CrName:         ds 16
+CrCount:        db 0                    ; сразу перед CrList: тело LIST экрану (Scr_List)
 CrList:         ds MAX_CORES*ENTRY_SIZE
 MenuSel:        db 0
 MenuTop:        db 0

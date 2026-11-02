@@ -12,6 +12,10 @@ if($LASTEXITCODE) { throw 'ESP configure failed' }
 if($LASTEXITCODE) { throw 'ESP build failed' }
 New-Item -ItemType Directory -Force dist | Out-Null
 Copy-Item build/amiga_vdac4.app.elf dist/AMIGA.ELF -Force
+# Card for the VDAC4 Cores screen (COREMENU.ELF): card/card.bin (make_card.py from card.json and PNG,
+# needs Pillow) as section .vdac4.card without ALLOC; the ELF loader skips it
+& $python -W ignore "$Vdac4/ESP32 S3 Zero N8R8/Network/VDAC4 Cores/cores_ui/tools/add_card.py" dist/AMIGA.ELF card/card.bin
+if($LASTEXITCODE) { throw 'card insert failed' }
 & $python "$Vdac4\ESP32 S3 Zero N8R8\Sound\tools\check_module_symbols.py" dist/AMIGA.ELF
 if($LASTEXITCODE) { throw 'ELF loader compatibility check failed' }
 Get-Item dist/AMIGA.ELF | Format-Table Name, Length
