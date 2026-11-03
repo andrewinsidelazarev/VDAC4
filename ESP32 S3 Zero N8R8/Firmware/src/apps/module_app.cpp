@@ -1007,7 +1007,11 @@ void ModuleApp::stopApp() {
   }
   for (TaskSlot& slot : tasks_) {
     if (slot.running && slot.handle != nullptr) {
-      vTaskDelete(slot.handle);
+      if (slot.psram) {
+        vTaskDeleteWithCaps(slot.handle);
+      } else {
+        vTaskDelete(slot.handle);
+      }
     }
     slot = TaskSlot{};
   }
@@ -1183,9 +1187,14 @@ void ModuleApp::coreDelay(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms == 0 ? 1 : 
 void ModuleApp::taskTrampoline(void* context) {
   TaskSlot* slot = static_cast<TaskSlot*>(context);
   slot->fn(slot->arg);
+  const bool psram = slot->psram;         // место может тут же занять другая задача
   slot->running = false;
   slot->handle = nullptr;
-  vTaskDelete(nullptr);
+  if (psram) {
+    vTaskDeleteWithCaps(nullptr);         // стек в PSRAM освободит задача очистки
+  } else {
+    vTaskDelete(nullptr);
+  }
 }
 
 int ModuleApp::coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t priority,
@@ -1193,18 +1202,38 @@ int ModuleApp::coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t p
   if (fn == nullptr) {
     return ZM_ERROR;
   }
+  // ZM_TASK_STACK_PSRAM (0.1.112): внутренней памяти на стек нет — задаче, которой это можно, стек в
+  // PSRAM. 03.11.2026 при радио задаче поиска обложки PLAYER (6 КБ) внутренней не хватало (свободно
+  // ~2 КБ, самый большой кусок 704 байта). Без флага — как прежде, только внутренняя.
+  const bool psramAllowed = (stack & ZM_TASK_STACK_PSRAM) != 0;
+  stack &= ~ZM_TASK_STACK_PSRAM;
+  const uint32_t depth = stack < 2048 ? 2048 : stack;
   for (TaskSlot& slot : instance_->tasks_) {
     if (!slot.running) {
       slot.fn = fn;
       slot.arg = arg;
       slot.running = true;
+      slot.psram = false;
       const BaseType_t core = cpu < 0 ? tskNO_AFFINITY : cpu;
-      if (xTaskCreatePinnedToCore(taskTrampoline, "zm-app", stack < 2048 ? 2048 : stack, &slot,
-                                  priority > 20 ? 20 : priority, &slot.handle, core) != pdPASS) {
-        bringupLog(kTag, "app task: %u-byte stack not allocated (internal %u free, %u largest)",
-                   static_cast<unsigned>(stack),
-                   static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
-                   static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+      const UBaseType_t level = priority > 20 ? 20 : priority;
+      const size_t internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      const size_t internalLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+      BaseType_t made = xTaskCreatePinnedToCore(taskTrampoline, "zm-app", depth, &slot, level,
+                                                &slot.handle, core);
+      if (made != pdPASS && psramAllowed) {
+        slot.psram = true;                // до создания: задача может кончиться сразу
+        made = xTaskCreatePinnedToCoreWithCaps(taskTrampoline, "zm-app", depth, &slot, level,
+                                               &slot.handle, core, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (made == pdPASS) {
+          bringupLog(kTag, "app task: %u-byte stack in PSRAM (internal %u free, %u largest)",
+                     static_cast<unsigned>(depth), static_cast<unsigned>(internalFree),
+                     static_cast<unsigned>(internalLargest));
+        }
+      }
+      if (made != pdPASS) {
+        bringupLog(kTag, "app task: %u-byte stack not allocated (internal %u free, %u largest%s)",
+                   static_cast<unsigned>(stack), static_cast<unsigned>(internalFree),
+                   static_cast<unsigned>(internalLargest), psramAllowed ? ", PSRAM too" : "");
         slot = TaskSlot{};
         return ZM_NO_MEMORY;
       }
@@ -1939,9 +1968,11 @@ int ModuleApp::coreResource(const char* name, const uint8_t** data, size_t* size
   return ZM_NOT_FOUND;
 }
 
+// name == nullptr — все ресурсы (03.11.2026): экран ядер COREMENU освобождает PSRAM на старте, а имена наборов
+// MWM плеера ему неизвестны. Прошивки старше 0.1.112 на nullptr ничего не делают.
 void ModuleApp::coreResourceRelease(const char* name) {
   for (Resource& item : instance_->resources_) {
-    if (item.data != nullptr && name != nullptr && strcmp(item.name, name) == 0) {
+    if (item.data != nullptr && (name == nullptr || strcmp(item.name, name) == 0)) {
       heap_caps_free(item.data);
       item = Resource{};
     }

@@ -69,7 +69,7 @@ AUDIO_VIEW = 0x2F
 AUDIO_OPEN, AUDIO_DATA, AUDIO_CLOSE, AUDIO_STATUS, AUDIO_TONE, AUDIO_VOLUME = range(0x30, 0x36)
 AUDIO_PAUSE, AUDIO_PROBE, AUDIO_SEEK, AUDIO_FLUSH, AUDIO_INFO = range(0x36, 0x3B)
 AUDIO_COVER, AUDIO_THUMB, AUDIO_PICTURE, LINK_PROBE, AUDIO_TAGS = range(0x3B, 0x40)
-MOD_QUERY, MOD_PUT, MOD_COMMIT, APP_START = 0x69, 0x6A, 0x6B, 0x6C
+MOD_QUERY, MOD_PUT, MOD_COMMIT, APP_START, APP_STOP = 0x69, 0x6A, 0x6B, 0x6C, 0x6D
 FN_PRWOW, FN_MNGCVPL, FN_GVSGP = 0x01, 65, 71
 FN_GIPAGPL, FN_TENTRY, FN_STREAM, FN_FENTRY, FN_GFILE = 0x32, 0x33, 0x39, 0x3B, 0x3E
 FN_GDIR, STREAM_WC, STREAM_CLONE, STREAM_ROOT = 0x3F, 0xFD, 0xFE, 0xFF
@@ -158,15 +158,22 @@ UI_F_OPEN, UI_F_LEAVING = 1, 2
 
 def parse_ui_block(payload: bytes) -> dict | None:
     """Тело AUDIO_STATUS: [версия 1][флаги][окно поверх][номер LE16][из LE16][отдано LE32]
-    [имя, 0][строка состояния, 0]; пусто или другая версия — None."""
+    [имя, 0][строка состояния, 0], с плагина 1.23 — [подготовка][передано LE32][из LE32];
+    пусто или другая версия — None."""
     if len(payload) < 11 or payload[0] != 1:
         return None
-    texts = payload[11:].split(b"\0")
+    name_end = payload.index(b"\0", 11)
+    status_end = payload.index(b"\0", name_end + 1)
+    tail = payload[status_end + 1:]
     return {'flags': payload[1], 'page': payload[2],
             'track': int.from_bytes(payload[3:5], 'little'),
             'tracks': int.from_bytes(payload[5:7], 'little'),
             'sent': int.from_bytes(payload[7:11], 'little'),
-            'name': texts[0].decode('cp866'), 'status': texts[1].decode('cp866') if len(texts) > 1 else '',
+            'name': payload[11:name_end].decode('cp866'),
+            'status': payload[name_end + 1:status_end].decode('cp866'),
+            'prep': tail[0] if len(tail) >= 9 else None,
+            'done': int.from_bytes(tail[1:5], 'little') if len(tail) >= 9 else None,
+            'total': int.from_bytes(tail[5:9], 'little') if len(tail) >= 9 else None,
             'size': len(payload)}
 
 
@@ -257,6 +264,7 @@ class AudioEsp:
         self.puts: list[tuple[int, int]] = []
         self.stored: dict[bytes, bytes] = {}    # что дошло целиком
         self.started: list[bytes] = []
+        self.stopped = 0
         self.start_result = 0
         # Tang: VERSION (None — Tang нет / прошивка без TANG_READ) и флаги экрана PLAYER 1.26
         # в ответах AUDIO_OPEN и AUDIO_STATUS (None — прежний PLAYER: байта нет).
@@ -420,6 +428,9 @@ class AudioEsp:
             return frame(0xC5, bytes([1]) + self.tang_version.to_bytes(4, "little"))
         if not self.supported:
             return frame(RESP_ERROR, b"unsupported:%02X" % command)
+        if command == APP_STOP and self.modules_known:
+            self.stopped += 1               # приложение выгружено (плагин 1.23)
+            return frame(0xED)
         if command in (MOD_QUERY, MOD_PUT, MOD_COMMIT, APP_START) and self.modules_known:
             return self.module_command(command, payload)
         if command == AUDIO_OPEN:
@@ -1148,7 +1159,7 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertEqual(data[63], 0, "и Enter, и F3")
         self.assertEqual(data[64:161], bytes(97), "старое поле 32 расширений у #11 пустое")
         self.assertEqual(data[161:165], b"\xFF" * 4, "размер файла не ограничен")
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.22")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.24")
         self.assertEqual((data[34], data[35]), (2, 0), "две страницы, запуск — страница 0")
         self.assertEqual(data[38], 1, "второй блок файла — в страницу 1")
         self.assertEqual(data[197], 4, "меню выбора просмотрщика, в F10 плеера нет")
@@ -1816,6 +1827,57 @@ class TangScreenTest(unittest.TestCase):
         self.assertEqual(h.audio.stored.get(b"PLAYER.ELF"), player, 'PLAYER.ELF передан')
         self.assert_no_window(h)
 
+    ESP_TIME, ESP_DATE = 0x9C2B, 0x5D43
+
+    def esp_card(self, h: Mp3Harness, **files: bytes) -> None:
+        h.root = {b"WC": {b"ESP": {name.replace("_", ".").encode(): (content, self.ESP_TIME, self.ESP_DATE)
+                                   for name, content in files.items()}}, b"ZIFI": {}}
+
+    def test_bank_progress_on_the_screen(self) -> None:
+        # Плагин 1.23 (PLAYER 1.31): PLAYER запущен до банка, и пока банк идёт в ESP, тела
+        # AUDIO_STATUS несут подготовку и ход передачи — экран Tang показывает загрузку (прежде на
+        # HDMI не было ничего, пока шли 6 МБ); окна на Evo нет. После подготовки флага нет.
+        bank = bytes((index * 7) & 0xFF for index in range(600_000))
+        h = self.harness(b"MThd" + bytes(3000), name=b"SONG.MID", tang_version=self.TANG,
+                         screen=SCREEN_F_TANG | SCREEN_F_SHOWN)
+        self.esp_card(h, PLAYER_ELF=b"\x7fELF" + bytes(600), MIDI_ELF=b"\x7fELF" + bytes(700),
+                      MIDI_SF2=bank)
+        h.start()
+        self.assertEqual(h.audio.stored.get(b"MIDI.SF2"), bank)
+        blocks = [b for b in h.audio.ui_blocks if b]
+        prep = [b for b in blocks if b['prep']]
+        going = [b for b in prep if b['total'] == len(bank)]
+        self.assertGreaterEqual(len(going), 3, 'ход банка — на экран')
+        done = [b['done'] for b in going]
+        self.assertEqual(done, sorted(done))
+        self.assertLess(done[0], done[-1])
+        self.assertLessEqual(done[-1], len(bank))
+        self.assertTrue(all('MIDI.SF2' in b['status'] for b in going), going[0]['status'])
+        self.assertTrue(all(b['prep'] == 0 for b in blocks[blocks.index(prep[-1]) + 1:]),
+                        'файл готов — подготовки нет')
+        self.assert_no_window(h)
+
+    def test_module_upload_keeps_the_screen_alive(self) -> None:
+        # Плагин 1.23: модуль целиком идёт в ESP — тела AUDIO_STATUS и во время приёма (прежде
+        # первое — после всего файла, и экран всё это время не появлялся).
+        content = random.Random(43).randbytes(700_000)
+        h = self.harness(content, name=b"BIG.XM", tang_version=self.TANG,
+                         screen=SCREEN_F_TANG | SCREEN_F_SHOWN)
+        self.esp_card(h, PLAYER_ELF=b"ELF" + bytes(600), TRACKER_ELF=b"ELF" + bytes(700))
+        seen = []
+        audio = h.audio
+
+        def app(command: int, payload: bytes) -> bytes:
+            if command == AUDIO_STATUS:
+                seen.append(len(audio.received))
+            return audio(command, payload)
+        h.app = app
+        h.start()
+        self.assertEqual(bytes(audio.received), content)
+        during = [n for n in seen if 0 < n < len(content)]
+        self.assertGreaterEqual(len(during), 3, 'экрану — ход приёма')
+        self.assert_no_window(h)
+
     def test_no_tang_window_from_the_start(self) -> None:
         # Tang нет (TANG_READ — отказ): окно сразу, до AUDIO_OPEN, как в 1.20.
         h = self.harness()
@@ -2467,7 +2529,8 @@ class ModuleDeliveryTest(unittest.TestCase):
         self.assertEqual(audio.puts[:6], [(offset, 512) for offset in range(0, 3000 - 440, 512)] +
                          [(2560, 440)], "по сектору, последний — остаток")
         self.assertIn((65536, 512), audio.puts)
-        self.assertEqual(audio.started, [b"PLAYER.ELF"])
+        self.assertEqual(audio.started, [b"PLAYER.ELF"] * 2,
+                         "модуль декодера лёг в кэш — PLAYER заново (плагин 1.23)")
         self.assertLess(audio.commands.index(APP_START), audio.commands.index(AUDIO_OPEN))
         self.assertIn(b"SONG.MP3", h.found_names, "свой файл найден заново")
         self.assertEqual(bytes(audio.received), bytes(20000), "и прочитан с начала")
@@ -2482,7 +2545,7 @@ class ModuleDeliveryTest(unittest.TestCase):
         again.start()
         self.assertEqual(len(audio.queries), 2)
         self.assertEqual(audio.puts, [], "ничего не передаётся")
-        self.assertEqual(audio.started, [b"PLAYER.ELF", b"PLAYER.ELF"])
+        self.assertEqual(audio.started, [b"PLAYER.ELF"] * 3, "второй раз — один запуск")
         self.assertEqual(bytes(audio.received), bytes(20000))
 
     def test_changed_module_is_sent_again(self) -> None:
@@ -2494,7 +2557,8 @@ class ModuleDeliveryTest(unittest.TestCase):
         self.card(h, PLAYER_ELF=player, MP3_ELF=mp3)
         h.start()
         self.assertEqual(list(audio.stored), [b"MP3.ELF"])
-        self.assertEqual(audio.started, [b"PLAYER.ELF"])
+        self.assertEqual(audio.started, [b"PLAYER.ELF"] * 2,
+                         "модуль декодера лёг в кэш — PLAYER заново (плагин 1.23)")
 
     def test_tracker_decoder_for_a_module(self) -> None:
         tracker = self.elf(1200, 6)
@@ -2504,7 +2568,8 @@ class ModuleDeliveryTest(unittest.TestCase):
         h.start()
         self.assertEqual([query[0] for query in audio.queries], [b"PLAYER.ELF", b"TRACKER.ELF"])
         self.assertEqual(audio.stored[b"TRACKER.ELF"], tracker)
-        self.assertEqual(audio.started, [b"PLAYER.ELF"])
+        self.assertEqual(audio.started, [b"PLAYER.ELF"] * 2,
+                         "модуль декодера лёг в кэш — PLAYER заново (плагин 1.23)")
         self.assertEqual(bytes(audio.received), b"Extended Module: " + bytes(5000))
 
     def test_builtin_player_without_the_modules(self) -> None:
@@ -2553,7 +2618,8 @@ class ModuleDeliveryTest(unittest.TestCase):
                 self.card(h, PLAYER_ELF=player, MP3_ELF=self.elf(500, 13))
                 h.start()
                 if label == "app does not start":
-                    self.assertEqual(audio.started, [b"PLAYER.ELF"])
+                    self.assertEqual(audio.started, [b"PLAYER.ELF"] * 2,
+                         "модуль декодера лёг в кэш — PLAYER заново (плагин 1.23)")
                 else:
                     self.assertNotIn(APP_START, audio.commands)
                     self.assertNotIn(b"PLAYER.ELF", audio.stored)
@@ -2596,7 +2662,8 @@ class ModuleDeliveryTest(unittest.TestCase):
                                          (b"MIDI.SF2", 30000, stamp, 1)], "банк — ресурсом")
         self.assertEqual(audio.stored[b"MIDI.SF2"], self.BANK)
         self.assertEqual(audio.resources, {b"MIDI.SF2": 30000})
-        self.assertEqual(audio.started, [b"PLAYER.ELF"])
+        self.assertEqual(audio.started, [b"PLAYER.ELF"] * 2,
+                         "модуль декодера лёг в кэш — PLAYER заново (плагин 1.23)")
         self.assertLess(audio.commands.index(APP_START), audio.commands.index(AUDIO_OPEN))
         self.assertEqual(audio.opens, [bytes([OPEN_MODULE | OPEN_MIDI]) +
                                        (3004).to_bytes(4, "little") + b"MID"])
@@ -2612,6 +2679,34 @@ class ModuleDeliveryTest(unittest.TestCase):
         self.assertEqual(audio.puts, [], "ничего не передаётся")
         self.assertEqual(bytes(audio.received), b"MThd" + bytes(3000))
 
+    def test_player_starts_before_the_decoder_goes(self) -> None:
+        # Плагин 1.23: сначала интерфейс — APP_START сразу после PLAYER.ELF, потом модуль декодера,
+        # банк и файл. Модуль лёг в кэш, пока PLAYER работал, — APP_START ещё раз (ESP могла
+        # остановить PLAYER ради места под передачу); модуль уже в кэше — второго нет.
+        def order(cached: bool) -> list[str]:
+            audio = AudioEsp()
+            if cached:
+                stamp = self.TIME | self.DATE << 16
+                audio.cache = {b"PLAYER.ELF": (2000, stamp), b"MIDI.ELF": (3000, stamp)}
+            events = []
+            h = self.midi(audio, PLAYER_ELF=self.elf(2000, 31), MIDI_ELF=self.elf(3000, 32),
+                          MIDI_SF2=self.BANK)
+
+            def app(command: int, payload: bytes) -> bytes:
+                if command == MOD_QUERY:
+                    events.append(payload[9:].split(bytes(1), 1)[0].decode())
+                elif command == APP_START:
+                    events.append('START')
+                elif command == AUDIO_OPEN:
+                    events.append('OPEN')
+                return audio(command, payload)
+            h.app = app
+            h.start()
+            self.assertEqual(bytes(audio.received), b"MThd" + bytes(3000))
+            return events
+        self.assertEqual(order(False)[:6], ['PLAYER.ELF', 'START', 'MIDI.ELF', 'START', 'MIDI.SF2', 'OPEN'])
+        self.assertEqual(order(True)[:5], ['PLAYER.ELF', 'START', 'MIDI.ELF', 'MIDI.SF2', 'OPEN'])
+
     def test_modules_from_the_volume_wc_came_from(self) -> None:
         # Музыка на другом устройстве (Nemo IDE): /WC/ESP — на томе WC (STREAM #FD),
         # на томе панели его нет. WC без #FD — прежний поиск на томе панели.
@@ -2622,13 +2717,14 @@ class ModuleDeliveryTest(unittest.TestCase):
         h.start()
         self.assertEqual([query[0] for query in audio.queries],
                          [b"PLAYER.ELF", b"MIDI.ELF", b"MIDI.SF2"])
-        self.assertEqual(audio.started, [b"PLAYER.ELF"])
+        self.assertEqual(audio.started, [b"PLAYER.ELF"] * 2,
+                         "модуль декодера лёг в кэш — PLAYER заново (плагин 1.23)")
         self.assertEqual(bytes(audio.received), b"MThd" + bytes(3000))
         old = AudioEsp()
         h = self.midi(old, PLAYER_ELF=player, MIDI_ELF=midi, MIDI_SF2=self.BANK)
         h.wc_stream = False
         h.start()
-        self.assertEqual(old.started, [b"PLAYER.ELF"], "WC без #FD: том панели")
+        self.assertEqual(old.started, [b"PLAYER.ELF"] * 2, "WC без #FD: том панели")
         self.assertEqual(bytes(old.received), b"MThd" + bytes(3000))
 
     def test_aac_and_ogg_files_play_with_their_decoders(self) -> None:
@@ -2770,7 +2866,8 @@ class ModuleDeliveryTest(unittest.TestCase):
         self.assertEqual([query[0] for query in audio.queries],
                          [b"PLAYER.ELF", b"MP3.ELF", b"AAC.ELF", b"OGG.ELF"],
                          "кодек станции узнаёт PLAYER: на ESP — все декодеры потока")
-        self.assertEqual(audio.started, [b"PLAYER.ELF"])
+        self.assertEqual(audio.started, [b"PLAYER.ELF"] * 2,
+                         "модуль декодера лёг в кэш — PLAYER заново (плагин 1.23)")
         self.assertEqual(audio.opens, [bytes([OPEN_MODULE]) + len(playlist).to_bytes(4, "little") +
                                        b"M3U"])
 

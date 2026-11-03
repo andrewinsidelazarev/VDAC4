@@ -46,6 +46,11 @@ Esp_Prepare:
         ld (EspAppRunning),a
         ld (EspReopened),a
         ld (EspNeedsApp),a
+        ld (UiTangWait),a                ; окно — через UI_TANG_WAIT кадров с этого вызова
+        ld a,(WC_FRAMES)
+        ld (UiTangFrame),a
+        ld a,1
+        ld (EspPreparing),a              ; экрану Tang: файл готовится (Ui_PackBlock)
         ld a,WHY_MISSING                 ; нет /WC/ESP — «missing /wc/esp/»
         ld (EspWhy),a
         ld hl,UiEmpty
@@ -60,37 +65,59 @@ Esp_Prepare:
         call Wc_Api
         call Esp_OwnName
         call Esp_ToModules
-        jr c,.reopen
+        jp c,.reopen
         ld hl,EspPlayer
         call Esp_Deliver
-        jr c,.reopen
-        ld a,(Mp3Kind)
-        or a
-        jp z,.stream
-        cp KIND_RADIO
-        jp z,.radio
-        ld hl,EspTsfm
-        cp KIND_TSFM
-        jr z,.decoder
-        ld hl,EspSaa
-        cp KIND_SAA
-        jr z,.decoder
-        ld hl,EspTracker
-        dec a
-        jr z,.decoder
-        ld hl,EspMidi
-        dec a
-        jr z,.decoder
-        ld hl,EspOpl
+        jp c,.reopen
+        call Esp_Decoder
+        ld (EspDecoder),hl
+        ; Плагин 1.23: сначала интерфейс — PLAYER и его экран Tang, потом всё остальное: модуль
+        ; декодера, банк MIDI, набор волн, сам файл. Ход их передачи — на экране (Mp3_Alive);
+        ; прежде PLAYER запускался после них, и пока шёл банк в 6 МБ, на HDMI не было ничего.
+        ; Модуля декодера в /WC/ESP нет — PLAYER не нужен, как и прежде (MP3 и модули играет
+        ; встроенный плеер, у MIDI — ошибка с именем модуля).
+        xor a
+        ld (EspStored),a
+        ld (EspEarly),a
+        call Esp_Exists
+        jr c,.decoder
+        ld a,1
+        ld (EspEarly),a
+        call Esp_StartApp
+        call Esp_AliveNow                ; экран — сразу, даже если передавать нечего
 .decoder:
+        ld hl,(EspDecoder)
         call Esp_Deliver
-        jr c,.reopen
+        jp c,.no_decoder
+        ld a,(Mp3Kind)
+        cp KIND_RADIO
+        jr nz,.start
+        ; Радио: MP3.ELF — всегда (с него PLAYER начинает), AAC.ELF и OGG.ELF — если есть:
+        ; кодек станции PLAYER узнаёт по её потоку.
+        ld hl,EspAac
+        call Esp_Extra
+        jp c,.reopen                     ; Esc
+        ld hl,EspOgg
+        call Esp_Extra
+        jp c,.reopen
 .start:
         ld hl,EspPlayer                  ; не запустилось — в ошибке PLAYER.ELF
         ld (EspName),hl
         xor a                            ; WHY_OTHER
         ld (EspWhy),a
+        ; Модуль лёг в кэш, пока PLAYER работал: APP_START ещё раз. Место под передачу ESP могла
+        ; взять, остановив PLAYER, а новый модуль он берёт перезапуском.
+        ld a,(EspEarly)
+        or a
+        jr z,.launch
+        ld a,(EspStored)
+        or a
+        jr z,.kit
+        xor a
+        ld (EspAppRunning),a
+.launch:
         call Esp_StartApp
+.kit:
         call Esp_Kit
         ; Банк MIDI — после запуска: не хватит места — PLAYER освободит ресурсы.
         ld a,(Mp3Kind)
@@ -105,6 +132,8 @@ Esp_Prepare:
         xor a
         ld (EspAppRunning),a             ; MIDI без банка — ошибка с его именем
 .reopen:
+        xor a
+        ld (EspPreparing),a
         call Esp_Reopen
         ld hl,0
         ld a,(EspWhy)
@@ -142,30 +171,66 @@ Esp_Prepare:
 .done:
         or a
         ret
+.no_decoder:
+        ; Модуль декодера не лёг в кэш ESP, а PLAYER уже запущен: прочь его — дальше как без
+        ; приложения (встроенный плеер или ошибка с именем модуля).
+        ld a,(EspAppRunning)
+        or a
+        call nz,Esp_StopApp
+        jp .reopen
+
+; Модуль декодера файла (Mp3Kind): поток — по расширению (не MP3.ELF — без приложения
+; никак: EspNeedsApp), радио — MP3.ELF, модуль, MIDI, OPL, AY/FM, SAA — свой. Выход: HL — имя.
+Esp_Decoder:
+        ld a,(Mp3Kind)
+        or a
+        jr z,.stream
+        ld hl,EspMp3
+        cp KIND_RADIO
+        ret z
+        ld hl,EspTsfm
+        cp KIND_TSFM
+        ret z
+        ld hl,EspSaa
+        cp KIND_SAA
+        ret z
+        ld hl,EspTracker
+        dec a
+        ret z
+        ld hl,EspMidi
+        dec a
+        ret z
+        ld hl,EspOpl
+        ret
 .stream:
-        ; Поток с карты: декодер — по расширению; не MP3.ELF — без приложения никак.
         call Esp_StreamName
         ld de,EspMp3
         or a
         sbc hl,de
         add hl,de
-        jp z,.decoder
+        ret z
         ld a,1
         ld (EspNeedsApp),a
-        jp .decoder
-.radio:
-        ; Радио: MP3.ELF — всегда (с него PLAYER начинает), AAC.ELF и OGG.ELF —
-        ; если есть: кодек станции PLAYER узнаёт по её потоку.
-        ld hl,EspMp3
-        call Esp_Deliver
-        jp c,.reopen
-        ld hl,EspAac
-        call Esp_Extra
-        jp c,.reopen                     ; Esc
-        ld hl,EspOgg
-        call Esp_Extra
-        jp c,.reopen
-        jp .start
+        ret
+
+; Mp3_Alive сейчас, не дожидаясь MP3_ALIVE_FRAMES кадров с прошлого.
+Esp_AliveNow:
+        ld a,(WC_FRAMES)
+        sub MP3_ALIVE_FRAMES
+        ld (Mp3AliveFrame),a
+        jp Mp3_Alive
+
+; Есть ли модуль HL (имя с нулём) в /WC/ESP — без передачи. CF=1 — нет.
+Esp_Exists:
+        ld de,EspFentry+1
+        ld bc,13
+        ldir
+        ld hl,EspFentry
+        call WC_FENTRY
+        scf
+        ret z
+        or a
+        ret
 
 ; Декодер потока с карты — по расширению (Mp3Ext): AAC — AAC.ELF, OGG и OGA —
 ; OGG.ELF, остальное (MP3, WAV) — MP3.ELF. Выход: HL — имя.
@@ -385,6 +450,7 @@ Esp_Deliver:
         ld hl,EspStateText
         call Ui_SetState
         call Ui_Draw
+        call Esp_AliveNow                ; и экрану Tang: ESP ищет место или читает флешку
 .query:
         ld a,CMD_MOD_QUERY
         ld hl,EspQuery
@@ -437,6 +503,7 @@ Esp_Deliver:
         call WC_ESC
         ld a,WHY_ESC
         jp nz,.why
+        call Mp3_Alive                   ; PLAYER запущен — экрану Tang ход передачи (1.23)
         ld a,(EspOffset+1)
         and (ESP_SHOW_EVERY-1)*2         ; раз в ESP_SHOW_EVERY секторов
         call z,Ui_ShowLoad
@@ -538,7 +605,10 @@ Esp_Deliver:
         call Esp_LoadDone
         ld a,(ProtoBuf)
         cp 1
-        ret z                            ; CF=0
+        jr nz,.card
+        ld (EspStored),a                 ; модуль лёг в кэш (Esp_Prepare: PLAYER заново)
+        or a
+        ret                              ; CF=0
 .card:
         xor a                            ; WHY_OTHER
         jr .why
@@ -655,6 +725,8 @@ Esp_Kit:
 ; заново (ПЗУ у ESP или звук остановлен освобождением ресурсов), CF=1 — играть
 ; как есть (ПЗУ нет в /WC/ESP, Esc — EspWhy=WHY_ESC).
 Esp_LoadRom:
+        ld a,1
+        ld (EspPreparing),a              ; экрану Tang: ход передачи ПЗУ
         call Esp_ToModules
         ld a,WHY_MISSING
         ld (EspWhy),a
@@ -666,6 +738,8 @@ Esp_LoadRom:
         cp 1                             ; освобождались — CF=0: заново
 .back:
         push af
+        xor a
+        ld (EspPreparing),a
         call Esp_Reopen
         call Esp_LoadDone
         pop af
@@ -708,6 +782,26 @@ Esp_Restart:
         jp nc,Esp_StartApp
         xor a
         ld (ProtoErr),a
+        ret
+
+; Приложение — прочь (APP_STOP): ESP выгружает PLAYER.ELF с декодерами. Почему не вышла
+; доставка (EspWhy) — как было: по нему — текст ошибки.
+Esp_StopApp:
+        ld a,(EspWhy)
+        push af
+        xor a
+        ld (EspAppRunning),a
+        ld a,CMD_APP_STOP
+        call Proto_SendEmpty
+        jr c,.done
+        ld a,RESP_APP_STOP
+        ld hl,ESP_START_FRAMES
+        call Esp_WaitLong
+.done:
+        xor a
+        ld (ProtoErr),a
+        pop af
+        ld (EspWhy),a
         ret
 
 ; Ответ ESP с кодом A, на который ей нужно время (место под доставку, запись

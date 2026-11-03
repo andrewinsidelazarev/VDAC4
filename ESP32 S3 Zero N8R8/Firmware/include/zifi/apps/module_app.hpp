@@ -65,6 +65,7 @@ class ModuleApp : public App {
     zm_task_fn fn;
     void* arg;
     volatile bool running;
+    bool psram;                            // стек в PSRAM (ZM_TASK_STACK_PSRAM): снимать WithCaps
   };
   struct LoadedModule {
     bool used;

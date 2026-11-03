@@ -32,10 +32,12 @@ MP3_READ_SIZE   equ 8192                ; чтение SD независимо �
 MP3_WAIT        equ 12000               ; опросов в ожидании ответа ESP
 MP3_PING_TRIES  equ 4
 MP3_STATUS_EVERY equ 16                 ; блоков между запросами состояния
+MP3_ALIVE_FRAMES equ 10                 ; экрану Tang при подготовке и приёме файла (Mp3_Alive)
 MP3_DRAIN_EVERY equ 10                  ; кадров между запросами, пока ESP играет
 MP3_VOLUME_STEP equ 16
 MP3_SEEK_SECONDS equ 10
-MOD_START_FRAMES equ 250                ; сколько кадров ждать разбора модуля (5 с)
+MOD_START_STEPS equ 250                 ; разбор модуля: шагов ожидания (40 с, Esc — прочь)
+MOD_START_HALTS equ 7                   ; пауза шага: с запросом — 8 кадров, ESP — раз в 0,16 с
 MOD_ROOM_FRAMES equ 50                  ; пауза перед новой попыткой открыть файл (1 с)
 
 ; Способы вызова плагина.
@@ -900,6 +902,7 @@ Mod_Play:
         ld hl,UiErrorClosed
         jp nz,Mp3_Fatal                  ; модуль ESP берёт всегда, пока не набран
         call Mp3_Account
+        call Mp3_Alive                   ; экрану Tang — ход приёма (плагин 1.23)
         ld hl,Mp3Blocks
         inc (hl)
         ld a,(hl)
@@ -914,20 +917,35 @@ Mod_Play:
         ld hl,UiStageStart
         call Ui_SetState
         call Ui_Draw
-        ld b,MOD_START_FRAMES
+        ; Разбор большого модуля идёт и после последнего байта: IT 3,78 МБ на плате — дольше
+        ; 5 с (03.11.2026), и плагин 1.23 выдавал ошибку, когда ESP уже играла. Ждать, пока ESP
+        ; отвечает «загрузка», до 40 с; Esc — выход.
+        ld b,MOD_START_STEPS
 .start:
-        push bc
         ei
         halt
+        push bc
         call Mp3_Refresh
         pop bc
         jp c,Mp3_NoAnswer
         ld a,(Mp3Status+ST_STATE)
         cp AUDIO_LOADING
-        jr nz,.started
+        jr nz,.started                   ; разобрала — сразу, без паузы шага
+        push bc
+        call Ui_Esc
+        jr nz,.start_esc
+        ld b,MOD_START_HALTS
+.pause:
+        ei
+        halt
+        djnz .pause
+        pop bc
         djnz .start
         ld hl,UiErrorModSlow
         jp Mp3_Fatal
+.start_esc:
+        pop bc
+        jp .stop
 .started:
         cp AUDIO_PLAYING
         ld hl,UiErrorModFormat
@@ -1704,6 +1722,7 @@ FastWaitLeft:   db 0
 EspFastTransfer: db 0
 EspTransferSize: dw ESP_CHUNK
 Mp3Blocks:      db 0                    ; счётчик блоков для редкого запроса состояния
+Mp3AliveFrame:  db 0                    ; WC_FRAMES прошлого Mp3_Alive
 Mp3Frame:       db 0                    ; кадр последнего опроса клавиш громкости
 Mp3Arg:         db 0                    ; однобайтовое тело команды
 Mp3Index:       dw 0                    ; номер объекта панели, с которого вызван плагин

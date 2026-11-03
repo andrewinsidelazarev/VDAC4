@@ -367,7 +367,9 @@ int it_stream_begin(it_stream_t* s, const zm_host_t* host, uint32_t size) {
     }
   }
   uint32_t sample_memory[IT_LEVELS] = {0, 0, 0};
-  uint32_t peak[IT_LEVELS] = {0, 0, 0};               /* переходный пик загрузки сэмпла */
+  /* Пик загрузки сэмплов: уже загруженные (в итоговом виде) и текущий в полный размер с буфером
+   * распаковки или чередования. Узоров тогда ещё нет: libxmp грузит их после сэмплов. */
+  uint32_t peak[IT_LEVELS] = {0, 0, 0};
   for (uint32_t i = 0; i < samples; ++i) {
     const uint32_t at = rd32(table_smp + 4 * i);
     if (at == 0 || !inside(at, SAMPLE_HEADER, size)) {
@@ -391,21 +393,18 @@ int it_stream_begin(it_stream_t* s, const zm_host_t* host, uint32_t size) {
     replay_read(&r, data, (uint32_t)end);
     s->stereo += channels == 2;
     s->sixteen += width == 2;
+    /* Сэмпл грузится в полный размер и только потом ужимается на месте (src/loaders/sample.c);
+     * у сжатых сверх него — буфер распаковки, у стерео — буфер чередования (полный размер). */
+    const uint64_t buffer = (sample_flags & 8) || channels == 2 ? full : 0;
+    const uint64_t loading = full + 4 * width * channels + 4 + BLOCK_OVERHEAD + buffer;
+    for (int level = 0; level < IT_LEVELS; ++level) {
+      if (sample_memory[level] + loading > peak[level]) {
+        peak[level] = (uint32_t)(sample_memory[level] + loading);
+      }
+    }
     sample_memory[IT_FULL] += (uint32_t)(full + 4 * width * channels + 4 + BLOCK_OVERHEAD);
     sample_memory[IT_MONO] += (uint32_t)(frames * width + 4 * width + 4 + BLOCK_OVERHEAD);
     sample_memory[IT_MONO_8BIT] += frames + 4 + 4 + BLOCK_OVERHEAD;
-    /* Сверх итоговой копии: у сжатых — буфер распаковки, у стерео — буфер
-     * чередования (полный размер); сэмпл, который ужимается, ещё и сначала
-     * грузится в полный размер (src/loaders/sample.c). */
-    const uint64_t buffer = (sample_flags & 8) || channels == 2 ? full : 0;
-    const uint64_t transient[IT_LEVELS] = {
-        buffer, buffer + (channels == 2 ? full : 0),
-        buffer + (channels == 2 || width == 2 ? full : 0)};
-    for (int level = 0; level < IT_LEVELS; ++level) {
-      if (transient[level] > peak[level]) {
-        peak[level] = (uint32_t)transient[level];
-      }
-    }
   }
   /* Узоры: два прохода; каналы — как считает libxmp (наибольший номер в данных). */
   uint32_t rows = 0;
@@ -507,18 +506,21 @@ int it_stream_begin(it_stream_t* s, const zm_host_t* host, uint32_t size) {
   }
   host->free(spans);
 
-  /* Память libxmp: сэмплы, дорожки (узоры × каналы), инструменты, описания;
-   * пик — переходные буферы сэмпла с основой libxmp при загрузке или
-   * проигрыватель после неё. */
+  /* Память libxmp — большее из двух: загрузка сэмплов (peak) с основой libxmp, инструментами,
+   * описаниями и хранимыми участками файла — дорожек ещё нет; и итог: все сэмплы, дорожки (узоры ×
+   * каналы) и проигрыватель после загрузки. TRACKER 1.8 складывал всё сразу: B_sunset.it (3,78 МБ,
+   * сжатые 16-битные сэмплы до 714 КБ) — 5,86 МБ при настоящих 4,63, и с экраном Tang на плате
+   * не влезал (03.11.2026). */
   s->channels = exact ? max_channel + 1 : 64;
   const uint32_t track_blocks = patterns * (uint32_t)s->channels;
-  const uint32_t other = rows * (uint32_t)s->channels * 8u + track_blocks * (4u + BLOCK_OVERHEAD) +
-                         ((flags & 4) ? instruments : samples) * INSTRUMENT_BYTES +
-                         samples * SAMPLE_BYTES +
-                         patterns * (16u + 4u * (uint32_t)s->channels + BLOCK_OVERHEAD) + s->kept;
+  const uint32_t tracks = rows * (uint32_t)s->channels * 8u + track_blocks * (4u + BLOCK_OVERHEAD);
+  const uint32_t base = ((flags & 4) ? instruments : samples) * INSTRUMENT_BYTES +
+                        samples * SAMPLE_BYTES +
+                        patterns * (16u + 4u * (uint32_t)s->channels + BLOCK_OVERHEAD) + s->kept;
   for (int level = 0; level < IT_LEVELS; ++level) {
-    const uint32_t loading = peak[level] + LOAD_BASE;
-    s->memory[level] = sample_memory[level] + other + (loading > PLAYER_BYTES ? loading : PLAYER_BYTES);
+    const uint32_t loading = peak[level] + base + LOAD_BASE;
+    const uint32_t loaded = sample_memory[level] + tracks + base + PLAYER_BYTES;
+    s->memory[level] = loading > loaded ? loading : loaded;
   }
   return 0;
 }

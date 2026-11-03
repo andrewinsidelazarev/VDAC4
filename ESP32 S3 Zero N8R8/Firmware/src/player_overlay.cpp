@@ -7,14 +7,6 @@ namespace zifi {
 
 namespace {
 
-void* viewAllocate(void* context, size_t bytes) {
-  return static_cast<PlayerOverlay::Port*>(context)->allocate(bytes);
-}
-
-void viewRelease(void* context, void* pointer) {
-  static_cast<PlayerOverlay::Port*>(context)->release(pointer);
-}
-
 // Строки снимка — с нулём в конце, числа — в своих пределах: снимок пишет приложение.
 void terminate(char* text, size_t size) { text[size - 1] = 0; }
 
@@ -40,18 +32,35 @@ void sanitize(zm_ui_model_t& m) {
 
 }  // namespace
 
+// Отрисовке — хвост общего куска (kMemoryBytes), один раз; вернётся он вместе с куском.
+void* PlayerOverlay::viewAllocate(void* context, size_t bytes) {
+  PlayerOverlay& overlay = *static_cast<PlayerOverlay*>(context);
+  if (overlay.viewSpare_ == nullptr || bytes > player_view::kMemoryBytes) return nullptr;
+  void* memory = overlay.viewSpare_;
+  overlay.viewSpare_ = nullptr;
+  return memory;
+}
+
+void PlayerOverlay::viewRelease(void* context, void* pointer) {
+  PlayerOverlay& overlay = *static_cast<PlayerOverlay*>(context);
+  if (overlay.block_ != nullptr && pointer == overlay.block_ + kCanvasBytes + kCoverBytes) {
+    overlay.viewSpare_ = static_cast<uint8_t*>(pointer);
+  }
+}
+
 bool PlayerOverlay::ensureMemory() {
-  const size_t canvasBytes = static_cast<size_t>(kStride) * 2U * kHeight * sizeof(uint16_t);
-  const size_t coverBytes =
-      static_cast<size_t>(player_view::kCoverSide) * player_view::kCoverSide * sizeof(uint16_t);
-  if (canvas_ == nullptr) canvas_ = static_cast<uint16_t*>(port_.allocate(canvasBytes));
-  if (canvas_ != nullptr && cover_ == nullptr) {
-    cover_ = static_cast<uint16_t*>(port_.allocate(coverBytes));
+  if (block_ == nullptr) {
+    block_ = static_cast<uint8_t*>(port_.allocate(kMemoryBytes));
+    if (block_ != nullptr) {
+      canvas_ = reinterpret_cast<uint16_t*>(block_);
+      cover_ = reinterpret_cast<uint16_t*>(block_ + kCanvasBytes);
+      viewSpare_ = block_ + kCanvasBytes + kCoverBytes;
+    }
   }
-  if (canvas_ != nullptr && cover_ != nullptr && !viewReady_) {
-    viewReady_ = player_view::begin(viewAllocate, viewRelease, &port_);
+  if (block_ != nullptr && !viewReady_) {
+    viewReady_ = player_view::begin(viewAllocate, viewRelease, this);
   }
-  if (canvas_ == nullptr || cover_ == nullptr || !viewReady_) {
+  if (block_ == nullptr || !viewReady_) {
     ++stats_.noMemory;
     freeMemory();
     return false;
@@ -62,8 +71,9 @@ bool PlayerOverlay::ensureMemory() {
 void PlayerOverlay::freeMemory() {
   if (viewReady_) player_view::end();
   viewReady_ = false;
-  if (cover_ != nullptr) port_.release(cover_);
-  if (canvas_ != nullptr) port_.release(canvas_);
+  if (block_ != nullptr) port_.release(block_);
+  block_ = nullptr;
+  viewSpare_ = nullptr;
   cover_ = nullptr;
   canvas_ = nullptr;
   coverSerial_ = 0;

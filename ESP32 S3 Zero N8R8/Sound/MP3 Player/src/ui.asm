@@ -1653,74 +1653,15 @@ Ui_InfoEnd:
 ; HDMI Tang»): [версия 1][флаги: 1 — окно открыто, 2 — плагин уходит в WC][окно поверх: 0,
 ; 1 — справка, 2 — подробности][номер LE16][из LE16][отдано ESP, байт LE32][имя файла, 0]
 ; [строка состояния, 0]. Номер — «Track N of M» (0 — вызван не на файле панели).
+; С плагина 1.23 за строками — подготовка файла (PLAYER 1.31; прежний её не читает):
+; [1 — плагин готовит файл: модуль декодера, банк MIDI, набор волн][отдано LE32][из LE32] —
+; ход той передачи, что идёт (полоса загрузки окна: UiLoadSent, UiLoadTotal).
 ; Выход: HL — тело, BC — длина.
 UI_BLOCK_VERSION equ 1
 UI_F_OPEN       equ 1
 UI_F_LEAVING    equ 2
 UI_BLOCK_TEXT   equ 63
-UI_BLOCK_SIZE   equ 11+2*(UI_BLOCK_TEXT+1)
-
-Ui_PackBlock:
-        ld de,UiBlock
-        ld a,UI_BLOCK_VERSION
-        ld (de),a
-        inc de
-        ld a,(UiBlockFlags)
-        ld (de),a
-        inc de
-        ld a,(UiDialog)
-        ld (de),a
-        inc de
-        ld hl,(Mp3Count)
-        ld a,h
-        or l
-        ld hl,0
-        ld bc,0
-        jr z,.track                      ; вызван не на файле панели: номера нет
-        ld hl,(TrackNo)
-        ld bc,(TrackCount)
-.track:
-        ex de,hl                         ; HL — куда, DE — номер
-        ld (hl),e
-        inc hl
-        ld (hl),d
-        inc hl
-        ld (hl),c
-        inc hl
-        ld (hl),b
-        inc hl
-        ex de,hl
-        ld hl,Mp3Sent
-        ld bc,4
-        ldir
-        ld hl,UiName
-        call .text
-        ld hl,(UiState)
-        call .text
-        ex de,hl
-        ld de,UiBlock
-        or a
-        sbc hl,de
-        ld b,h
-        ld c,l
-        ld hl,UiBlock
-        ret
-; Строка HL — по DE, не длиннее UI_BLOCK_TEXT знаков, с нулём; DE — за нулём.
-.text:
-        ld b,UI_BLOCK_TEXT
-.copy:
-        ld a,(hl)
-        or a
-        jr z,.end
-        ld (de),a
-        inc de
-        inc hl
-        djnz .copy
-.end:
-        xor a
-        ld (de),a
-        inc de
-        ret
+UI_BLOCK_SIZE   equ 11+2*(UI_BLOCK_TEXT+1)+9
 
 ; Показать запись состояния (после каждого AUDIO_STATUS). Строки окна — не
 ; чаще раза в 10 кадров (или сразу, если сменилось состояние), столбики и

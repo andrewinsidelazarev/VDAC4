@@ -135,4 +135,116 @@ Ui_Hide:
         ld (UiHidden),a
         ret
 
+; Тело AUDIO_STATUS (Ui_PackBlock; формат и постоянные UI_BLOCK_* — в ui.asm) и опрос
+; экрана во время подготовки файла (Mp3_Alive): здесь, во второй странице, — в первой
+; места нет (плагин 1.23); входы из страницы 0 — в esp_data.asm.
+Ui_PackBlock:
+        ld de,UiBlock
+        ld a,UI_BLOCK_VERSION
+        ld (de),a
+        inc de
+        ld a,(UiBlockFlags)
+        ld (de),a
+        inc de
+        ld a,(UiDialog)
+        ld (de),a
+        inc de
+        ld hl,(Mp3Count)
+        ld a,h
+        or l
+        ld hl,0
+        ld bc,0
+        jr z,.track                      ; вызван не на файле панели: номера нет
+        ld hl,(TrackNo)
+        ld bc,(TrackCount)
+.track:
+        ex de,hl                         ; HL — куда, DE — номер
+        ld (hl),e
+        inc hl
+        ld (hl),d
+        inc hl
+        ld (hl),c
+        inc hl
+        ld (hl),b
+        inc hl
+        ex de,hl
+        ld hl,Mp3Sent
+        ld bc,4
+        ldir
+        ld hl,UiName
+        call .text
+        ld hl,(UiState)
+        call .text
+        ld a,(EspPreparing)
+        ld (de),a
+        inc de
+        ld hl,(UiLoadSent)
+        ld bc,4
+        ldir
+        ld hl,(UiLoadTotal)
+        ld bc,4
+        ldir
+        ex de,hl
+        ld de,UiBlock
+        or a
+        sbc hl,de
+        ld b,h
+        ld c,l
+        ld hl,UiBlock
+        ret
+; Строка HL — по DE, не длиннее UI_BLOCK_TEXT знаков, с нулём; DE — за нулём.
+.text:
+        ld b,UI_BLOCK_TEXT
+.copy:
+        ld a,(hl)
+        or a
+        jr z,.end
+        ld (de),a
+        inc de
+        inc hl
+        djnz .copy
+.end:
+        xor a
+        ld (de),a
+        inc de
+        ret
+
+; Экран Tang, пока файл готовится и идёт в ESP (плагин 1.23): PLAYER уже запущен — не реже
+; раза в MP3_ALIVE_FRAMES кадров AUDIO_STATUS с телом. По нему PLAYER знает, что окно открыто, и
+; рисует строку состояния и ход передачи (модуль декодера, банк MIDI, файл целиком); экрана нет
+; UI_TANG_WAIT кадров — окно на Evo (Ui_Track). Запись состояния не меняется: файл ещё не играет.
+; Звать только между командами, не в ожидании другого ответа (Esp_WaitLong): ответ ESP на
+; AUDIO_STATUS пришёл бы после того, и Mp3_Wait его пропустил бы.
+Mp3_Alive:
+        ld a,(EspAppRunning)
+        or a
+        ret z
+        ld a,(WC_FRAMES)
+        ld hl,Mp3AliveFrame
+        sub (hl)
+        cp MP3_ALIVE_FRAMES
+        ret c
+        ld a,(WC_FRAMES)
+        ld (hl),a
+        call Ui_PackBlock
+        ld a,CMD_AUDIO_STATUS
+        call Proto_Send
+        jr c,.quiet
+        ld a,RESP_AUDIO_STATUS
+        ld de,MP3_WAIT
+        call Mp3_Wait
+        jr c,.quiet
+        ld hl,(ProtoRxLen)
+        ld de,ST_SCREEN+1
+        or a
+        sbc hl,de
+        ret c                            ; прежний PLAYER: байта экрана нет
+        ld a,(ProtoBuf+ST_SCREEN)
+        ld (Mp3Status+ST_SCREEN),a
+        jp Ui_Track
+.quiet:
+        xor a
+        ld (ProtoErr),a                  ; молчание тут — не ошибка: ответит следующая команда
+        ret
+
 UiTangQuery:    db #04,#00,1            ; VERSION, одно слово

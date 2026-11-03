@@ -35,6 +35,13 @@ class PlayerOverlay {
   static constexpr uint32_t kRetryMs = 1000;              // не вышло показать — снова не раньше
   static constexpr uint32_t kReleaseHoldMs = 5000;        // память отдана приложению — не просить
   static constexpr int kMaxDirty = 32;
+  // Вся память экрана — один кусок: холст, обложка, память отрисовки. Не дали — не занято ничего,
+  // даже на миг (03.11.2026 три куска брались и отдавались раз в секунду, и банку MIDI в это время
+  // не хватало места).
+  static constexpr size_t kCanvasBytes = static_cast<size_t>(kStride) * 2U * kHeight * sizeof(uint16_t);
+  static constexpr size_t kCoverBytes =
+      static_cast<size_t>(player_view::kCoverSide) * player_view::kCoverSide * sizeof(uint16_t);
+  static constexpr size_t kMemoryBytes = kCanvasBytes + kCoverBytes + player_view::kMemoryBytes;
 
   enum class State : uint8_t { kOff, kFadeIn, kShown, kFadeOut };
 
@@ -96,8 +103,11 @@ class PlayerOverlay {
   uint8_t alpha() const { return alpha_; }
   const Stats& stats() const { return stats_; }
   const uint16_t* canvas() const { return canvas_; }
+  bool holdsMemory() const { return block_ != nullptr; }
 
  private:
+  static void* viewAllocate(void* context, size_t bytes);
+  static void viewRelease(void* context, void* pointer);
   bool ensureMemory();
   void freeMemory();
   bool fetchModel(uint32_t nowMs);
@@ -121,6 +131,8 @@ class PlayerOverlay {
   bool coverOk_ = false;
   bool coverChanged_ = false;
   bool viewReady_ = false;
+  uint8_t* block_ = nullptr;              // kMemoryBytes: холст, обложка, память отрисовки
+  uint8_t* viewSpare_ = nullptr;          // память отрисовки, ещё не отданная ей
   uint16_t* canvas_ = nullptr;
   uint16_t* cover_ = nullptr;
   zm_ui_model_t model_ = {};

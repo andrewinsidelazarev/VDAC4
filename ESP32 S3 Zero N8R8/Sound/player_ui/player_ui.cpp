@@ -111,9 +111,21 @@ void roundBox(int x, int y, int w, int h, int radius, Color c) {
   for (int yy=0; yy<h; ++yy) for (int xx=0; xx<w; ++xx)
     if (insideRound(xx,yy,w,h,radius)) put(x+xx,y+yy,rgb(c));
 }
+// Строка копии фона (kBaseBands); вне полос копии нет — туда кадры не рисуют.
+const uint16_t* baseRow(int y) {
+  size_t row = 0;
+  for (const Band& band : kBaseBands) {
+    if (y >= band.y0 && y < band.y1) return s.base + (row + static_cast<size_t>(y - band.y0)) * kWidth;
+    row += static_cast<size_t>(band.y1 - band.y0);
+  }
+  return nullptr;
+}
 void restore(int x, int y, int w, int h) {
-  for (int yy=y; yy<y+h; ++yy) for (int xx=x; xx<x+w; ++xx)
-    put(xx,yy,s.base[yy*kWidth+xx]);
+  for (int yy=y; yy<y+h; ++yy) {
+    const uint16_t* row = baseRow(yy);
+    if (!row) continue;
+    for (int xx=x; xx<x+w; ++xx) put(xx,yy,row[xx]);
+  }
 }
 const pui_font::Glyph& glyph(unsigned char ch, int font) {
   return pui_font::fonts[font].glyphs[(ch < 32 ? '?' : ch)-32];
@@ -365,7 +377,7 @@ void drawTime(const zm_ui_model_t& m,bool full) {
     resetChange();
     const int start=full?0:lo(progress,s.progress),finish=full?576:hi(progress,s.progress);
     for(int x=start;x<finish;++x) for(int y=306;y<309;++y)
-      put(32+x,y,x<progress?rgb(m.state==ZM_UI_LOADING?amber:teal):s.base[y*kWidth+32+x]);
+      put(32+x,y,x<progress?rgb(m.state==ZM_UI_LOADING?amber:teal):baseRow(y)[32+x]);
     s.progress=progress; flushChange();
   }
 }
@@ -488,7 +500,7 @@ void drawLevels(const zm_ui_model_t& m,uint32_t now,bool full,uint32_t dt) {
 bool begin(Allocate allocate,Release release,void* context) {
   end();
   if(!allocate || !release) return false;
-  s.base=static_cast<uint16_t*>(allocate(context,kWidth*kHeight*sizeof(uint16_t)));
+  s.base=static_cast<uint16_t*>(allocate(context,kMemoryBytes));
   if(!s.base) return false;
   s.release=release; s.context=context; s.begun=true;
   return true;
@@ -512,7 +524,12 @@ int render(const zm_ui_model_t& m,const uint16_t* cover,bool coverChanged,bool f
     else if(m.page==ZM_UI_PAGE_INFO) drawInfoStatic(m);
     else drawMain(m,cover);
     drawFooter(m);
-    memcpy(s.base,canvas,kWidth*kHeight*sizeof(uint16_t));
+    size_t row=0;
+    for(const Band& band:kBaseBands) {
+      const size_t rows=static_cast<size_t>(band.y1-band.y0);
+      memcpy(s.base+row*kWidth,canvas+static_cast<size_t>(band.y0)*kWidth,rows*kWidth*sizeof(uint16_t));
+      row+=rows;
+    }
     s.headHash=hash;
   }
   drawValues(m,repaint);

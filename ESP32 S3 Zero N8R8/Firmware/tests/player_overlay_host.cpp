@@ -86,11 +86,21 @@ class FakePort : public PlayerOverlay::Port {
     return ZM_OK;
   }
   void menuYield() override { ++yields; }
+  // Память PSRAM: budget — сколько её всего (−1 — сколько угодно); peak — больше всего занято
+  // разом, allocCalls и largestAsk — сколько раз и какой самый большой кусок просили.
+  long long budget = -1;
+  long long peak = 0;
+  int allocCalls = 0;
+  size_t largestAsk = 0;
   void* allocate(size_t bytes) override {
+    ++allocCalls;
+    if (bytes > largestAsk) largestAsk = bytes;
     if (failAlloc) return nullptr;
+    if (budget >= 0 && live + static_cast<long long>(bytes) > budget) return nullptr;
     size_t* block = static_cast<size_t*>(malloc(bytes + sizeof(size_t) * 2));
     block[0] = bytes;
     live += static_cast<long long>(bytes);
+    if (live > peak) peak = live;
     return block + 2;
   }
   void release(void* pointer) override {
@@ -318,7 +328,23 @@ int main() {
   put("nomem_configures", port.configures - configuresBefore);
   put("nomem_attempts", overlay.stats().noMemory);
   port.failAlloc = false;
+
+  // 9б. Памяти чуть меньше, чем нужно экрану: не занято ничего, даже на миг (03.11.2026 экран
+  // брал холст и обложку, не находил места отрисовке и отдавал — раз в секунду, и декодеру MIDI
+  // в эти мгновения не хватало)
+  port.budget = static_cast<long long>(PlayerOverlay::kMemoryBytes) - 1;
+  port.peak = port.live;
+  const int callsBefore = port.allocCalls;
+  tick(100);
+  put("short_state", static_cast<int>(overlay.state()));
+  put("short_peak", port.peak);
+  put("short_calls", port.allocCalls - callsBefore);
+  port.budget = -1;
   tick(60);
+  put("memory_bytes", static_cast<long long>(PlayerOverlay::kMemoryBytes));
+  put("largest_ask", static_cast<long long>(port.largestAsk));
+  put("held_live", port.live);
+  put("held", overlay.holdsMemory() ? 1 : 0);
 
   // 10. Запись в Tang отказала посреди кадра — экран выключается
   put("before_fail_state", static_cast<int>(overlay.state()));

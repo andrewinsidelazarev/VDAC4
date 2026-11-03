@@ -108,6 +108,17 @@ class PlayerOverlayTest(unittest.TestCase):
         self.assertGreaterEqual(self.v('nomem_attempts'), 2)
         self.assertLessEqual(self.v('nomem_attempts'), 4)
 
+    def test_short_memory_is_not_held_even_for_a_moment(self):
+        # Вся память экрана — одним куском: не дали — не занято ничего (PLAYER 1.31)
+        self.assertEqual(self.v('short_state'), OFF)
+        self.assertEqual(self.v('short_peak'), 0)
+        self.assertGreaterEqual(self.v('short_calls'), 2)
+        self.assertLessEqual(self.v('short_calls'), 4, 'попытка — раз в секунду, кусок один')
+        self.assertEqual(self.v('largest_ask'), self.v('memory_bytes'))
+        self.assertEqual(self.v('held'), 1)
+        self.assertEqual(self.v('held_live'), self.v('memory_bytes'))
+        self.assertLess(self.v('memory_bytes'), 760 * 1024, 'холст, обложка и фон полосами')
+
     def test_write_failure_switches_off(self):
         self.assertNotEqual(self.v('before_fail_state'), OFF)
         self.assertEqual(self.v('write_fail_state'), OFF)

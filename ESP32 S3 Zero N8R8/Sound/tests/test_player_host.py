@@ -812,6 +812,18 @@ class PlayerHostTest(unittest.TestCase):
         self.assertEqual(left, list(range(14, -1, -1)) + [-1], 'уходит плавно 15 → 0, затем выкл.')
         self.assertEqual(r['chain_left_on'], '0')
 
+    def test_online_cover_by_the_file_name(self) -> None:
+        # Меток нет — исполнитель и название из имени файла от плагина (PLAYER 1.33): номер дорожки,
+        # расширение и скобки в конце прочь. 03.11.2026 FLAC «Beatles - Nowhere Man (2009 Remaster)»
+        # без меток обложку в сети не искал («no artist and title in the tags»).
+        name = '01 - Robert Miles - Children (Dream Version).mp3'.encode('cp866')
+        block = bytes([1, 1, 0, 3, 0, 10, 0]) + bytes(4) + name + b'\0' + b'\0'
+        r = self.ui_run(b'', block=block)
+        self.assertEqual(r['cover_searches'], '1')
+        self.assertEqual(r['cover_search_url'],
+                         'https://api.deezer.com/search?limit=5&q=Robert%20Miles%20Children')
+        self.assertEqual(r['cover_pictures'], '1', 'исполнитель тот же — обложка взята')
+
     def test_screen_model_and_online_cover(self) -> None:
         # Экран оверлеем Tang (PLAYER 1.21): что прислал плагин в теле AUDIO_STATUS, метки,
         # спектр и формат — в снимке; обложки нет ни в метке, ни в папке — из сети, с флагом 64.
@@ -823,6 +835,10 @@ class PlayerHostTest(unittest.TestCase):
                          ('1', '2', '3', '10'))
         self.assertEqual(r['ui_sent_kb'], str(123456 // 1024))
         self.assertEqual((r['ui_file'], r['ui_status']), ('CHILDREN.MP3', 'Buffering'))
+        # Плагин 1.23 готовит файл (PLAYER 1.31): экран — загрузка с ходом передачи и строкой плагина
+        self.assertEqual((r['prep_visible'], r['prep_state'], r['prep_percent']), ('1', '1', '50'))
+        self.assertEqual((r['prep_file'], r['prep_status']), ('SONG.MID', 'Sending to the ESP: MIDI.SF2'))
+        self.assertEqual(r['prep_after_state'], '0', 'без подготовки — снова своё состояние')
         self.assertEqual(r['tag_cover_state'], '2', 'в метке картинки нет')
         self.assertEqual((r['ui_view'], r['ui_count']), ('1', '64'), 'спектр: 64 полосы')
         self.assertIn(r['ui_state'], ('3', '5'), 'играет или доигрывает')
@@ -888,8 +904,9 @@ class PlayerHostTest(unittest.TestCase):
         # flash в начале трека (оба ядра стоят) лишь задерживает старт.
         self.assertGreaterEqual(int(r['first_write']), RATE // 5)
         # Файл модуля живёт с декодером (отсчёты XM распакованы в нём на месте):
-        # на одну память больше, чем у MP3; её освобождает ядро при выгрузке.
-        self.assertEqual(r['allocations_after_stop'], '7')
+        # на одну память больше, чем у MP3; её освобождает ядро при выгрузке. С 1.32
+        # кольца потока у файла целиком нет (ring_release) — на одну меньше.
+        self.assertEqual(r['allocations_after_stop'], '6')
 
     def test_spectrum(self) -> None:
         for hz, band in ((1000, None), (5000, None)):
@@ -997,6 +1014,28 @@ class PlayerHostTest(unittest.TestCase):
         self.assertLess(int(r['refused_at']), len(song) // 2,
                         'отвергнутый файл ESP дальше не берёт (ответ 2): плагин не шлёт впустую')
 
+    def test_big_it_plays_beside_the_tang_screen(self) -> None:
+        # 03.11.2026 на плате: B_sunset.it (3,78 МБ, 34 канала, сжатые 16-битные сэмплы) — план
+        # TRACKER моно 8 бит 5,86 МБ, а libxmp берёт 4,63: пик распаковки сэмпла складывался с
+        # узорами, которые грузятся после сэмплов. С экраном Tang (0,7 МБ) не влезал на ~15 КБ;
+        # PLAYER 1.36 отдавал экран (на Evo — текстовое окно), пользователь: при Tang экран не
+        # уходит никогда (1.37). PSRAM стенда — как у платы 0.1.113 без приложения (7 423 036)
+        # минус образы PLAYER.ELF (192 520) и TRACKER.ELF (438 540): их стенд не считает.
+        song = pathlib.Path(r'E:\zx\Music\IT\B\B_sunset.it')
+        if not song.is_file():
+            self.skipTest(f'нет {song}')
+        r = self.run_host('module', path=song, ext='IT', seconds=1, psram=7_423_036 - 192_520 - 438_540,
+                          ui=1, **{'ui-open': 1})
+        self.assertEqual(r['screen_before_file'], '3', 'экран показан до файла')
+        self.assertEqual(r['screen_loaded'], '1', 'экран держит память и после загрузки')
+        self.assertNotIn('gave way', self.log)
+        self.assertNotIn('does not fit', self.log)
+        self.assertEqual(r['loaded_state'], str(STATE_PLAYING))
+        self.assertGreater(int(r['pcm_peak_permille']), 20)
+        line = next(l for l in self.log.splitlines() if 'streamed:' in l)
+        plan = int(line.split('libxmp ')[1].split(' bytes')[0])
+        self.assertLessEqual(int(r['xmp_peak']), plan, 'libxmp не больше оценки')
+
     def test_stop_while_it_streams(self) -> None:
         song = song_it(400_000)
         r = self.run_host('module', song, ext='IT', **{'stop-at': len(song) // 2})
@@ -1066,6 +1105,25 @@ class PlayerHostTest(unittest.TestCase):
         self.assertGreaterEqual(frames, int(3.5 * RATE))
         self.assertLess(frames, int((4 + 3) * RATE), 'хвост отпускания не дольше 3 с')
         self.assertEqual(r['bank_releases'], '0')
+
+    def test_midi_bank_and_tang_screen_share_board_psram(self) -> None:
+        # 03.11.2026 на плате: банк TimGM6mb (5,8 МБ) и экран Tang (0,7 МБ) — MIDI не открывался
+        # («bank/song not loaded»). PSRAM стенда — как у платы 0.1.111: при банке без приложения
+        # свободно 1 399 008 байт, минус код PLAYER.ELF и MIDI.ELF. Экран показан до файла
+        # (плагин 1.23) и уступает память декодеру (1.31), кольцо потока файлу целиком не нужно
+        # (1.32): песня играет. Банк в 4 МБ (Creative 4M GM, если есть) — экран остаётся.
+        song = pathlib.Path(r'E:\zx\Music\MIDI\miles-children.mid')
+        if not BANK.is_file() or not song.is_file():
+            self.skipTest(f'нет {BANK} или {song}')
+        free = 1_399_008 + BANK.stat().st_size - 75_340 - 37_484
+        r = self.run_host('module', path=song, midi=1, bank=BANK, psram=free, ui=1, **{'ui-open': 1})
+        self.assertEqual(r['screen_before_file'], '3', 'экран показан до файла')
+        self.assertNotIn('gave way', self.log, '1.37: экран Tang память не уступает')
+        small = pathlib.Path(r'E:\zx\esp\soundfonts\creative4m\4gmgsmt.sf2')
+        if small.is_file():
+            r = self.run_host('module', path=song, midi=1, bank=small, psram=free, ui=1, **{'ui-open': 1})
+            self.assertEqual((r['open'], r['loaded_state']), ('1', str(STATE_PLAYING)))
+            self.assertEqual(r['screen_loaded'], '1', 'с банком в 4 МБ экран остаётся')
 
     def test_midi_seek(self) -> None:
         if not BANK.is_file():
@@ -1948,6 +2006,46 @@ class RadioTest(unittest.TestCase):
         r = self.radio(radio_list(STATIONS), **{'net-title2': 'Next Band - Next Song',
                                                  'net-metaint': 8000, 'seconds': 3})
         self.assertEqual(r['last_artist'], 'Next Band - Next Song')
+
+    def cover_keys(self) -> dict:
+        # Экран Tang (--ui 1) и подмена Deezer: песня «Robert Miles - Children» обложку находит
+        folder = pathlib.Path(self.temp.name)
+        (folder / 'deezer.json').write_text(PlayerHostTest.DEEZER, encoding='utf-8')
+        (folder / 'net.jpg').write_bytes(PlayerHostTest.NET_JPEG)
+        return {'ui': 1, 'cover-json': folder / 'deezer.json', 'cover-jpeg': folder / 'net.jpg',
+                'net-title': 'Robert Miles - Children'}
+
+    def test_song_without_an_artist_clears_the_cover(self) -> None:
+        # PLAYER 1.34: песня кончилась, следующая — без исполнителя (позывной, реклама): обложка
+        # прежней прочь сразу. Прежде она висела до песни с исполнителем.
+        r = self.radio(radio_list(STATIONS), **self.cover_keys(),
+                       **{'net-title2': 'Station ID', 'net-kbps': 128, 'net-metaint': 48000,
+                          'speed': 1, 'seconds': 12})  # в реальном темпе: поиск — раз в 0,5 с
+        self.assertNotEqual(r['first_cover'], '0', 'первая песня — обложка из сети')
+        self.assertEqual(r['last_artist'], 'Station ID')
+        self.assertEqual(r['last_cover'], '0', 'позывной — обложки нет')
+
+    def test_station_change_clears_the_cover_and_searches_again(self) -> None:
+        # PLAYER 1.34: другая станция — обложка прежней прочь сразу, до первой песни новой;
+        # та же песня на новой станции ищется снова.
+        r = self.radio(radio_list(STATIONS), seek=-1, **self.cover_keys())
+        self.assertNotEqual(r['first_cover'], '0')
+        # Новая станция шлёт ту же песню: обложка ищется заново (1.33 — нет: та же песня,
+        # поиска нет, номер прежний); найдена — номер другой
+        self.assertNotEqual(r['second_cover'], '0', 'песня новой станции — обложка снова')
+        self.assertNotEqual(r['second_cover'], r['first_cover'], 'обложка найдена заново')
+        self.assertIn('Station 3 of 3', r['second_album'])
+
+    def test_cover_search_without_internal_memory(self) -> None:
+        # При радио внутренней памяти ESP на стек задачи поиска (6 КБ) нет (на плате ~2 КБ). PLAYER
+        # 1.34 брал стек в PSRAM (прошивка 0.1.112, ZM_TASK_STACK_PSRAM) — ESP упала при радио
+        # (порча кучи, 03.11.2026); 1.35 — откат: поиск не запускается, радио играет дальше.
+        r = self.radio(radio_list(STATIONS), **self.cover_keys(),
+                       **{'net-kbps': 128, 'speed': 1, 'seconds': 4, 'internal': 46000})
+        self.assertIn('player: online cover: no memory for the search task', self.log)
+        self.assertNotIn('-> PSRAM', self.log)
+        self.assertEqual(r['first_cover'], '0')
+        self.assertGreaterEqual(int(r['pcm_frames']), 3 * RATE, 'радио играет')
 
     def test_lost_connection_reconnects(self) -> None:
         r = self.radio(radio_list(STATIONS), **{'net-cut': 60000, 'seconds': 8})

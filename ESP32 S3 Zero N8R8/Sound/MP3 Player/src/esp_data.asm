@@ -54,6 +54,13 @@ Ui_Show:
         call Page1_Call
         dw P1.Ui_Show
 
+Ui_PackBlock:
+        call Page1_Call
+        dw P1.Ui_PackBlock
+Mp3_Alive:
+        call Page1_Call
+        dw P1.Mp3_Alive
+
 ; Полоса загрузки — снова у файла плеера (Mod_Play).
 Esp_LoadDone:
         xor a
@@ -65,6 +72,10 @@ Esp_LoadDone:
         ret
 
 EspAppRunning:  db 0                    ; приложение PLAYER.ELF запущено
+EspPreparing:   db 0                    ; 1 — файл готовится (модули, ресурсы): телу AUDIO_STATUS
+EspStored:      db 0                    ; Esp_Deliver положил модуль в кэш ESP
+EspEarly:       db 0                    ; PLAYER запущен до модуля декодера (Esp_Prepare)
+EspDecoder:     dw 0                    ; модуль декодера файла (Esp_Decoder)
 EspNeedsApp:    db 0                    ; файлу нужно приложение (AAC, Ogg): без него — ошибка
 EspReopened:    db 0                    ; свой файл найден заново (перемотка, обложка)
 EspFlags:       db 0                    ; флаги MOD_QUERY: 1 — ресурс

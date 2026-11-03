@@ -25,6 +25,7 @@
 #include "zifi/link_spi3.hpp"
 #include "zifi/tang_flash.hpp"
 #include "zifi/tang_menu.hpp"
+#include "zifi/tang_overlay.hpp"
 #include "zifi/tang_sd.hpp"
 
 namespace zifi {
@@ -566,6 +567,13 @@ void taskMain(void*) {
   }
   // Меню настроек Tang в оверлее: ядро 1.10 и новее
   tang_menu::begin();
+  // ESP перезапустилась (сбой, обновление), а Tang — нет: оверлеи прежнего приложения (экран
+  // плеера, экран ядер) остались включены, и выключить их некому — приложений после запуска ESP
+  // нет (03.11.2026: список станций висел поверх WC после сбоя ESP). 0.1.113.
+  if (tang_overlay::supported()) {
+    tang_overlay::hide(0);
+    tang_overlay::hide(1);
+  }
   // Multiboot: ядро TS-Config уходит в ядро FT812 по обмену Evo с FT812 — если слот записан
   armBoot();
 

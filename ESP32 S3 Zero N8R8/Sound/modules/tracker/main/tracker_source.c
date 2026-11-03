@@ -737,7 +737,7 @@ int main(int argc, char* argv[]) {
   table.abi_major = ZM_SOURCE_ABI_MAJOR;
   table.abi_minor = ZM_SOURCE_ABI_MINOR;
   table.name = "tracker";
-  table.version = "1.8";
+  table.version = "1.9";
   table.extensions = "MOD MO XM S3M IT MED MTM 669 STM ULT OKT FAR PTM DBM MDL AMF UMX";
   table.input = ZM_INPUT_WHOLE;
   table.keeps_file = 1;

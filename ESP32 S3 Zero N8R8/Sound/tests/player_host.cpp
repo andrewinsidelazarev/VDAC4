@@ -202,6 +202,10 @@ void* coreAlloc(size_t size, uint32_t caps) {
     allocations.insert(pointer);
     if (psram) {
       psramBlocks[pointer] = size;
+      // PSRAM_TRACE: крупные куски PSRAM и сколько занято (без ресурсов) — из чего пик
+      if (size >= 16384 && getenv("PSRAM_TRACE") != nullptr) {
+        fprintf(stderr, "psram +%zu = %zu\n", size, psramUsed);
+      }
     }
     if (internal && internalBudget != 0) {
       internalBlocks[pointer] = size;
@@ -256,6 +260,9 @@ void coreFree(void* pointer) {
     auto block = psramBlocks.find(pointer);
     if (block != psramBlocks.end()) {
       psramUsed -= block->second;
+      if (block->second >= 16384 && getenv("PSRAM_TRACE") != nullptr) {
+        fprintf(stderr, "psram -%zu = %zu\n", block->second, psramUsed);
+      }
       psramBlocks.erase(block);
     }
     auto inner = internalBlocks.find(pointer);
@@ -287,20 +294,29 @@ int coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t priority, in
   if (noWorker && core == 1 && priority == 5) {
     return ZM_ERROR;                   // помощник PLAYER на ядре 1
   }
+  // ZM_TASK_STACK_PSRAM (прошивка 0.1.112): внутренней нет — стек в PSRAM
+  const bool psramAllowed = (stack & ZM_TASK_STACK_PSRAM) != 0;
+  stack &= ~ZM_TASK_STACK_PSRAM;
   const size_t bytes = (stack < 2048 ? 2048 : stack) + kTaskOverhead;
+  bool inPsram = false;
   {
     std::lock_guard<std::mutex> lock(allocLock);
     if (!internalTakeLocked(bytes)) {
-      fprintf(stderr, "internal: task stack %u not allocated (used %zu of %zu, block %zu)\n",
-              static_cast<unsigned>(stack), internalUsed, internalBudget, internalBlock);
-      return ZM_NO_MEMORY;             // как coreTaskStart прошивки: xTaskCreate не создал
+      if (!psramAllowed || !psramTakeLocked(bytes)) {
+        fprintf(stderr, "internal: task stack %u not allocated (used %zu of %zu, block %zu)\n",
+                static_cast<unsigned>(stack), internalUsed, internalBudget, internalBlock);
+        return ZM_NO_MEMORY;           // как coreTaskStart прошивки: xTaskCreate не создал
+      }
+      inPsram = true;
+      fprintf(stderr, "internal: task stack %u -> PSRAM\n", static_cast<unsigned>(stack));
     }
   }
   ++tasks;
-  std::thread([fn, arg, bytes] {
+  std::thread([fn, arg, bytes, inPsram] {
     fn(arg);
     std::lock_guard<std::mutex> lock(allocLock);
-    if (internalBudget != 0) internalUsed -= bytes;
+    if (inPsram) psramUsed -= bytes;
+    else if (internalBudget != 0) internalUsed -= bytes;
     --tasks;
   }).detach();
   return ZM_OK;
@@ -891,17 +907,21 @@ size_t residentResources() {
   return bytes;
 }
 
+// NULL — все ресурсы (как прошивка 0.1.112+).
 void coreResourceRelease(const char* name) {
   std::lock_guard<std::mutex> lock(allocLock);
-  if (name != nullptr && strcmp(name, "MIDI.SF2") == 0 && !bank.empty()) {
+  if ((name == nullptr || strcmp(name, "MIDI.SF2") == 0) && !bank.empty()) {
     bank.clear();
     ++bankReleases;
   }
-  if (name != nullptr && strcmp(name, "YRW801.ROM") == 0 && !rom.empty()) {
+  if ((name == nullptr || strcmp(name, "YRW801.ROM") == 0) && !rom.empty()) {
     rom.clear();
     ++romReleases;
   }
-  if (name != nullptr && resources.count(name) != 0) {
+  if (name == nullptr) {
+    resourceReleases += static_cast<int>(resources.size());
+    resources.clear();
+  } else if (resources.count(name) != 0) {
     resources.erase(name);
     ++resourceReleases;
   }
@@ -1004,8 +1024,14 @@ struct Status {
   uint8_t screen;                     // флаги экрана Tang (1.26, SCREEN_F_*)
 };
 
+// --ui-open 1: каждый AUDIO_STATUS — с телом плагина «окно открыто»: экран Tang (--ui 1) показан
+// и держит свою память, пока её не попросит декодер (PLAYER 1.31)
+bool uiOpen = false;
+
 Status status() {
-  const std::vector<uint8_t> r = command(kStatus);
+  static const std::vector<uint8_t> openBody = {1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0,
+                                                'S', 'O', 'N', 'G', 0, 0};
+  const std::vector<uint8_t> r = uiOpen ? command(kStatus, openBody) : command(kStatus);
   if (r.size() != 33) {
     fail("status of %u bytes", static_cast<unsigned>(r.size()));
   }
@@ -1241,6 +1267,7 @@ int main(int argc, char** argv) {
       else if (key == "--view-sync") viewSync = atoi(value);
       else if (key == "--no-net") noNet = atoi(value);
       else if (key == "--ui") uiOn = atoi(value);
+      else if (key == "--ui-open") uiOpen = atoi(value) != 0;
       else if (key == "--ui-block") uiFirst = readFile(value);
       else if (key == "--cover-json") {
         const std::vector<uint8_t> json = readFile(value);
@@ -1456,6 +1483,22 @@ int main(int argc, char** argv) {
     print("ui_tracks", m.tracks);
     print("ui_sent_kb", m.sent_kb);
     printf("ui_file=%s\nui_status=%s\n", m.file, m.status);
+    // Плагин 1.23 готовит файл (модуль декодера, банк MIDI): за строками тела — подготовка и ход
+    // передачи; экран — загрузка с этой полосой
+    {
+      std::vector<uint8_t> prep = uiBlock(1, 0, "SONG.MID", "Sending to the ESP: MIDI.SF2");
+      const uint8_t tail[9] = {1, 0xB8, 0x0B, 0, 0, 0x70, 0x17, 0, 0};   // 3000 из 6000
+      prep.insert(prep.end(), tail, tail + 9);
+      command(kStatus, prep);
+      model();
+      print("prep_visible", m.visible);
+      print("prep_state", m.state);
+      print("prep_percent", m.load_percent);
+      printf("prep_file=%s\nprep_status=%s\n", m.file, m.status);
+      command(kStatus, uiFirst.empty() ? uiBlock(1, 2, "CHILDREN.MP3", "Buffering") : uiFirst);
+      model();
+      print("prep_after_state", m.state);
+    }
     // Метка ID3 в начале файла: её длина — из заголовка (синхробезопасные 7 бит)
     size_t tag = 0;
     if (file.size() >= 10 && memcmp(file.data(), "ID3", 3) == 0) {
@@ -1863,6 +1906,13 @@ int main(int argc, char** argv) {
     if (r[0] != 1) {
       fail("open refused");
     }
+    if (uiOpen) {
+      // Плагин 1.23: экран показан ещё до файла (банк, модули) — дать ему появиться и взять память
+      for (int wait = 0; wait < 100 && (status().screen & 1) == 0; ++wait) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+      print("screen_before_file", status().screen);
+    }
     wholeFeed = true;
     if (stopAt != 0 && stopAt < file.size()) {
       feed(file, 0, stopAt, block);
@@ -1886,6 +1936,7 @@ int main(int argc, char** argv) {
       s = status();
     }
     printStatus("loaded_", s);
+    print("screen_loaded", screen_holds());
     std::this_thread::sleep_for(std::chrono::milliseconds(3));
     const std::vector<uint8_t> view = command(kView);
     print("view_kind", view[0]);
@@ -2041,11 +2092,22 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
     };
+    // Обложка экрана Tang (--ui 1, обложка из сети — подмена Deezer): номер, 0 — нет. ms — ждать,
+    // пока появится (у песни с исполнителем поиск идёт сразу).
+    auto uiCover = [](int ms) {
+      uint16_t serial = cover_ui_serial();
+      for (int waited = 0; serial == 0 && waited < ms; waited += 5) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        serial = cover_ui_serial();
+      }
+      return static_cast<int>(serial);
+    };
     if (s.state == 1 && (s.flags & 2)) {        // пропуск файла (не плейлист) — сразу конец
       waitSound(44100, waitMs);
       s = status();
       print("first_tags_flag", (s.flags >> 5) & 1);
       printTags("first_");
+      if (uiOn) print("first_cover", uiCover(3000));
       print("first_flag_after_tags", (status().flags >> 5) & 1);
       printStatus("first_", status());
       const std::vector<uint8_t> info = command(kInfo);
@@ -2056,6 +2118,11 @@ int main(int argc, char** argv) {
         print("seek", k[0]);
         print("seek_station", le16(&k[1]));
         printTags("switch_");
+        if (uiOn) {
+          // Станцию сменили: обложка прежней — прочь сразу (PLAYER 1.34), шаг поиска — 500 мс
+          std::this_thread::sleep_for(std::chrono::milliseconds(700));
+          print("switch_cover", cover_ui_serial());
+        }
         // Список станций вместо столбиков: строки без кодов цвета (до #0D).
         const std::vector<uint8_t> list = command(kView);
         print("list_kind", list.empty() ? -1 : list[0]);
@@ -2085,6 +2152,7 @@ int main(int argc, char** argv) {
         }
         printTags("second_");
         printStatus("second_", status());
+        if (uiOn) print("second_cover", uiCover(3000));
       }
       if (pauseAt > 0) {
         command(kPause, {1});
@@ -2097,6 +2165,10 @@ int main(int argc, char** argv) {
       waitSound(static_cast<uint64_t>(seconds * 44100), waitMs + static_cast<int>(seconds * 4000));
       printTags("last_");
       printStatus("last_", status());          // до стопа: стоп обнуляет счётчики
+      if (uiOn) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        print("last_cover", cover_ui_serial());
+      }
     }
     command(kClose, {0});
     printStatus("", status());

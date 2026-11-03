@@ -92,6 +92,11 @@ PlayerOverlay* screen = nullptr;
 uint32_t lastTick = 0;
 volatile uint8_t flags = 0;
 bool tangSeen = false;                   // для журнала: Tang был на прошлом шаге
+// Уступка памяти (screen_yield): просьба к задаче экрана и то, что экран после неё не
+// показывается (1 — до любого нового файла, 2 — ради MIDI: до файла не MIDI).
+volatile uint8_t yieldAsk = 0;
+volatile uint8_t suspended = 0;
+enum : uint8_t { kSuspendFile = 1, kSuspendMidi = 2 };
 
 // В журнал ядра — как прежний экран прошивки (player_overlay_task.cpp): появление, уход, сбои
 void report(PlayerOverlay::State from, PlayerOverlay::State to) {
@@ -130,12 +135,28 @@ extern "C" int screen_begin(const zm_core_t* c) {
   lastTick = core->millis() - PlayerOverlay::kTickMs;
   flags = 0;
   tangSeen = false;
+  yieldAsk = 0;
+  suspended = 0;
   return ZM_OK;
 }
 
 extern "C" uint32_t screen_tick(uint32_t now) {
   if (screen == nullptr) {
     return 200;
+  }
+  if (yieldAsk != 0) {
+    // Память нужна декодеру сейчас: прочь сразу, без ухода по ступеням прозрачности
+    const PlayerOverlay::State before = screen->state();
+    const bool held = screen->holdsMemory();
+    screen->appGone();
+    if (before != PlayerOverlay::State::kOff) report(before, PlayerOverlay::State::kOff);
+    if (held) core->log("player: screen memory, %u KB, given to the decoder",
+                        (unsigned)(PlayerOverlay::kMemoryBytes / 1024));
+    yieldAsk = 0;
+  }
+  if (suspended != 0) {
+    flags = tangReady() ? SCREEN_F_TANG : 0;   // плагин рисует своё окно на Evo
+    return 100;
   }
   const uint32_t since = now - lastTick;
   if (since < PlayerOverlay::kTickMs) {
@@ -149,6 +170,15 @@ extern "C" uint32_t screen_tick(uint32_t now) {
   else if (screen->stats().writeFails != fails || screen->stats().noMemory != misses) {
     core->log("player: screen not shown: write fails %u, no memory %u",
               (unsigned)screen->stats().writeFails, (unsigned)screen->stats().noMemory);
+  }
+  // Экрану не хватило PSRAM (PLAYER 1.37): интерфейс — первым, ресурсы ESP (банк MIDI, ПЗУ OPL4,
+  // набор MWM) прочь все, на следующем шаге он возьмёт место. Плагин пришлёт нужный ресурс снова.
+  if (screen->stats().noMemory != misses && core->resource_release != nullptr) {
+    core->log("player: no room for the Tang screen, %u KB: all resources released",
+              (unsigned)(PlayerOverlay::kMemoryBytes / 1024));
+    core->resource_release(nullptr);
+    core->resource_release("MIDI.SF2");
+    core->resource_release("YRW801.ROM");
   }
   const bool tang = tangReady();
   if (tang != tangSeen) {
@@ -178,6 +208,33 @@ extern "C" void screen_end(void) {
   screen->~PlayerOverlay();
   screen = nullptr;
   flags = 0;
+}
+
+extern "C" uint32_t screen_bytes(void) { return static_cast<uint32_t>(PlayerOverlay::kMemoryBytes); }
+
+extern "C" int screen_holds(void) { return screen != nullptr && screen->holdsMemory() ? 1 : 0; }
+
+extern "C" int screen_yield(int midi, uint32_t wait_ms) {
+  if (screen == nullptr) {
+    return 0;
+  }
+  const int held = screen_holds();
+  suspended = midi ? kSuspendMidi : kSuspendFile;
+  yieldAsk = 1;
+  // Задача экрана шагает раз в 20 мс (показан) — 100 мс (уступил); память её — отдаёт она сама
+  const uint32_t started = core->millis();
+  while (yieldAsk != 0 && core->millis() - started < wait_ms) {
+    core->delay(5);
+  }
+  return held && yieldAsk == 0 ? 1 : 0;
+}
+
+extern "C" int screen_resume(int midi) {
+  if (suspended == kSuspendMidi && midi) {
+    return 0;
+  }
+  suspended = 0;
+  return screen != nullptr ? 1 : 0;
 }
 
 extern "C" uint8_t screen_flags(void) {

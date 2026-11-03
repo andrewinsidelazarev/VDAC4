@@ -28,9 +28,11 @@ constexpr uint32_t kPersonalityTs = 0x01;      // VERSION[31:24]: TS-Config (к�
 // образа и снимки во время игры (nes-vdac4/fpga/nes_link.sv). Мост проверяется и по метке SD_STAT.
 constexpr uint32_t kPersonalityNes = 0x04;
 constexpr uint32_t kMinNes = 0x0007;
-// Amiga 0.1+: the same fb_sdspi LINK registers, checked by SD_STAT below.
+// Ядра с личностью 05 и выше (Amiga 05, Mega Drive 06 и следующие, 03.11.2026): тот же мост fb_sdspi
+// по тем же адресам LINK, есть ли он — проверяется по метке SD_STAT (present ниже). Новому ядру с
+// мостом прошивка не нужна. 02 (FT812) и 03 (Next: своя карта у NextZXOS) моста не имеют.
 constexpr uint32_t kPersonalityAmiga = 0x05;
-constexpr uint32_t kMinAmiga = 0x0001;
+constexpr uint32_t kPersonalityLast = 0x7F;
 
 bool linkRead(void*, uint32_t address, uint32_t* words, size_t count) {
   return tang::read(address, words, count);
@@ -152,11 +154,11 @@ const char* mount() {
   const uint32_t version = tang::coreVersion();
   const bool ts = (version >> 24) == kPersonalityTs && (version & 0xFFFF) >= kMinCore;
   const bool nes = (version >> 24) == kPersonalityNes && (version & 0xFFFF) >= kMinNes;
-  const bool amiga = (version >> 24) == kPersonalityAmiga && (version & 0xFFFF) >= kMinAmiga;
-  if (!ts && !nes && !amiga) {
-    return "the Tang core has no SD bridge (TS-Config 1.30+, NES 0.7+ or Amiga 0.1+ needed)";
+  const bool other = (version >> 24) >= kPersonalityAmiga && (version >> 24) <= kPersonalityLast;
+  if (!ts && !nes && !other) {
+    return "the Tang core has no SD bridge (TS-Config 1.30+, NES 0.7+, Amiga, Mega Drive or newer needed)";
   }
-  if (nes || amiga) {
+  if (nes || other) {
     bool present = false;
     {
       tang::LinkGuard guard;
