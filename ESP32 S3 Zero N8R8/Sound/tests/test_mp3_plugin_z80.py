@@ -1159,7 +1159,7 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertEqual(data[63], 0, "и Enter, и F3")
         self.assertEqual(data[64:161], bytes(97), "старое поле 32 расширений у #11 пустое")
         self.assertEqual(data[161:165], b"\xFF" * 4, "размер файла не ограничен")
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.24")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.25")
         self.assertEqual((data[34], data[35]), (2, 0), "две страницы, запуск — страница 0")
         self.assertEqual(data[38], 1, "второй блок файла — в страницу 1")
         self.assertEqual(data[197], 4, "меню выбора просмотрщика, в F10 плеера нет")
@@ -1792,6 +1792,34 @@ class TangScreenTest(unittest.TestCase):
         self.assertIn(AUDIO_TAGS, h.audio.commands, 'метки — для окна')
         self.assertTrue(h.text(TITLE_ROW), 'окно нарисовано')
         self.assertGreater(first_window, 0)
+
+    def test_screen_wait_starts_with_the_player(self) -> None:
+        # Плагин 1.25: 5 с (250 кадров) до окна считаются с запуска PLAYER, а не с начала передачи
+        # модулей. 03.11.2026 на плате новый PLAYER.ELF шёл в ESP 2,3 с, экран Tang показался через
+        # 0,7 с после запуска; плагин 1.24 считал и передачу — окно на Evo мелькало при старте.
+        h = self.harness(tang_version=self.TANG, screen=SCREEN_F_TANG)
+        self.esp_card(h, PLAYER_ELF=b"\x7fELF" + bytes(3000), MP3_ELF=b"\x7fELF" + bytes(600))
+        audio = h.audio
+        polls = 0
+
+        def app(command: int, payload: bytes) -> bytes:
+            nonlocal polls
+            if command == MOD_COMMIT and audio.upload and audio.upload[0] == b"PLAYER.ELF":
+                # ESP пишет модуль во flash: почти 5 с (248 кадров) у Evo идут в ожидании ответа
+                value = (h.word(base.WC_FRAMES) + 248) & 0xFFFF
+                h.memory[base.WC_FRAMES] = value & 0xFF
+                h.memory[base.WC_FRAMES + 1] = value >> 8
+            if command == AUDIO_STATUS and audio.started:
+                polls += 1
+                if polls == 4:
+                    audio.screen = SCREEN_F_TANG | SCREEN_F_SHOWN    # экран — не сразу
+            return audio(command, payload)
+        h.app = app
+        h.esc_after = 150
+        h.start()
+        self.assertEqual(audio.stored.get(b"PLAYER.ELF")[:4], b"\x7fELF", 'PLAYER.ELF передан')
+        self.assertGreaterEqual(polls, 4, 'экран показался после запуска')
+        self.assert_no_window(h)
 
     def test_screen_appearing_later_removes_the_window(self) -> None:
         # Окно было (Tang вернулся позже): экран показан — окно закрыто, спрайт обложки снят.

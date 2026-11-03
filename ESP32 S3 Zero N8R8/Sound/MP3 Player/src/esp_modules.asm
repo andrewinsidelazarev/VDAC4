@@ -46,8 +46,8 @@ Esp_Prepare:
         ld (EspAppRunning),a
         ld (EspReopened),a
         ld (EspNeedsApp),a
-        ld (UiTangWait),a                ; окно — через UI_TANG_WAIT кадров с этого вызова
-        ld a,(WC_FRAMES)
+        ld (UiTangWait),a                ; окно — через UI_TANG_WAIT кадров (отсчёт — с запуска
+        ld a,(WC_FRAMES)                 ; PLAYER, Esp_StartApp)
         ld (UiTangFrame),a
         ld a,1
         ld (EspPreparing),a              ; экрану Tang: файл готовится (Ui_PackBlock)
@@ -761,6 +761,13 @@ Esp_StartApp:
         ret nz
         ld a,1
         ld (EspAppRunning),a
+        ; Экран Tang рисует PLAYER: UI_TANG_WAIT кадров до окна на Evo (Ui_Track) — с его запуска,
+        ; а не с начала передачи модулей. Плагин 1.24 считал и передачу: новый PLAYER.ELF шёл в ESP
+        ; 2,3 с, экран показался через 0,7 с после запуска — окно мелькало при старте (03.11.2026).
+        xor a
+        ld (UiTangWait),a
+        ld a,(WC_FRAMES)
+        ld (UiTangFrame),a
         ret
 .fail:
         xor a

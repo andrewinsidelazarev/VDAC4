@@ -207,6 +207,14 @@ TSFDEF void tsf_render_float_sends(tsf* f, float* buffer, float* sends, int samp
 // одного куска одновременно (события тем временем не применяются, у каждого ядра свои
 // buffer и sends). buffer заменяется, посылы прибавляются к sends (шаг samples).
 TSFDEF void tsf_render_float_sends_range(tsf* f, float* buffer, float* sends, int samples, int first, int last);
+// VDAC4 (MIDI.ELF 1.8): то же, и такты голосов (счётчик ccount ядра; на ПК — 0) с их отсчётами —
+// по вариантам цикла интерполяции: [0] — чётные места голосов (аппаратный цикл), [1] — нечётные
+// (цикл развёрнут на два). Замер на плате, какой быстрее; звук у них один. scratch — место
+// под кусок голосов (TSF_SCRATCH_FLOATS float, лучше во внутренней памяти): голоса копятся
+// там, а не в buffer и sends вызывающего (у MIDI.ELF — PSRAM); TSF_NULL — прямо в них.
+struct tsf_prof { unsigned long long cycles[2], samples[2]; };
+#define TSF_SCRATCH_FLOATS (5 * 64)
+TSFDEF void tsf_render_float_sends_range_prof(tsf* f, float* buffer, float* sends, int samples, int first, int last, struct tsf_prof* prof, float* scratch);
 // VDAC4: место в массиве голосов сразу за первыми count звучащими (не больше
 // tsf_voice_slots) — граница голосов двух ядер.
 TSFDEF int tsf_voice_split(tsf* f, int count);
@@ -496,8 +504,11 @@ static int tsf_hydra_valid(const struct tsf_hydra* h)
 
 struct tsf_riffchunk { tsf_fourcc id; tsf_u32 size; };
 struct tsf_envelope { float delay, attack, hold, decay, sustain, release, keynumToHold, keynumToDecay; };
-struct tsf_voice_envelope { unsigned char segment, segmentIsExponential : 1, isAmpEnv : 1; short midiVelocity; float level, slope; int samplesUntilNextSegment; struct tsf_envelope parameters; };
-struct tsf_voice_lowpass { float QInv, a0, a1, b1, b2, z1, z2; TSF_BOOL active; }; // VDAC4: float — у ESP32-S3 double только программный
+// VDAC4 (MIDI.ELF 1.8): powValue = powSlope^powStep — powf экспоненциальной стадии раз на стадию и
+// длину шага, а не на каждом куске каждого голоса (тот же powf от тех же чисел — тот же звук).
+struct tsf_voice_envelope { unsigned char segment, segmentIsExponential : 1, isAmpEnv : 1; short midiVelocity; float level, slope; int samplesUntilNextSegment; struct tsf_envelope parameters; float powSlope, powValue; int powStep; };
+// VDAC4: sqrtQInv = sqrt(sqrtFor) — корень резонанса раз на его значение (1.8).
+struct tsf_voice_lowpass { float QInv, a0, a1, b1, b2, z1, z2; TSF_BOOL active; float sqrtFor, sqrtQInv; }; // VDAC4: float — у ESP32-S3 double только программный
 struct tsf_voice_lfo { int samplesUntil; float level, delta; };
 
 // VDAC4: модулятор SF2 после слияния (по умолчанию, инструмент, пресет). Источник — 16 бит:
@@ -558,6 +569,12 @@ struct tsf_voice
 	float vibLfoToPitch, modLfoToPitch, modEnvToPitch, initialFilterFc, filterQ;
 	float modLfoToFilterFc, modEnvToFilterFc, modLfoToVolume;
 	float reverbSend, chorusSend, modTuneCents;
+	// VDAC4 (1.8): фильтр посчитан для среза lowpassFres (действителен при lowpassFresValid: сброс
+	// при нажатии, где фильтр ставится по срезу без модуляторов); шаг высоты — для pitchCents и
+	// pitchFactor. Значение не сменилось — пересчёт (powf, tanf) не нужен.
+	float lowpassFres, pitchCents, pitchFactor;
+	unsigned int pitchStepInt, pitchStepFrac;
+	unsigned char lowpassFresValid;
 };
 
 struct tsf_channel
@@ -1447,7 +1464,12 @@ static void tsf_voice_envelope_process(struct tsf_voice_envelope* e, int numSamp
 		{
 			if (e->slope)
 			{
-				if (e->segmentIsExponential) e->level *= TSF_POWF(e->slope, (float)step);
+				if (e->segmentIsExponential)
+				{
+					// VDAC4 (1.8): slope^step — раз на стадию и длину шага (обычно кусок, 64)
+					if (e->powSlope != e->slope || e->powStep != step) { e->powSlope = e->slope; e->powStep = step; e->powValue = TSF_POWF(e->slope, (float)step); }
+					e->level *= e->powValue;
+				}
 				else e->level += (e->slope * step);
 			}
 			e->samplesUntilNextSegment -= step;
@@ -1466,7 +1488,8 @@ static void tsf_voice_lowpass_setup(struct tsf_voice_lowpass* e, float Fc)
 	// — множитель 10^(−Q/40) = sqrt(QInv)), как у SpessaSynth: резонансный бас не громче прочих.
 	float K = TSF_TANF((float)TSF_PI * Fc), KK = K * K;
 	float norm = 1.0f / (1.0f + K * e->QInv + KK);
-	e->a0 = KK * norm * TSF_SQRTF(e->QInv);
+	if (e->sqrtFor != e->QInv) { e->sqrtFor = e->QInv; e->sqrtQInv = TSF_SQRTF(e->QInv); } // VDAC4 (1.8)
+	e->a0 = KK * norm * e->sqrtQInv;
 	e->a1 = 2.0f * e->a0;
 	e->b1 = 2.0f * (KK - 1.0f) * norm;
 	e->b2 = (1.0f - K * e->QInv + KK) * norm;
@@ -1712,24 +1735,104 @@ static float tsf_voice_cubic(const tsf_s16* input, unsigned int last, unsigned i
 
 // VDAC4: run отсчётов голоса без проверок краёв (быстрый путь tsf_voice_render): та же
 // арифметика, что у общего пути (tsf_voice_cubic, tsf_voice_lowpass_process), поэтому звук
-// тот же отсчёт в отсчёт. LOWPASS и SENDS — постоянные: четыре варианта цикла без ветвлений.
-// Громкость внутри куска идёт линейно от начала к концу (с 1.7): прежде огибающая стояла
-// ступенью на весь кусок (64 отсчёта), и быстрые атака и спад звучали ступеньками.
-#define TSF_VDAC4_RUN(LOWPASS, SENDS) \
-	for (; run; run--) \
-	{ \
-		const tsf_s16* s = input + posInt; \
-		float t = (float)(posFrac >> 8) * (1.0f / 16777216.0f); \
-		float s0 = s[-1], s1 = s[0], s2 = s[1], s3 = s[2]; \
-		float val = s1 + 0.5f * t * (s2 - s0 + t * (2.0f * s0 - 5.0f * s1 + 4.0f * s2 - s3 + t * (3.0f * (s1 - s2) + s3 - s0))); \
+// тот же отсчёт в отсчёт. Громкость внутри куска идёт линейно от начала к концу (с 1.7):
+// прежде огибающая стояла ступенью на весь кусок (64 отсчёта), и быстрые атака и спад
+// звучали ступеньками.
+// С MIDI.ELF 1.8 — «псевдоассемблером», в два прохода. Здесь проход 1: интерполяция и фильтр
+// в mono[] (стек задачи — внутренняя память). Разности Catmull-Rom 16-битных отсчётов —
+// s2 − s0, 2s0 − 5s1 + 4s2 − s3, 3(s1 − s2) + s3 − s0 — целые меньше 2^24, во float они
+// точны, поэтому считаются в целых регистрах: FPU остаются три умножения-сложения на
+// интерполяцию, без выгрузки регистров на стек (в 1.7 цикл с фильтром и посылами был 72 команды
+// на отсчёт, из них ~15 — чтение констант со стека). Отсчёты друг от друга не зависят — цикл
+// развёрнут на два, две цепочки FPU идут вперемешку. Фильтр — потом, своим циклом по mono[]
+// (от отсчёта к отсчёту в нём тянется только z1). Проход 2 — громкость, панорама и посылы
+// (tsf_voice_mix).
+// VDAC4 (1.8): целое n × 0,5 во float. 0,5·t·Y = t·(0,5·Y) отсчёт в отсчёт (множитель — степень
+// двойки, округление не меняется), а 0,5 у разностей Catmull-Rom даёт само преобразование: GCC
+// для Xtensa делает из этого float.s со сдвигом 1 — без умножения и без константы в регистре.
+#define TSF_HALF(n) ((float)(n) * kHalf)
+#if defined(__GNUC__)
+#define TSF_UNROLL2 _Pragma("GCC unroll 2")
+#else
+#define TSF_UNROLL2
+#endif
+// Два варианта для замера на плате (1.8): TSF_VDAC4_RUN — аппаратный цикл (34 команды на
+// отсчёт), TSF_VDAC4_RUN2 — развёрнутый на два (две цепочки FPU вперемешку, без аппаратного
+// цикла). Какой быстрее, решает задержка FPU — она не документирована.
+#define TSF_VDAC4_RUN for (; run; run--) { TSF_VDAC4_RUN_BODY }
+#define TSF_VDAC4_RUN2 TSF_UNROLL2 for (; run; run--) { TSF_VDAC4_RUN_BODY }
+#define TSF_VDAC4_RUN_BODY \
+		const tsf_s16* s = inputPrev + posInt; \
+		const int i0 = s[0], i1 = s[1], i2 = s[2], i3 = s[3]; \
+		const int ca = i2 - i0, cb = 2 * i0 - 5 * i1 + 4 * i2 - i3, cc = 3 * (i1 - i2) + i3 - i0; \
+		float t = (float)(posFrac >> 8) * kFrac; \
 		unsigned int oldFrac = posFrac; \
-		if (LOWPASS) { float lp = val * a0 + z1; z1 = val * a1 + z2 - b1 * lp; z2 = val * a0 - b2 * lp; val = lp; } \
-		outL[0] += val * gainLeft; outL[1] += val * gainRight; outL += 2; \
-		if (SENDS) { float dry = val * gainMono; sendOut[0] += dry * sendReverb; sendOut[sendStride] += dry * sendChorus; sendOut[2 * sendStride] += dry * sendDelay; sendOut++; } \
-		gainLeft += stepLeft; gainRight += stepRight; gainMono += stepMono; \
+		*mono++ = (float)i1 + t * (TSF_HALF(ca) + t * (TSF_HALF(cb) + t * TSF_HALF(cc))); \
 		posFrac += stepFrac; \
-		posInt += stepInt + (posFrac < oldFrac ? 1 : 0); \
+		posInt += stepInt + (posFrac < oldFrac ? 1 : 0);
+
+// VDAC4 (1.8): проход 2 быстрого пути — count отсчётов mono[] в out (стерео подряд) с громкостью,
+// идущей линейно (gain += step на отсчёт, как в 1.7), и в шины посылов send (шаг шин sendStride:
+// реверберация, хорус, эхо). Шина с нулевым уровнем не трогается (в 1.7 прибавлялся ноль), под
+// число шин — свой цикл, уровни и указатели — в регистрах.
+static void tsf_voice_mix(const float* mono, int count, float* out, float gainLeft, float gainRight, float gainMono,
+	float stepLeft, float stepRight, float stepMono, float* send, int sendStride, float reverb, float chorus, float delay)
+{
+	float* bus[3];
+	float level[3];
+	int buses = 0;
+	if (send)
+	{
+		if (reverb != 0.0f) bus[buses] = send, level[buses++] = reverb;
+		if (chorus != 0.0f) bus[buses] = send + sendStride, level[buses++] = chorus;
+		if (delay != 0.0f) bus[buses] = send + 2 * sendStride, level[buses++] = delay;
 	}
+	if (buses == 0)
+	{
+		do
+		{
+			const float v = *mono++;
+			out[0] += v * gainLeft; out[1] += v * gainRight; out += 2;
+			gainLeft += stepLeft; gainRight += stepRight;
+		} while (--count);
+	}
+	else if (buses == 1)
+	{
+		float* b0 = bus[0];
+		const float l0 = level[0];
+		do
+		{
+			const float v = *mono++, dry = v * gainMono;
+			out[0] += v * gainLeft; out[1] += v * gainRight; out += 2;
+			*b0++ += dry * l0;
+			gainLeft += stepLeft; gainRight += stepRight; gainMono += stepMono;
+		} while (--count);
+	}
+	else if (buses == 2)
+	{
+		float *b0 = bus[0], *b1 = bus[1];
+		const float l0 = level[0], l1 = level[1];
+		do
+		{
+			const float v = *mono++, dry = v * gainMono;
+			out[0] += v * gainLeft; out[1] += v * gainRight; out += 2;
+			*b0++ += dry * l0; *b1++ += dry * l1;
+			gainLeft += stepLeft; gainRight += stepRight; gainMono += stepMono;
+		} while (--count);
+	}
+	else
+	{
+		float *b0 = bus[0], *b1 = bus[1], *b2 = bus[2];
+		const float l0 = level[0], l1 = level[1], l2 = level[2];
+		do
+		{
+			const float v = *mono++, dry = v * gainMono;
+			out[0] += v * gainLeft; out[1] += v * gainRight; out += 2;
+			*b0++ += dry * l0; *b1++ += dry * l1; *b2++ += dry * l2;
+			gainLeft += stepLeft; gainRight += stepRight; gainMono += stepMono;
+		} while (--count);
+	}
+}
 
 static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, int numSamples, float* sendBuffer, int sendStride) // VDAC4: посылы — свои у каждого ядра
 {
@@ -1788,15 +1891,27 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 		if (dynamicLowpass)
 		{
 			float fres = v->initialFilterFc + v->modlfo.level * v->modLfoToFilterFc + v->modenv.level * v->modEnvToFilterFc;
-			float lowpassFc = (fres <= 13500 ? tsf_cents2Hertz(fres) / tmpSampleRate : 1.0f);
-			tmpLowpass.active = (lowpassFc < 0.499f);
-			if (tmpLowpass.active) tsf_voice_lowpass_setup(&tmpLowpass, lowpassFc);
+			// VDAC4 (1.8): срез тот же (огибающая на удержании, LFO нет) — фильтр тот же: без powf и tanf
+			if (v->lowpassDirty || !v->lowpassFresValid || fres != v->lowpassFres)
+			{
+				float lowpassFc = (fres <= 13500 ? tsf_cents2Hertz(fres) / tmpSampleRate : 1.0f);
+				tmpLowpass.active = (lowpassFc < 0.499f);
+				if (tmpLowpass.active) tsf_voice_lowpass_setup(&tmpLowpass, lowpassFc);
+				v->lowpassFres = fres, v->lowpassFresValid = 1;
+			}
 		}
 
 		if (dynamicPitchRatio)
 		{
-			pitchRatio = tsf_timecents2Secsf(v->pitchInputTimecents + v->portaCents + (v->modlfo.level * v->modLfoToPitch + v->viblfo.level * v->vibLfoToPitch + v->modenv.level * v->modEnvToPitch)) * v->pitchOutputFactor;
-			tsf_voice_ratio_step(pitchRatio, &stepInt, &stepFrac); // VDAC4
+			// VDAC4 (1.8): высота та же — шаг тот же, без powf
+			const float cents = v->pitchInputTimecents + v->portaCents + (v->modlfo.level * v->modLfoToPitch + v->viblfo.level * v->vibLfoToPitch + v->modenv.level * v->modEnvToPitch);
+			if (cents != v->pitchCents || v->pitchOutputFactor != v->pitchFactor)
+			{
+				pitchRatio = tsf_timecents2Secsf(cents) * v->pitchOutputFactor;
+				tsf_voice_ratio_step(pitchRatio, &v->pitchStepInt, &v->pitchStepFrac); // VDAC4
+				v->pitchCents = cents, v->pitchFactor = v->pitchOutputFactor;
+			}
+			stepInt = v->pitchStepInt, stepFrac = v->pitchStepFrac;
 			// VDAC4: portamento glides towards the note.
 			if (v->portaCents > 0.0f) { v->portaCents -= v->portaStep * blockSamples; if (v->portaCents < 0.0f) v->portaCents = 0.0f; }
 			else if (v->portaCents < 0.0f) { v->portaCents += v->portaStep * blockSamples; if (v->portaCents > 0.0f) v->portaCents = 0.0f; }
@@ -1824,6 +1939,16 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 			// (позиция от 1 до limit), идут пачкой без проверок; у краёв — по одному,
 			// общим путём. Петля замыкается после пачки: внутри неё позиция петли не
 			// проходит.
+			float monoBlock[TSF_RENDER_EFFECTSAMPLEBLOCK], *mono = monoBlock; // VDAC4 (1.8): проход 1 — сюда
+			// VDAC4 (1.8): s[-1] без сложения в цикле; 2^-24 (дробь позиции) и 0,5 — в регистрах на весь
+			// кусок: пустая вставка asm прячет значения от GCC, иначе он грузит их из литералов
+			// (l32r + wfr) на каждом отсчёте.
+			const tsf_s16* inputPrev = input - 1;
+			const int unrolled = (int)(v - f->voices) & 1; // замер 1.8: нечётные места — развёрнутый цикл
+			float kFrac = 1.0f / 16777216.0f, kHalf = 0.5f;
+#if defined(__XTENSA__)
+			__asm__("" : "+a"(inputPrev), "+f"(kFrac), "+f"(kHalf));
+#endif
 			float z1 = tmpLowpass.z1, z2 = tmpLowpass.z2;
 			const float a0 = tmpLowpass.a0, a1 = tmpLowpass.a1, b1 = tmpLowpass.b1, b2 = tmpLowpass.b2;
 			const TSF_BOOL lowpass = tmpLowpass.active;
@@ -1841,31 +1966,42 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 				if (run)
 				{
 					blockSamples -= (int)run;
-					if (lowpass) { if (sendOut) TSF_VDAC4_RUN(1, 1) else TSF_VDAC4_RUN(1, 0) }
-					else { if (sendOut) TSF_VDAC4_RUN(0, 1) else TSF_VDAC4_RUN(0, 0) }
+					if (unrolled) TSF_VDAC4_RUN2
+					else TSF_VDAC4_RUN
 				}
 				else
 				{
 					float val = tsf_voice_cubic(input, lastSample, posInt, (float)(posFrac >> 8) * (1.0f / 16777216.0f), isLooping, tmpLoopStart, tmpLoopEnd, looped);
 					unsigned int oldFrac = posFrac;
-					if (lowpass) { float lp = val * a0 + z1; z1 = val * a1 + z2 - b1 * lp; z2 = val * a0 - b2 * lp; val = lp; }
-					outL[0] += val * gainLeft; outL[1] += val * gainRight; outL += 2;
-					if (sendOut)
-					{
-						float dry = val * gainMono;
-						sendOut[0] += dry * sendReverb;
-						sendOut[sendStride] += dry * sendChorus;
-						sendOut[2 * sendStride] += dry * sendDelay;
-						sendOut++;
-					}
-					gainLeft += stepLeft; gainRight += stepRight; gainMono += stepMono;
+					*mono++ = val;
 					posFrac += stepFrac;
 					posInt += stepInt + (posFrac < oldFrac ? 1 : 0);
 					blockSamples--;
 				}
 				if (isLooping && posInt > tmpLoopEnd) { posInt = tmpLoopStart + (posInt - tmpLoopStart) % loopLength; looped = 1; } // VDAC4
 			}
+			if (lowpass)
+			{
+				// VDAC4 (1.8): фильтр по отсчётам куска, на месте
+				float* m;
+				for (m = monoBlock; m != mono; m++)
+				{
+					const float val = *m;
+					const float lp = val * a0 + z1;
+					z1 = val * a1 + z2 - b1 * lp;
+					z2 = val * a0 - b2 * lp;
+					*m = lp;
+				}
+			}
 			tmpLowpass.z1 = z1, tmpLowpass.z2 = z2;
+			if (mono != monoBlock)
+			{
+				const int produced = (int)(mono - monoBlock);
+				tsf_voice_mix(monoBlock, produced, outL, gainLeft, gainRight, gainMono, stepLeft, stepRight, stepMono,
+					sendOut, sendStride, sendReverb, sendChorus, sendDelay);
+				outL += 2 * produced;
+				if (sendOut) sendOut += produced;
+			}
 		}
 		else while (blockSamples-- && posInt < tmpSampleEnd)
 		{
@@ -2289,8 +2425,14 @@ TSFDEF int tsf_note_on(tsf* f, int preset_index, int key, float vel)
 		lowpassFc = (voice->initialFilterFc <= 13500 ? tsf_cents2Hertz(voice->initialFilterFc) / f->outSampleRate : 1.0f);
 		voice->lowpass.z1 = voice->lowpass.z2 = 0;
 		voice->lowpass.active = (lowpassFc < 0.499f);
+		// VDAC4 (1.8): кэши голоса пустые (QInv > 0, множитель высоты > 0, шаг огибающей > 0);
+		// фильтр сейчас — по срезу без модуляторов, кэш среза недействителен.
+		voice->lowpass.sqrtFor = -1.0f;
+		voice->pitchFactor = -1.0f;
+		voice->ampenv.powStep = voice->modenv.powStep = 0;
 		if (voice->lowpass.active) tsf_voice_lowpass_setup(&voice->lowpass, lowpassFc);
 		voice->lowpassDirty = 0;
+		voice->lowpassFresValid = 0;
 
 		// Setup LFO filters.
 		tsf_voice_lfo_setup(&voice->modlfo, region->delayModLFO, region->freqModLFO, f->outSampleRate);
@@ -2396,9 +2538,51 @@ TSFDEF void tsf_render_float(tsf* f, float* buffer, int samples, int flag_mixing
 
 TSFDEF void tsf_render_float_sends_range(tsf* f, float* buffer, float* sends, int samples, int first, int last) // VDAC4
 {
+	tsf_render_float_sends_range_prof(f, buffer, sends, samples, first, last, TSF_NULL, TSF_NULL);
+}
+
+// VDAC4 (1.8): счётчик тактов ядра (на ПК — 0).
+static unsigned int tsf_ccount(void)
+{
+#if defined(__XTENSA__)
+	unsigned int count;
+	__asm__ __volatile__("rsr %0, ccount" : "=a"(count));
+	return count;
+#else
+	return 0;
+#endif
+}
+
+TSFDEF void tsf_render_float_sends_range_prof(tsf* f, float* buffer, float* sends, int samples, int first, int last, struct tsf_prof* prof, float* scratch) // VDAC4
+{
 	struct tsf_voice *v, *vEnd;
 	if (first < 0) first = 0;
 	if (last > f->voiceNum) last = f->voiceNum;
+	// VDAC4 (1.8): голоса куска копятся в scratch (у MIDI.ELF — внутренняя память), а не в буферах
+	// вызывающего (PSRAM): каждый голос читает и пишет их на каждом отсчёте.
+	if (scratch && f->outputmode == TSF_STEREO_INTERLEAVED && samples > 0 && samples <= TSF_RENDER_EFFECTSAMPLEBLOCK)
+	{
+		float* const mix = scratch;
+		float* const bus = scratch + 2 * TSF_RENDER_EFFECTSAMPLEBLOCK;
+		int i;
+		TSF_MEMSET(mix, 0, 2 * sizeof(float) * samples);
+		if (sends) TSF_MEMSET(bus, 0, 3 * sizeof(float) * samples);
+		for (v = f->voices + first, vEnd = f->voices + last; v < vEnd; v++)
+			if (v->playingPreset != -1)
+			{
+				const unsigned int start = (prof ? tsf_ccount() : 0);
+				tsf_voice_render(f, v, mix, samples, sends ? bus : TSF_NULL, samples);
+				if (prof)
+				{
+					const int odd = (int)(v - f->voices) & 1;
+					prof->cycles[odd] += tsf_ccount() - start;
+					prof->samples[odd] += (unsigned int)samples;
+				}
+			}
+		TSF_MEMCPY(buffer, mix, 2 * sizeof(float) * samples);
+		if (sends) for (i = 0; i < 3 * samples; i++) sends[i] += bus[i];
+		return;
+	}
 	TSF_MEMSET(buffer, 0, (f->outputmode == TSF_MONO ? 1 : 2) * sizeof(float) * samples);
 	for (v = f->voices + first, vEnd = f->voices + last; v < vEnd; v++)
 		if (v->playingPreset != -1)

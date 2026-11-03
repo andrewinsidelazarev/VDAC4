@@ -5,7 +5,9 @@
 #include <string.h>
 
 #define FFT_N 1024
-#define FFT_BITS 10
+#define FFT_HALF (FFT_N / 2)          /* действительное БПФ FFT_N — комплексным на FFT_HALF */
+#define FFT_HALF_BITS 9
+#define UI_STEPS 256                   /* значения полосы экрана 0..255 */
 #define PERIOD_MS 40                   /* снимок на кадр экрана (25 в секунду) */
 /* 12,8 с: больше очереди PCM 256 КиБ даже при 8 кГц (8,2 с + DMA). */
 #define HISTORY_SIZE 320
@@ -27,6 +29,8 @@ static float* window_curve;            /* Ханн */
 static float* cos_table;               /* FFT_N/2 */
 static float* sin_table;
 static float* scope;                   /* последние FFT_N отсчётов, кольцом */
+static uint16_t* reverse9;             /* место отсчёта БПФ на 512: обратный порядок 9 битов */
+static float* ui_steps;                /* [v] — мощность, с которой полоса экрана ≥ v (1..255) */
 static uint32_t scope_pos;
 static uint16_t edges[VIEW_BANDS + 1]; /* границы полос окна Z80 в номерах бинов */
 static uint16_t ui_edges[VIEW_UI_BANDS + 1];   /* полос экрана — по частоте отсчётов */
@@ -54,7 +58,7 @@ static void reset_locked(void) {
 
 static uint32_t reverse_bits(uint32_t value) {
   uint32_t result = 0;
-  for (int bit = 0; bit < FFT_BITS; ++bit) {
+  for (int bit = 0; bit < FFT_HALF_BITS; ++bit) {
     result = (result << 1) | (value & 1);
     value >>= 1;
   }
@@ -84,7 +88,8 @@ static void ui_edges_for(uint32_t rate) {
 
 int view_begin(const zm_core_t* c) {
   core = c;
-  const size_t floats = FFT_N * 4 + FFT_N;           /* re, im, окно, scope + cos/sin */
+  /* re, im, окно, scope, cos/sin + порядок битов (512 × uint16) и пороги экрана */
+  const size_t floats = FFT_N * 4 + FFT_N + FFT_HALF / 2 + UI_STEPS;
   /* 20 КБ — в PSRAM: внутренней памяти ESP мало, а без неё не запускался декодер (1.21) */
   tables = (float*)core->alloc(floats * sizeof(float), ZM_MEM_PSRAM);
   history = (snapshot_t*)core->alloc(HISTORY_SIZE * sizeof(snapshot_t), ZM_MEM_PSRAM);
@@ -102,6 +107,11 @@ int view_begin(const zm_core_t* c) {
   scope = window_curve + FFT_N;
   cos_table = scope + FFT_N;
   sin_table = cos_table + FFT_N / 2;
+  reverse9 = (uint16_t*)(sin_table + FFT_N / 2);
+  ui_steps = (float*)(reverse9 + FFT_HALF);
+  for (uint32_t i = 0; i < FFT_HALF; ++i) {
+    reverse9[i] = (uint16_t)reverse_bits(i);
+  }
   const float two_pi = 6.2831853f;
   for (int i = 0; i < FFT_N; ++i) {
     window_curve[i] = 0.5f - 0.5f * cosf(two_pi * (float)i / (float)FFT_N);
@@ -126,6 +136,13 @@ int view_begin(const zm_core_t* c) {
   full_power = (float)(FFT_N / 4) * (float)(FFT_N / 4);
   for (int k = 0; k < VIEW_LEVELS; ++k) {
     thresholds[k] = full_power * powf(10.0f, -(0.6f + 0.4f * (float)(VIEW_LEVELS - 1 - k)));
+  }
+  /* Экран: значение (дБ от синуса полной громкости + 72) · 255/72, округлённое, — v, если
+   * дБ ≥ (v − 0,5) · 72/255 − 72. Пороги мощности — заранее, вместо log10f на каждую полосу. */
+  ui_steps[0] = 0.0f;
+  for (int v = 1; v < UI_STEPS; ++v) {
+    const float db = ((float)v - 0.5f) * (UI_RANGE_DB / 255.0f) - UI_RANGE_DB;
+    ui_steps[v] = full_power * powf(10.0f, db / 10.0f);
   }
   view_reset();
   return ZM_OK;
@@ -156,12 +173,15 @@ static void feed(const float* frames, uint32_t count, uint8_t channels) {
   }
 }
 
+/* Наибольшая мощность бинов [first, end) — в re[] она уже посчитана (update). */
 static float band_power(uint32_t first, uint32_t end) {
   float power = 0.0f;
-  for (uint32_t bin = first; bin < end && bin <= FFT_N / 2; ++bin) {
-    const float p = re[bin] * re[bin] + im[bin] * im[bin];
-    if (p > power) {
-      power = p;
+  if (end > FFT_HALF + 1) {
+    end = FFT_HALF + 1;
+  }
+  for (const float *bin = re + first, *stop = re + end; bin < stop; ++bin) {
+    if (*bin > power) {
+      power = *bin;
     }
   }
   return power;
@@ -171,28 +191,58 @@ static void update(void) {
   if (tables == NULL) {
     return;
   }
-  for (uint32_t i = 0; i < FFT_N; ++i) {
-    const uint32_t j = reverse_bits(i);
-    re[j] = scope[(scope_pos + i) % FFT_N] * window_curve[i];
-    im[j] = 0.0f;
+  /* Действительное БПФ на 1024 — комплексным на 512 (с PLAYER 1.38): мнимая часть сигнала —
+   * нули, и прежнее комплексное БПФ на 1024 делало вдвое больше бабочек, а порядок битов
+   * считало циклом на каждый отсчёт. 1) Окно и упаковка: z[n] = x[2n] + i·x[2n+1] — сразу
+   * на место по таблице обратного порядка битов. */
+  uint32_t at = scope_pos;
+  const float* w = window_curve;
+  for (uint32_t n = 0; n < FFT_HALF; ++n) {
+    const uint32_t j = reverse9[n];
+    re[j] = scope[at] * w[0];
+    im[j] = scope[(at + 1) & (FFT_N - 1)] * w[1];
+    at = (at + 2) & (FFT_N - 1);
+    w += 2;
   }
-  for (uint32_t length = 2; length <= FFT_N; length <<= 1) {
+  /* 2) Комплексное БПФ на 512 по основанию 2, на месте. Поворот — из таблицы на 1024 (шаг
+   * FFT_N / length); снаружи — номер поворота, внутри — все группы с ним: cos и sin
+   * читаются раз на поворот. */
+  for (uint32_t length = 2; length <= FFT_HALF; length <<= 1) {
     const uint32_t half = length >> 1;
     const uint32_t step = FFT_N / length;
-    for (uint32_t i = 0; i < FFT_N; i += length) {
-      for (uint32_t k = 0; k < half; ++k) {
-        const float c = cos_table[k * step];
-        const float s = sin_table[k * step];
-        const uint32_t a = i + k;
-        const uint32_t b = a + half;
-        const float tr = re[b] * c + im[b] * s;
-        const float ti = im[b] * c - re[b] * s;
-        re[b] = re[a] - tr;
-        im[b] = im[a] - ti;
-        re[a] += tr;
-        im[a] += ti;
+    for (uint32_t k = 0; k < half; ++k) {
+      const float c = cos_table[k * step];
+      const float s = sin_table[k * step];
+      float *ar = re + k, *ai = im + k;
+      for (uint32_t i = k; i < FFT_HALF; i += length, ar += length, ai += length) {
+        const float br = ar[half], bi = ai[half];
+        const float tr = br * c + bi * s;
+        const float ti = bi * c - br * s;
+        ar[half] = *ar - tr;
+        ai[half] = *ai - ti;
+        *ar += tr;
+        *ai += ti;
       }
     }
+  }
+  /* 3) Разделение: X[k] = E + T, X[512 − k] = conj(E − T), где E = (Z[k] + conj Z[512 − k]) / 2,
+   * O = (Z[k] − conj Z[512 − k]) / 2i, T = e^(−i·2πk/1024) · O. В re[] — мощность |X|²
+   * бинов 0..512 (больше не нужно). */
+  {
+    const float r0 = re[0], i0 = im[0];
+    re[0] = (r0 + i0) * (r0 + i0);
+    re[FFT_HALF] = (r0 - i0) * (r0 - i0);
+  }
+  for (uint32_t k = 1; k <= FFT_HALF / 2; ++k) {
+    const uint32_t m = FFT_HALF - k;
+    const float ar = re[k], ai = im[k], br = re[m], bi = im[m];
+    const float er = 0.5f * (ar + br), ei = 0.5f * (ai - bi);
+    const float orr = 0.5f * (ai + bi), oi = -0.5f * (ar - br);
+    const float c = cos_table[k], s = sin_table[k];
+    const float tr = c * orr + s * oi, ti = c * oi - s * orr;
+    const float xr = er + tr, xi = ei + ti, yr = er - tr, yi = ei - ti;
+    re[k] = xr * xr + xi * xi;
+    re[m] = yr * yr + yi * yi;
   }
   for (int b = 0; b < VIEW_BANDS; ++b) {
     const float power = band_power(edges[b], edges[b + 1]);
@@ -202,19 +252,18 @@ static void update(void) {
     }
     bands[b] = level;
   }
-  /* Экран: дБ от синуса полной громкости, −72…0 дБ → 0…255. */
-  const float floor_power = full_power * powf(10.0f, -UI_RANGE_DB / 10.0f);
+  /* Экран: дБ от синуса полной громкости, −72…0 дБ → 0…255 — двоичным поиском по порогам
+   * ui_steps (восемь сравнений вместо log10f). */
   for (int b = 0; b < VIEW_UI_BANDS; ++b) {
     const uint32_t end = ui_edges[b + 1] > ui_edges[b] ? ui_edges[b + 1] : ui_edges[b] + 1u;
     const float power = band_power(ui_edges[b], end);
-    if (power <= floor_power) {
-      ui_bands[b] = 0;
-      continue;
+    uint32_t value = 0;
+    for (uint32_t bit = UI_STEPS / 2; bit != 0; bit >>= 1) {
+      if (power >= ui_steps[value + bit]) {
+        value += bit;
+      }
     }
-    const float db = 10.0f * log10f(power / full_power);
-    float value = (db + UI_RANGE_DB) * (255.0f / UI_RANGE_DB);
-    if (value > 255.0f) value = 255.0f;
-    ui_bands[b] = (uint8_t)(value + 0.5f);
+    ui_bands[b] = (uint8_t)value;
   }
 }
 

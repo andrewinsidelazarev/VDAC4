@@ -417,6 +417,7 @@ struct Sink {
   int closes = 0;
   int pauses = 0;
   FILE* raw = nullptr;
+  FILE* rawFloat = nullptr;             // --rawf: отсчёты float, до 16 бит
 
   void drainLocked() {
     const Clock::time_point now = Clock::now();
@@ -489,6 +490,9 @@ int corePcmWrite(const float* frames, uint32_t count) {
       }
       if (fabsf(sample) > sink.peak) {
         sink.peak = fabsf(sample);
+      }
+      if (sink.rawFloat != nullptr) {
+        fwrite(&sample, sizeof(sample), 1, sink.rawFloat);
       }
       if (sink.raw != nullptr) {
         float clipped = sample > 1.0f ? 1.0f : (sample < -1.0f ? -1.0f : sample);
@@ -1232,6 +1236,7 @@ int main(int argc, char** argv) {
       else if (key == "--seconds") seconds = atof(value);
       else if (key == "--speed") sink.speed = atof(value);
       else if (key == "--raw") sink.raw = fopen(value, "wb");
+      else if (key == "--rawf") sink.rawFloat = fopen(value, "wb");
       else if (key == "--midi") midi = atoi(value);
       else if (key == "--bank") bank = readFile(value);
       else if (key == "--rom") rom = readFile(value);
@@ -2196,6 +2201,9 @@ int main(int argc, char** argv) {
   stopApp();
   if (sink.raw != nullptr) {
     fclose(sink.raw);
+  }
+  if (sink.rawFloat != nullptr) {
+    fclose(sink.rawFloat);
   }
   return 0;
 }

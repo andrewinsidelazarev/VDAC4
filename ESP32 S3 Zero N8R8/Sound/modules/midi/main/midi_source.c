@@ -51,6 +51,16 @@
  *
  * Память TSF и TinyMidiLoader — у плеера (host->alloc: в счёт PSRAM стенда), долгий
  * разбор песни и банка уступает ядро (host->rest, ABI источников 7).
+ *
+ * 1.8 — расчёт «псевдоассемблером», звук на ПК отсчёт в отсчёт тот же. 03.11.2026 с экраном
+ * Tang на плате эффекты стоили 1460–2015 тактов на кадр, голос — около 240 тактов на отсчёт,
+ * и предел по нагрузке гасил голоса десятки секунд в песне. Эффекты: линия задержки проходит
+ * кусок одним циклом, гребёнки по четыре, фазовращатели обеих сторон вместе (было ~450 команд
+ * на отсчёт реверберации, стало ~210). Голос (components/tsf): интерполяция с целыми
+ * разностями, фильтр и смешивание — отдельными циклами, буферы куска на стеке (внутренняя
+ * память), powf огибающей, фильтра и высоты — только когда сменилось значение. Предел
+ * голосов: задержанный чужой задачей кусок считается не дороже двух кадров, среднее — за
+ * ~0,4 с. В журнале при закрытии — такты голоса на каждом ядре и эффекты по видам.
  */
 #include <stddef.h>
 #include <string.h>
@@ -143,6 +153,9 @@ typedef struct {
   float* memory;               /* всё одним блоком в PSRAM */
   /* Кадров без посылов подряд: дольше *_IDLE — эффект молчит и не считается. */
   uint32_t reverb_idle, chorus_idle, echo_idle;
+  /* Замер (1.8): такты и кадры, когда эффект считался. */
+  uint64_t cycles_reverb, cycles_chorus, cycles_echo;
+  uint64_t frames_reverb, frames_chorus, frames_echo;
 } effects_t;
 
 typedef struct {
@@ -163,6 +176,8 @@ typedef struct {
   uint64_t cycles_core1;       /* голоса на ядре 1 */
   uint64_t voices_core1;       /* голосов помощника — сумма по кускам */
   uint64_t blocks_split;       /* кусков на двух ядрах */
+  struct tsf_prof prof0, prof1; /* такты голосов на ядрах 0 и 1 по вариантам цикла (1.8) */
+  float* scratch;               /* 1.8: куски голосов ядер 0 и 1 (внутренняя память, если есть) */
   uint64_t full_frames;        /* кадров, когда заняты все MAX_VOICES голосов */
   uint32_t full_first_ms;      /* когда впервые (full_frames != 0) */
   /* Предел голосов по нагрузке: такты ядра 0 на кадр (с ожиданием помощника — значит, и
@@ -439,35 +454,129 @@ static int effects_open(effects_t* e) {
   return 1;
 }
 
-static float comb_process(comb_t* c, float input) {
-  const float output = c->buffer[c->index];
-  c->store = output * (1.0f - REVERB_DAMP) + c->store * REVERB_DAMP;
-  c->buffer[c->index] = input + c->store * REVERB_FEEDBACK;
-  if (++c->index >= c->length) {
-    c->index = 0;
+/* Эффекты «псевдоассемблером» (с 1.8): линия задержки проходит весь кусок одним циклом —
+ * указатель, конец линии и состояние в регистрах, полей структуры в цикле нет; кольцо режется
+ * на отрезки до конца линии, внутри отрезка нет ни сравнений, ни переходов. До 1.8 каждая из
+ * 24 линий Freeverb на каждом отсчёте читала и писала свои поля (буфер, индекс, длина,
+ * store): около 20 команд на линию и отсчёт, эффекты стоили на плате 1460–2015 тактов на кадр
+ * (03.11.2026). Арифметика та же, порядок сложения тот же: на ПК звук отсчёт в отсчёт. */
+
+/* Отрезок до ближайшего конца линии: run — не больше него. */
+#define LINE_RUN(run, p, end) \
+  if ((uint32_t)((end) - (p)) < (run)) (run) = (uint32_t)((end) - (p))
+_Static_assert(COMBS == 8 && ALLPASSES == 4, "comb4_block, allpass4x2_block: 8 combs, 4 allpasses");
+
+/* Четыре гребёнки Freeverb одной стороны над куском: в каждую линию — in[i] + store * FEEDBACK,
+ * sum[i] += их выходы по порядку (как в 1.7: ((sum + y0) + y1) + y2) + y3). Четыре цепочки
+ * store независимы — задержки FPU перекрываются; сумма читается и пишется раз в отсчёт. */
+static void comb4_block(comb_t* c, const float* in, float* sum, uint32_t frames) {
+  float* p0 = c[0].buffer + c[0].index;        /* a-регистры: места в линиях */
+  float* p1 = c[1].buffer + c[1].index;
+  float* p2 = c[2].buffer + c[2].index;
+  float* p3 = c[3].buffer + c[3].index;
+  float* const e0 = c[0].buffer + c[0].length;
+  float* const e1 = c[1].buffer + c[1].length;
+  float* const e2 = c[2].buffer + c[2].length;
+  float* const e3 = c[3].buffer + c[3].length;
+  float s0 = c[0].store, s1 = c[1].store, s2 = c[2].store, s3 = c[3].store;   /* f-регистры */
+  const float keep = 1.0f - REVERB_DAMP, damp = REVERB_DAMP, feedback = REVERB_FEEDBACK;
+  while (frames != 0) {
+    uint32_t run = frames;
+    LINE_RUN(run, p0, e0);
+    LINE_RUN(run, p1, e1);
+    LINE_RUN(run, p2, e2);
+    LINE_RUN(run, p3, e3);
+    frames -= run;
+    do {
+      const float x = *in++;
+      const float y0 = *p0, y1 = *p1, y2 = *p2, y3 = *p3;
+      s0 = y0 * keep + s0 * damp;
+      s1 = y1 * keep + s1 * damp;
+      s2 = y2 * keep + s2 * damp;
+      s3 = y3 * keep + s3 * damp;
+      *p0++ = x + s0 * feedback;
+      *p1++ = x + s1 * feedback;
+      *p2++ = x + s2 * feedback;
+      *p3++ = x + s3 * feedback;
+      float acc = *sum;
+      acc += y0;
+      acc += y1;
+      acc += y2;
+      acc += y3;
+      *sum++ = acc;
+    } while (--run != 0);
+    if (p0 == e0) p0 = c[0].buffer;
+    if (p1 == e1) p1 = c[1].buffer;
+    if (p2 == e2) p2 = c[2].buffer;
+    if (p3 == e3) p3 = c[3].buffer;
   }
-  return output;
+  c[0].store = s0, c[1].store = s1, c[2].store = s2, c[3].store = s3;
+  c[0].index = (uint16_t)(p0 - c[0].buffer);
+  c[1].index = (uint16_t)(p1 - c[1].buffer);
+  c[2].index = (uint16_t)(p2 - c[2].buffer);
+  c[3].index = (uint16_t)(p3 - c[3].buffer);
 }
 
-static float allpass_process(allpass_t* a, float input) {
-  const float delayed = a->buffer[a->index];
-  a->buffer[a->index] = input + delayed * 0.5f;
-  if (++a->index >= a->length) {
-    a->index = 0;
+/* Четыре фазовращателя Freeverb подряд над куском, на месте, обе стороны в одном цикле (две
+ * независимые цепочки): в линию — x + задержанное / 2, дальше идёт задержанное − x. */
+static void allpass4x2_block(allpass_t* l, allpass_t* r, float* left, float* right, uint32_t frames) {
+  float* pl0 = l[0].buffer + l[0].index;
+  float* pl1 = l[1].buffer + l[1].index;
+  float* pl2 = l[2].buffer + l[2].index;
+  float* pl3 = l[3].buffer + l[3].index;
+  float* pr0 = r[0].buffer + r[0].index;
+  float* pr1 = r[1].buffer + r[1].index;
+  float* pr2 = r[2].buffer + r[2].index;
+  float* pr3 = r[3].buffer + r[3].index;
+  while (frames != 0) {
+    uint32_t run = frames;
+    LINE_RUN(run, pl0, l[0].buffer + l[0].length);
+    LINE_RUN(run, pl1, l[1].buffer + l[1].length);
+    LINE_RUN(run, pl2, l[2].buffer + l[2].length);
+    LINE_RUN(run, pl3, l[3].buffer + l[3].length);
+    LINE_RUN(run, pr0, r[0].buffer + r[0].length);
+    LINE_RUN(run, pr1, r[1].buffer + r[1].length);
+    LINE_RUN(run, pr2, r[2].buffer + r[2].length);
+    LINE_RUN(run, pr3, r[3].buffer + r[3].length);
+    frames -= run;
+    do {
+      float xl = *left, xr = *right, dl, dr;
+      dl = *pl0; dr = *pr0; *pl0++ = xl + dl * 0.5f; *pr0++ = xr + dr * 0.5f; xl = dl - xl; xr = dr - xr;
+      dl = *pl1; dr = *pr1; *pl1++ = xl + dl * 0.5f; *pr1++ = xr + dr * 0.5f; xl = dl - xl; xr = dr - xr;
+      dl = *pl2; dr = *pr2; *pl2++ = xl + dl * 0.5f; *pr2++ = xr + dr * 0.5f; xl = dl - xl; xr = dr - xr;
+      dl = *pl3; dr = *pr3; *pl3++ = xl + dl * 0.5f; *pr3++ = xr + dr * 0.5f; xl = dl - xl; xr = dr - xr;
+      *left++ = xl;
+      *right++ = xr;
+    } while (--run != 0);
+    if (pl0 == l[0].buffer + l[0].length) pl0 = l[0].buffer;
+    if (pl1 == l[1].buffer + l[1].length) pl1 = l[1].buffer;
+    if (pl2 == l[2].buffer + l[2].length) pl2 = l[2].buffer;
+    if (pl3 == l[3].buffer + l[3].length) pl3 = l[3].buffer;
+    if (pr0 == r[0].buffer + r[0].length) pr0 = r[0].buffer;
+    if (pr1 == r[1].buffer + r[1].length) pr1 = r[1].buffer;
+    if (pr2 == r[2].buffer + r[2].length) pr2 = r[2].buffer;
+    if (pr3 == r[3].buffer + r[3].length) pr3 = r[3].buffer;
   }
-  return delayed - input;
+  l[0].index = (uint16_t)(pl0 - l[0].buffer);
+  l[1].index = (uint16_t)(pl1 - l[1].buffer);
+  l[2].index = (uint16_t)(pl2 - l[2].buffer);
+  l[3].index = (uint16_t)(pl3 - l[3].buffer);
+  r[0].index = (uint16_t)(pr0 - r[0].buffer);
+  r[1].index = (uint16_t)(pr1 - r[1].buffer);
+  r[2].index = (uint16_t)(pr2 - r[2].buffer);
+  r[3].index = (uint16_t)(pr3 - r[3].buffer);
 }
 
-/* Отсчёт из задержки с дробным отставанием delay (линейно между соседями). */
-static float delay_tap(const float* buffer, uint32_t length, uint32_t index, float delay) {
+/* Отсчёт хоруса с дробным отставанием delay (линейно между соседями); длина — степень двойки. */
+static inline float chorus_tap(const float* line, uint32_t index, float delay) {
   float position = (float)index - delay;
   if (position < 0.0f) {
-    position += (float)length;
+    position += (float)CHORUS_LENGTH;
   }
   const uint32_t a = (uint32_t)position;
   const float t = position - (float)a;
-  const uint32_t b = (a + 1 >= length) ? 0 : a + 1;
-  return buffer[a] + (buffer[b] - buffer[a]) * t;
+  const uint32_t b = (a + 1) & (CHORUS_LENGTH - 1);
+  return line[a] + (line[b] - line[a]) * t;
 }
 
 /* Шина молчит весь кусок. */
@@ -508,57 +617,88 @@ static void effects_process(effects_t* e, const float* sends, float* out, uint32
   const float* echo = sends + 2 * frames;
   if (effect_needed(&e->reverb_idle, reverb, frames, REVERB_IDLE, e->memory,
                     (size_t)(e->chorus - e->memory))) {
-    for (uint32_t i = 0; i < frames; ++i) {
-      const float input = reverb[i] * REVERB_GAIN;
-      float l = 0.0f, rr = 0.0f;
-      for (int k = 0; k < COMBS; ++k) {
-        l += comb_process(&e->comb[0][k], input);
-        rr += comb_process(&e->comb[1][k], input);
+    /* Реверберация: вход куска, 8 гребёнок на сторону — сумма, 4 фазовращателя — на месте.
+     * Буферы куска — на стеке задачи (внутренняя память), не в PSRAM. */
+    const uint32_t start = cycle_count();
+    float in[BLOCK], left[BLOCK], right[BLOCK];
+    for (uint32_t done = 0; done < frames;) {
+      const uint32_t n = frames - done < BLOCK ? frames - done : BLOCK;
+      for (uint32_t i = 0; i < n; ++i) {
+        in[i] = reverb[done + i] * REVERB_GAIN;
+        left[i] = 0.0f;
+        right[i] = 0.0f;
       }
-      for (int k = 0; k < ALLPASSES; ++k) {
-        l = allpass_process(&e->allpass[0][k], l);
-        rr = allpass_process(&e->allpass[1][k], rr);
+      comb4_block(&e->comb[0][0], in, left, n);
+      comb4_block(&e->comb[0][4], in, left, n);
+      comb4_block(&e->comb[1][0], in, right, n);
+      comb4_block(&e->comb[1][4], in, right, n);
+      allpass4x2_block(e->allpass[0], e->allpass[1], left, right, n);
+      float* o = out + 2 * done;
+      for (uint32_t i = 0; i < n; ++i) {
+        o[0] += left[i] * REVERB_WET;
+        o[1] += right[i] * REVERB_WET;
+        o += 2;
       }
-      out[2 * i] += l * REVERB_WET;
-      out[2 * i + 1] += rr * REVERB_WET;
+      done += n;
     }
+    e->cycles_reverb += cycle_count() - start;
+    e->frames_reverb += frames;
   } else {
     for (int k = 0; k < COMBS; ++k) {
       e->comb[0][k].store = e->comb[1][k].store = 0.0f;
     }
   }
   if (effect_needed(&e->chorus_idle, chorus, frames, CHORUS_IDLE, e->chorus, CHORUS_LENGTH)) {
+    /* Хорус: треугольное качание (дёшево), правая отводка — на четверть периода позже.
+     * Линия, место и фаза — в регистрах на весь кусок. */
+    const uint32_t start = cycle_count();
+    float* const line = e->chorus;
+    uint32_t index = e->chorus_index;
+    float p = e->chorus_phase;
+    float* o = out;
     for (uint32_t i = 0; i < frames; ++i) {
-      /* Хорус: треугольное качание (дёшево), правая отводка — на четверть периода позже. */
-      e->chorus[e->chorus_index] = chorus[i];
-      const float p = e->chorus_phase;
+      line[index] = chorus[i];
       const float lfo_left = 4.0f * (p < 0.5f ? p : 1.0f - p) - 1.0f;
       const float q = p + 0.25f < 1.0f ? p + 0.25f : p - 0.75f;
       const float lfo_right = 4.0f * (q < 0.5f ? q : 1.0f - q) - 1.0f;
-      out[2 * i] += delay_tap(e->chorus, CHORUS_LENGTH, e->chorus_index,
-                              CHORUS_BASE + CHORUS_DEPTH * lfo_left) * CHORUS_LEVEL;
-      out[2 * i + 1] += delay_tap(e->chorus, CHORUS_LENGTH, e->chorus_index,
-                                  CHORUS_BASE + CHORUS_DEPTH * lfo_right) * CHORUS_LEVEL;
-      e->chorus_phase = p + CHORUS_RATE < 1.0f ? p + CHORUS_RATE : p + CHORUS_RATE - 1.0f;
-      if (++e->chorus_index >= CHORUS_LENGTH) {
-        e->chorus_index = 0;
-      }
+      o[0] += chorus_tap(line, index, CHORUS_BASE + CHORUS_DEPTH * lfo_left) * CHORUS_LEVEL;
+      o[1] += chorus_tap(line, index, CHORUS_BASE + CHORUS_DEPTH * lfo_right) * CHORUS_LEVEL;
+      o += 2;
+      p = p + CHORUS_RATE < 1.0f ? p + CHORUS_RATE : p + CHORUS_RATE - 1.0f;
+      index = (index + 1) & (CHORUS_LENGTH - 1);
     }
+    e->chorus_index = index;
+    e->chorus_phase = p;
+    e->cycles_chorus += cycle_count() - start;
+    e->frames_chorus += frames;
   }
   if (effect_needed(&e->echo_idle, echo, frames, ECHO_IDLE, e->echo, ECHO_LENGTH)) {
+    /* Эхо: три указателя в линии (запись, отводки слева и справа) идут вместе, каждый
+     * перескакивает в начало на своём конце; затухание высоких — в регистре. */
+    const uint32_t start = cycle_count();
+    float* const base = e->echo;
+    float* const end = base + ECHO_LENGTH;
+    float* w = base + e->echo_index;
+    const float* tl = e->echo_index >= ECHO_LEFT ? w - ECHO_LEFT : w + (ECHO_LENGTH - ECHO_LEFT);
+    const float* tr = e->echo_index >= ECHO_RIGHT ? w - ECHO_RIGHT : w + (ECHO_LENGTH - ECHO_RIGHT);
+    float low = e->echo_low;
+    float* o = out;
     for (uint32_t i = 0; i < frames; ++i) {
-      const uint32_t at_left = e->echo_index >= ECHO_LEFT ? e->echo_index - ECHO_LEFT : e->echo_index + ECHO_LENGTH - ECHO_LEFT;
-      const uint32_t at_right = e->echo_index >= ECHO_RIGHT ? e->echo_index - ECHO_RIGHT : e->echo_index + ECHO_LENGTH - ECHO_RIGHT;
-      const float tap_left = e->echo[at_left];
-      const float tap_right = e->echo[at_right];
-      e->echo_low += 0.4f * (tap_left - e->echo_low);
-      e->echo[e->echo_index] = echo[i] + e->echo_low * ECHO_FEEDBACK;
-      if (++e->echo_index >= ECHO_LENGTH) {
-        e->echo_index = 0;
-      }
-      out[2 * i] += tap_left * ECHO_LEVEL;
-      out[2 * i + 1] += tap_right * ECHO_LEVEL;
+      const float tap_left = *tl;
+      const float tap_right = *tr;
+      low += 0.4f * (tap_left - low);
+      *w = echo[i] + low * ECHO_FEEDBACK;
+      o[0] += tap_left * ECHO_LEVEL;
+      o[1] += tap_right * ECHO_LEVEL;
+      o += 2;
+      if (++w == end) w = base;
+      if (++tl == end) tl = base;
+      if (++tr == end) tr = base;
     }
+    e->echo_index = (uint32_t)(w - base);
+    e->echo_low = low;
+    e->cycles_echo += cycle_count() - start;
+    e->frames_echo += frames;
   } else {
     e->echo_low = 0.0f;
   }
@@ -575,8 +715,8 @@ static void voices_job(void* arg) {
   }
   const uint32_t middle = cycle_count();
   memset(m->job_voice_sends, 0, 3 * m->job_frames * sizeof(float));
-  tsf_render_float_sends_range(m->synth, m->job_dry, m->job_voice_sends, (int)m->job_frames, 0,
-                               m->job_last);
+  tsf_render_float_sends_range_prof(m->synth, m->job_dry, m->job_voice_sends, (int)m->job_frames, 0,
+                                    m->job_last, &m->prof1, m->scratch + TSF_SCRATCH_FLOATS);
   const uint32_t end = cycle_count();
   m->cycles_effects += middle - start;
   m->cycles_core1 += end - middle;
@@ -599,8 +739,8 @@ static void split_block(midi_t* m, float* out, uint32_t frames) {
   const int started = host->worker_start(voices_job, m) == ZM_OK;
   const uint32_t start = cycle_count();
   memset(m->sends, 0, 3 * frames * sizeof(float));
-  tsf_render_float_sends_range(m->synth, out, m->sends, (int)frames, m->job_last,
-                               tsf_voice_slots(m->synth));
+  tsf_render_float_sends_range_prof(m->synth, out, m->sends, (int)frames, m->job_last,
+                                    tsf_voice_slots(m->synth), &m->prof0, m->scratch);
   const uint32_t own = cycle_count() - start;
   if (started) {
     const uint32_t wait = cycle_count();
@@ -917,6 +1057,12 @@ static void* open_source(uint32_t file_size, const uint8_t* file) {
     close_source(m);
     return NULL;
   }
+  /* Куски голосов двух ядер — во внутренней памяти на время песни (нет — PSRAM). */
+  m->scratch = (float*)host->alloc(2 * TSF_SCRATCH_FLOATS * sizeof(float), ZM_MEM_INTERNAL);
+  if (m->scratch == NULL) {
+    close_source(m);
+    return NULL;
+  }
   m->pipelined = host->size >= offsetof(zm_host_t, worker_wait) + sizeof(host->worker_wait) &&
                  host->worker_start != NULL && host->worker_wait != NULL;
   m->voice_cap = m->voice_cap_min = MAX_VOICES;
@@ -1048,7 +1194,15 @@ static int render(void* instance, float* out, uint32_t max_frames, uint32_t* fra
     m->cycles_max = spent / done;
   }
   /* Предел голосов по нагрузке (без счётчика тактов — стенд на ПК — не ставится). */
-  m->load_avg = (m->load_avg * 3u + spent / done) / 4u;
+  /* С 1.8 кусок, который чужая задача или запись журнала во flash задержали на миллисекунды,
+   * считается не дороже двух кадров, а среднее — примерно за 0,4 с (1/16 на вызов render по
+   * ~23 мс): очереди вывода (0,74 с) этого хватает. 03.11.2026 на плате худшие куски стоили
+   * 7 000–27 000 тактов на кадр, и среднее по ~0,1 с срезало голоса до 16 из-за чужих задержек. */
+  uint32_t load = spent / done;
+  if (load > 2u * FRAME_CYCLES) {
+    load = 2u * FRAME_CYCLES;
+  }
+  m->load_avg = (m->load_avg * 15u + load) / 16u;
   const int active = tsf_voices_sounding(m->synth);
   if (m->load_avg > LOAD_HIGH && m->voice_cap > MIN_VOICES) {
     int cap = (active < m->voice_cap ? active : m->voice_cap) - 2;
@@ -1212,10 +1366,28 @@ static void close_source(void* instance) {
       host->log("midi: core 1: effects %u, voices %u cycles per frame (%u.%u voices on average)",
                 (unsigned)(m->cycles_effects / m->frames), (unsigned)(m->cycles_core1 / m->frames),
                 tenths / 10, tenths % 10);
+      /* Замер 1.8: такты голоса на отсчёт — на ядре 0 и 1, аппаратный цикл / развёрнутый на два. */
+      const struct tsf_prof* p0 = &m->prof0;
+      const struct tsf_prof* p1 = &m->prof1;
+      host->log("midi: voice cycles per sample: core 0 %u / %u, core 1 %u / %u (loop / unrolled)",
+                (unsigned)(p0->samples[0] ? p0->cycles[0] / p0->samples[0] : 0),
+                (unsigned)(p0->samples[1] ? p0->cycles[1] / p0->samples[1] : 0),
+                (unsigned)(p1->samples[0] ? p1->cycles[0] / p1->samples[0] : 0),
+                (unsigned)(p1->samples[1] ? p1->cycles[1] / p1->samples[1] : 0));
     } else {
       host->log("midi: peak %d voices, cycles per frame %u average (effects %u), %u worst",
                 m->peak_voices, (unsigned)(m->cycles / m->frames),
                 (unsigned)(m->cycles_effects / m->frames), (unsigned)m->cycles_max);
+    }
+    {
+      const effects_t* e = &m->effects;
+      host->log("midi: effects per working frame: reverb %u (%u%%), chorus %u (%u%%), echo %u (%u%%)",
+                (unsigned)(e->frames_reverb ? e->cycles_reverb / e->frames_reverb : 0),
+                (unsigned)(e->frames_reverb * 100 / m->frames),
+                (unsigned)(e->frames_chorus ? e->cycles_chorus / e->frames_chorus : 0),
+                (unsigned)(e->frames_chorus * 100 / m->frames),
+                (unsigned)(e->frames_echo ? e->cycles_echo / e->frames_echo : 0),
+                (unsigned)(e->frames_echo * 100 / m->frames));
     }
     if (m->capped_frames != 0) {
       host->log("midi: voices limited by load for %u ms (down to %d, %u voices ended)",
@@ -1236,6 +1408,9 @@ static void close_source(void* instance) {
     tml_free(m->song);
   }
   host->free(m->effects.memory);
+  if (m->scratch != NULL) {
+    host->free(m->scratch);
+  }
   if (m->keymap != NULL) {
     host->free(m->keymap);
   }
@@ -1251,7 +1426,7 @@ int main(int argc, char* argv[]) {
   table.abi_major = ZM_SOURCE_ABI_MAJOR;
   table.abi_minor = ZM_SOURCE_ABI_MINOR;
   table.name = "midi";
-  table.version = "1.7.3";
+  table.version = "1.8";
   table.extensions = "MID RMI";
   table.input = ZM_INPUT_WHOLE;
   table.keeps_file = 0;

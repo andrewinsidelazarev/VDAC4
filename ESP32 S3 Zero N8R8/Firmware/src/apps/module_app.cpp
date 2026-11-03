@@ -591,8 +591,12 @@ void ModuleApp::handleCommit() {
                          app_ != nullptr ? appName_ : nullptr)
                ? 1
                : 0;
-      if (ok != 0) {
-        appStale_ = true;                // приложение или его декодер сменился
+      // Перезапуск нужен, только если сменилось само приложение или модуль, который у него
+      // загружен (0.1.114). Прежде — после любого: плагин плеера шлёт новый декодер после
+      // запуска PLAYER, и экран Tang гас на секунду, хотя декодер PLAYER берёт из кэша при
+      // каждом открытии файла (03.11.2026).
+      if (ok != 0 && moduleInUse(deliveryName_)) {
+        appStale_ = true;
       }
     }
     bringupLog(kTag, "%s %s: %u bytes %s in %u ms", deliveryResource_ ? "resource" : "module",
@@ -927,14 +931,34 @@ void ModuleApp::unloadElf(void* elf) {
   heap_caps_free(elf);
 }
 
+// Модуль name — само приложение или загружен им (module_open).
+bool ModuleApp::moduleInUse(const char* name) const {
+  if (app_ != nullptr && strcmp(appName_, name) == 0) {
+    return true;
+  }
+  for (const LoadedModule& module : modules_) {
+    if (module.used && strcmp(module.name, name) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 int ModuleApp::startApp(const char* name) {
-  // Плагин шлёт APP_START перед каждым файлом. То же приложение уже работает,
-  // и модули с его запуска не менялись, — перезапуск не нужен.
+  // Плагин шлёт APP_START перед каждым файлом. То же приложение уже работает, а
+  // ни его образ, ни загруженные им модули с его запуска не менялись, — перезапуск
+  // не нужен.
   if (app_ != nullptr && !appStale_ && strcmp(appName_, name) == 0) {
     return ZM_OK;
   }
   stopApp();
   appStale_ = false;
+  // Система однозадачная (пользователь, 03.11.2026): новому приложению — вся память. Файловые
+  // серверы (SMB, FTP) прочь: сервер SMB после выхода из своего плагина на Evo работал дальше и
+  // держал 582 КБ PSRAM, и с ним MIDI в 23 тыс. событий не открывался (0.1.115).
+  if (!host_.stopFileServers()) {
+    bringupLog(kTag, "app %s: file servers did not stop", name);
+  }
   const zm_app_t* app = nullptr;
   void* elf = nullptr;
   int entryResult = 0;

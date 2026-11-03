@@ -188,6 +188,7 @@ class ModuleApp : public App {
   int loadElf(const char* name, void* arg1, void* arg2, void** elfOut, int* entryResult);
   void unloadElf(void* elf);
   int startApp(const char* name);
+  bool moduleInUse(const char* name) const;   // само приложение или загруженный им модуль
   void stopApp();
   void freeAllocations();
   void closeStreams();
@@ -212,7 +213,7 @@ class ModuleApp : public App {
   void* appElf_ = nullptr;
   const zm_app_t* app_ = nullptr;
   char appName_[13] = {};
-  bool appStale_ = false;                 // с запуска в кэш лёг новый модуль: перезапустить
+  bool appStale_ = false;                 // с запуска сменился образ приложения или его модуль
   bool appStarted_ = false;               // start() приложения прошёл (под appLock_)
   SemaphoreHandle_t appLock_ = nullptr;   // выгрузка против poll на сетевом ядре
   bool inCommand_ = false;
