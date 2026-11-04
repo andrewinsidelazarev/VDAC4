@@ -112,6 +112,9 @@ enum { FMT_NONE = 0, FMT_MP3 = 1, FMT_MOD = 2, FMT_XM = 3, FMT_S3M = 4, FMT_IT =
 #define START_MS 200
 #define TASK_PRIORITY 5                    /* на ступень ниже задачи звука ядра */
 #define DECODE_STACK 12288                 /* задача декодера: stb_vorbis открывает поток на стеке */
+#define START_SETTLE_MS 50                 /* запуск: память прежнего приложения — назад в кучу */
+#define START_TRIES 9                      /* стек декодера не лёг — ещё попытки ... */
+#define START_RETRY_MS 100                 /* ... через столько (всего до секунды) */
 #define WORKER_PRIORITY 5                  /* помощник декодеров на ядре 1: ниже задачи обмена (20) */
 #define CPU_HZ 240000000u                  /* частота ESP32-S3: бюджет кадра — CPU_HZ / частота звука */
 /* Интернет-радио (плейлист M3U). */
@@ -2944,7 +2947,8 @@ static void online_poll(void) {
 
 static int start(const zm_core_t* c) {
   core = c;
-  P = (player_t*)core->alloc(sizeof(player_t), ZM_MEM_INTERNAL);
+  /* Состояние — в PSRAM (1.40): внутренняя память — стекам задач, и прежде всего декодеру. */
+  P = (player_t*)core->alloc(sizeof(player_t), ZM_MEM_PSRAM);
   if (P == NULL) {
     core->log("player: start: no memory for the state (%u bytes)", (unsigned)sizeof(player_t));
     return ZM_NO_MEMORY;
@@ -2978,6 +2982,26 @@ static int start(const zm_core_t* c) {
   host.make_room = host_make_room;
   host.input_wait = host_input_wait;
   host.rest = host_rest;                       /* с 1.8: уступка ядра декодеру (ABI 7) */
+  /* Плеер сам берёт себе память (1.40). Прежнее приложение ESP останавливает прямо перед запуском
+   * плеера, и стеки его задач куча получает назад, только когда поработает задача IDLE, а start
+   * идёт без пауз: 04.11.2026 плеер стартовал при 21,7 КБ внутренней памяти, через секунду её было
+   * 42,5 КБ, и стек декодера не лёг — плеер не запустился. Поэтому сначала пауза, потом стек
+   * декодера; нет места — ещё пауза и снова, не дольше секунды.
+   * Декодер — первым: его стек (12 КБ) должен лечь одним куском во внутреннюю память, а её у ESP
+   * мало. 1.21: задача обложек раньше него оставляла ему пустую кучу; 1.30–1.39 помощник (4 КБ) и
+   * задача экрана (6 КБ) снова запускались раньше. Задача декодера до первого файла ни помощника,
+   * ни экрана, ни спектра не трогает. */
+  core->delay(START_SETTLE_MS);
+  int r = core->task_start(decode_task, NULL, DECODE_STACK, TASK_PRIORITY, 0);
+  for (int tries = 0; r == ZM_NO_MEMORY && tries < START_TRIES; ++tries) {
+    core->delay(START_RETRY_MS);
+    r = core->task_start(decode_task, NULL, DECODE_STACK, TASK_PRIORITY, 0);
+  }
+  if (r != ZM_OK) {
+    P->task_done = 1;                          /* задачи нет: stop() её не ждёт */
+    core->log("player: start: decode task (%u-byte stack) not started (%d)", (unsigned)DECODE_STACK, r);
+    return r;
+  }
   /* Помощник на ядре 1: нет задачи или семафоров — декодеры считают всё сами. */
   P->worker_go = core->signal_create();
   P->worker_done = core->signal_create();
@@ -2993,14 +3017,6 @@ static int start(const zm_core_t* c) {
   }
   if (view_begin(core) != ZM_OK) {
     core->log("player: no spectrum (no memory)");
-  }
-  /* Декодер — первым: внутренней памяти ESP мало, и задача обложек (6 КБ) раньше него оставляла
-     декодеру (12 КБ) пустую кучу — плеер не стартовал (1.21 на прошивке 0.1.85) */
-  const int r = core->task_start(decode_task, NULL, DECODE_STACK, TASK_PRIORITY, 0);
-  if (r != ZM_OK) {
-    P->task_done = 1;                          /* задачи нет: stop() её не ждёт */
-    core->log("player: start: decode task (%u-byte stack) not started (%d)", (unsigned)DECODE_STACK, r);
-    return r;
   }
   /* Обложка из сети: нужны потоки HTTP(S) ядра (ABI minor 2); задача — разовая, по песне */
   P->online_net = core->size >= offsetof(zm_core_t, net_close) + sizeof(core->net_close);
@@ -3067,7 +3083,7 @@ int main(int argc, char* argv[]) {
   app.abi_major = ZM_APP_ABI_MAJOR;
   app.abi_minor = ZM_APP_ABI_MINOR;
   app.name = "player";
-  app.version = "1.39";
+  app.version = "1.40";
   app.command_first = AUDIO_VIEW;
   app.command_last = AUDIO_TAGS;
   app.start = start;

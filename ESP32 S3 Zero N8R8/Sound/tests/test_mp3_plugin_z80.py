@@ -1159,7 +1159,7 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertEqual(data[63], 0, "и Enter, и F3")
         self.assertEqual(data[64:161], bytes(97), "старое поле 32 расширений у #11 пустое")
         self.assertEqual(data[161:165], b"\xFF" * 4, "размер файла не ограничен")
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.25")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.26")
         self.assertEqual((data[34], data[35]), (2, 0), "две страницы, запуск — страница 0")
         self.assertEqual(data[38], 1, "второй блок файла — в страницу 1")
         self.assertEqual(data[197], 4, "меню выбора просмотрщика, в F10 плеера нет")
@@ -1190,8 +1190,10 @@ class Mp3PluginTest(unittest.TestCase):
                 self.assertEqual(bytes(esp.received), content)
                 self.assertTrue(all(0 < block <= 1024 for block in esp.blocks))
                 self.assertEqual(h.own_sectors(), -(-size // 512), "с карты прочитано ровно нужное")
-                # Плагин 1.21: после PING — VERSION Tang (есть ли экран на HDMI)
-                self.assertEqual(esp.commands[:3], [CMD_PING, TANG_READ, AUDIO_OPEN])
+                # Плагин 1.21: после PING — VERSION Tang (есть ли экран на HDMI); 1.26: AUDIO_STATUS —
+                # в ESP ли тот же PLAYER (нет — очистить память, APP_STOP)
+                self.assertEqual(esp.commands[:3], [CMD_PING, TANG_READ, AUDIO_STATUS])
+                self.assertIn(AUDIO_OPEN, esp.commands)
                 self.assertEqual(esp.opens, [bytes([0]) + size.to_bytes(4, "little") + bytes([3]) +
                                              b"MP3"],
                                  "поток MP3 открывается с длиной (по ней ESP считает время); "
@@ -2734,6 +2736,30 @@ class ModuleDeliveryTest(unittest.TestCase):
             return events
         self.assertEqual(order(False)[:6], ['PLAYER.ELF', 'START', 'MIDI.ELF', 'START', 'MIDI.SF2', 'OPEN'])
         self.assertEqual(order(True)[:5], ['PLAYER.ELF', 'START', 'MIDI.ELF', 'MIDI.SF2', 'OPEN'])
+
+    def test_memory_cleared_before_the_player_unless_it_runs(self) -> None:
+        # Плагин 1.26: до запуска PLAYER.ELF — команда ESP очистить память (APP_STOP), если в ней не
+        # тот же ELF: нет ответа PLAYER на AUDIO_STATUS с байтом экрана (в ESP другое приложение или
+        # никакого). Работает сам PLAYER (соседний файл панели) — не трогать: экран Tang остаётся.
+        for running, stops in ((False, 1), (True, 0)):
+            with self.subTest(running=running):
+                audio = AudioEsp()
+                audio.screen = SCREEN_F_TANG | SCREEN_F_SHOWN if running else None
+                h = self.midi(audio, PLAYER_ELF=self.elf(2000, 41), MIDI_ELF=self.elf(3000, 42),
+                              MIDI_SF2=self.BANK)
+                events = []
+
+                def app(command: int, payload: bytes, audio=audio, events=events) -> bytes:
+                    if command in (APP_STOP, APP_START, MOD_QUERY):
+                        events.append(command)
+                    return audio(command, payload)
+                h.app = app
+                h.start()
+                self.assertEqual(bytes(audio.received), b"MThd" + bytes(3000))
+                before = events[:events.index(APP_START)]
+                self.assertEqual(before.count(APP_STOP), stops, events)
+                if stops:
+                    self.assertEqual(events[0], APP_STOP, 'память — до передачи модулей')
 
     def test_modules_from_the_volume_wc_came_from(self) -> None:
         # Музыка на другом устройстве (Nemo IDE): /WC/ESP — на томе WC (STREAM #FD),

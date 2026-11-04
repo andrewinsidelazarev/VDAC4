@@ -55,6 +55,7 @@ Esp_Prepare:
         ld (EspWhy),a
         ld hl,UiEmpty
         ld (EspName),hl
+        call Esp_ClearMemory
         ; Свой файл — по имени, которое WC передал в BC: TENTRY до этого отдаёт
         ; чужую запись (что DOS искал последним), WC файл плагину открывает по
         ; кластеру из панели. FENTRY в каталоге панели делает свой файл
@@ -773,6 +774,30 @@ Esp_StartApp:
         xor a
         ld (ProtoErr),a
         ret
+
+; Память — до запуска PLAYER.ELF (плагин 1.26): в ESP не тот же ELF — APP_STOP, ESP выгружает
+; его и отдаёт всю его память, пока идёт подготовка (поиск модулей, передача); тот же — не
+; трогать (соседний файл панели: PLAYER ещё работает, экран Tang остаётся). Тот же — значит,
+; AUDIO_STATUS отвечает PLAYER с байтом экрана (1.26+). 04.11.2026 PLAYER стартовал, пока куча
+; не получила назад память прежнего приложения, и стек декодера не лёг — плеер не запустился.
+Esp_ClearMemory:
+        call Ui_PackBlock
+        ld a,CMD_AUDIO_STATUS
+        call Proto_Send
+        jr c,.stop
+        ld a,RESP_AUDIO_STATUS
+        ld de,MP3_WAIT
+        call Mp3_Wait
+        jr c,.stop
+        ld hl,(ProtoRxLen)
+        ld de,ST_SCREEN+1
+        or a
+        sbc hl,de
+        ret nc                           ; тот же PLAYER — память его
+.stop:
+        xor a
+        ld (ProtoErr),a                  ; отказ — не ошибка: в ESP не PLAYER
+        jp Esp_StopApp
 
 ; Приложение заново (APP_STOP, APP_START): ESP выгружает PLAYER.ELF с его
 ; декодерами и отдаёт всю его память — так освобождается место, которое он
