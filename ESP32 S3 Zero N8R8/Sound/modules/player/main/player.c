@@ -84,7 +84,7 @@ enum {
 /* Состояния и форматы записи AUDIO_STATUS. */
 enum { ST_IDLE = 0, ST_PLAYING = 1, ST_DRAINING = 2, ST_OFFLINE = 4, ST_LOADING = 5 };
 enum { FMT_NONE = 0, FMT_MP3 = 1, FMT_MOD = 2, FMT_XM = 3, FMT_S3M = 4, FMT_IT = 5, FMT_MIDI = 6,
-       FMT_OPL = 7, FMT_SAA = 8, FMT_TSFM = 9 };
+       FMT_OPL = 7, FMT_SAA = 8, FMT_TSFM = 9, FMT_SID = 10 };
 #define OPEN_MODULE 0x80                   /* AUDIO_OPEN: файл целиком */
 #define OPEN_MIDI 0x40                     /* ... и это MIDI: банк не освобождать */
 #define OPEN_RELEASE 0x20                  /* AUDIO_OPEN [#20]: только освободить ресурсы */
@@ -92,6 +92,7 @@ enum { FMT_NONE = 0, FMT_MP3 = 1, FMT_MOD = 2, FMT_XM = 3, FMT_S3M = 4, FMT_IT =
 #define SKIP_TITLE "Cannot play this file, skipping"   /* название на это время */
 #define MIDI_BANK "MIDI.SF2"
 #define OPL4_ROM "YRW801.ROM"
+#define SID_BASE "SIDLEN.BIN"             /* длины мелодий SID (HVSC Songlengths, SID.ELF) */
 #define STATUS_SIZE 33                     /* 33-й байт — флаги экрана Tang (1.26, SCREEN_F_*) */
 
 #define RING_BYTES (128u * 1024u)         /* очередь потока с карты: 8 с при 128 кбит/с, 3 с при 320 */
@@ -110,12 +111,12 @@ enum { FMT_NONE = 0, FMT_MP3 = 1, FMT_MOD = 2, FMT_XM = 3, FMT_S3M = 4, FMT_IT =
  * Только у файлов, лежащих на ESP целиком (модули, TSFM, OPL, MIDI, SAA): поток
  * приходит частями и сам набирает очередь. Буфер — PSRAM на время старта. */
 #define START_MS 200
-#define TASK_PRIORITY 5                    /* на ступень ниже задачи звука ядра */
+#define TASK_PRIORITY 1                    /* ниже сети/консоли (2) и звука (6), как Tang (1) */
 #define DECODE_STACK 12288                 /* задача декодера: stb_vorbis открывает поток на стеке */
 #define START_SETTLE_MS 50                 /* запуск: память прежнего приложения — назад в кучу */
 #define START_TRIES 9                      /* стек декодера не лёг — ещё попытки ... */
 #define START_RETRY_MS 100                 /* ... через столько (всего до секунды) */
-#define WORKER_PRIORITY 5                  /* помощник декодеров на ядре 1: ниже задачи обмена (20) */
+#define WORKER_PRIORITY 1                  /* как loopTask: команды Evo получают квант даже при перегрузке */
 #define CPU_HZ 240000000u                  /* частота ESP32-S3: бюджет кадра — CPU_HZ / частота звука */
 /* Интернет-радио (плейлист M3U). */
 #define RADIO_TYPE "M3U"                   /* расширение плейлиста в AUDIO_OPEN */
@@ -287,6 +288,7 @@ typedef struct {
   int worker_busy;                        /* работа отдана и не дождана; трогает задача декодера */
   volatile int worker_quit;
   volatile int worker_exited;
+  volatile int lock_wanted;                /* команд Evo, ждущих P->lock (command_lock, 1.44) */
 
   /* Интернет-радио (плейлист M3U): см. «интернет-радио» ниже. */
   radio_station_t* stations;              /* PSRAM, RADIO_STATIONS */
@@ -448,10 +450,11 @@ static int host_make_room(size_t bytes) {
     return 0;
   }
   P->room_made = 1;
-  core->log("player: %u bytes do not fit with the resources: " MIDI_BANK " and " OPL4_ROM
-            " released", (unsigned)bytes);
+  core->log("player: %u bytes do not fit with the resources: " MIDI_BANK ", " OPL4_ROM " and "
+            SID_BASE " released", (unsigned)bytes);
   core->resource_release(MIDI_BANK);
   core->resource_release(OPL4_ROM);
+  core->resource_release(SID_BASE);
   if (P->kit[0] != 0) {
     core->resource_release(P->kit);
     P->kit[0] = 0;
@@ -567,6 +570,7 @@ static int host_resource(const char* name, const uint8_t** data, size_t* size) {
 
 static void worker_task(void* arg) {
   (void)arg;
+  uint32_t rest_ms = core->millis();
   while (!P->worker_quit) {
     if (core->signal_wait(P->worker_go, 1000) != ZM_OK) {
       continue;
@@ -574,6 +578,12 @@ static void worker_task(void* arg) {
     void (*fn)(void*) = P->worker_fn;
     if (fn != NULL && !P->worker_quit) {
       fn(P->worker_arg);
+      /* Непрерывная очередь не должна лишать IDLE1 времени даже при перегрузке.
+       * Счётчик отдельный: host_rest принадлежит задаче декодера на ядре 0. */
+      if (core->millis() - rest_ms >= REST_EVERY_MS) {
+        core->delay(1);
+        rest_ms = core->millis();
+      }
     }
     core->signal_give(P->worker_done);
   }
@@ -648,6 +658,11 @@ static int opl_type(const char* type) {
 
 /* Декодер файла целиком — по его началу (IMF — по расширению). */
 static const char* whole_decoder(const uint8_t* file, uint32_t size) {
+  /* С PLAYER 1.43: музыка Commodore 64 — PSID и RSID (SID.ELF, cRSID). */
+  if ((size >= 4 && (memcmp(file, "PSID", 4) == 0 || memcmp(file, "RSID", 4) == 0)) ||
+      strcmp(P->file_type, "SID") == 0) {
+    return "SID.ELF";
+  }
   if (strcmp(P->file_type, "AS0") == 0 ||
       strcmp(P->file_type, "ASC") == 0 ||
       strcmp(P->file_type, "FTC") == 0 ||
@@ -712,6 +727,7 @@ static uint8_t format_code(const char* format) {
   if (strncmp(format, "MIDI", 4) == 0) return FMT_MIDI;
   if (strncmp(format, "OPL", 3) == 0) return FMT_OPL;
   if (strncmp(format, "SAA", 3) == 0) return FMT_SAA;
+  if (strncmp(format, "SID", 3) == 0) return FMT_SID;
   return FMT_NONE;
 }
 
@@ -817,12 +833,23 @@ static void open_output(void) {
 static void write_frames(const float* data, uint32_t frames, uint32_t generation) {
   uint32_t done = 0;
   while (done < frames && !P->stop && P->generation == generation) {
-    const int put = core->pcm_write(data + done * P->channels, frames - done);
+    /* pcm_write может ждать место и продолжить запись после pcm_flush команды.
+     * Короткая порция позволяет прервать даже накопленные 200 мс начала файла. */
+    uint32_t part = frames - done;
+    if (part > 256u) part = 256u;
+    const int put = core->pcm_write(data + done * P->channels, part);
     if (put < 0 || (put == 0 && !P->paused)) {
       break;
     }
     core->mutex_lock(P->lock);
-    if (P->generation == generation && put > 0) {
+    if (P->generation != generation) {
+      /* Новая позиция уже принята. Удалить возможный хвост старой записи прежде,
+       * чем этот же поток начнёт выводить PCM нового поколения. */
+      core->pcm_flush();
+      core->mutex_unlock(P->lock);
+      break;
+    }
+    if (put > 0) {
       P->written += (uint32_t)put;
       if (spectrum_view()) {
         view_feed(data + done * P->channels, (uint32_t)put, P->channels, P->rate);
@@ -850,9 +877,9 @@ static void start_flush(uint32_t generation) {
   start_release();
 }
 
-/* Спектр (MP3, MIDI) или уровни каналов (трекер). */
+/* Спектр (MP3, MIDI, SID: у неё три голоса на микросхему) или уровни каналов (трекер). */
 static int spectrum_view(void) {
-  return P->stream_open || P->format == FMT_MP3 || P->format == FMT_MIDI;
+  return P->stream_open || P->format == FMT_MP3 || P->format == FMT_MIDI || P->format == FMT_SID;
 }
 
 /* Уровни каналов модуля; спектр публикуется после принятия PCM выводом. */
@@ -1658,6 +1685,10 @@ static void decode_task(void* arg) {
       }
     }
     core->mutex_unlock(P->lock);
+    /* Команда Evo ждёт замок (command_lock) — уступить ей ядро, пока не возьмёт (до 50 мс). */
+    for (int wait = 0; wait < 50 && P->lock_wanted != 0; ++wait) {
+      core->delay(1);
+    }
     /* Пока render шёл без замка, команда сменила поколение (открыт другой файл, стоп,
      * перемотка): итог прежнего потока не нужен. Прежде его конец (END) закрывал
      * вывод и ставил ST_IDLE уже новому файлу, и тот не начинал играть. */
@@ -1702,6 +1733,10 @@ static void decode_task(void* arg) {
         core->delay(1);
         P->rest_ms = core->millis();
       }
+    } else if (result == ZM_RENDER_NEED_INPUT && !P->radio && !P->stream_open && !P->stream_module) {
+      /* Целый файл уже принят: декодер продолжает подготовку порциями. Это не
+       * опустошение входного кольца. Замок отпущен: стоп и новая позиция доступны. */
+      core->delay(1);
     } else if (result == ZM_RENDER_NEED_INPUT) {
       if (P->start_fill != 0 && P->start_generation == generation) {
         start_flush(generation);                /* вход кончился раньше START_MS */
@@ -1783,11 +1818,22 @@ static uint32_t played_ms(void) {
 }
 
 /* Остановить звук и всё, что было открыто (новый файл, обрыв). */
+/* Замок P->lock — для команды Evo (1.44): задача декодера, отпустив его после render, уступает ядро,
+ * пока команда его не возьмёт (decode_task). Иначе декодер, не успевающий за звуком, брал замок снова
+ * сразу, а команда на ядре 1 (задача обмена — приоритет 1, в 1.44 ниже помощника декодеров) не успевала его
+ * перехватить: 04.11.2026 SID.ELF на тяжёлой RSID — стоп ждал замок 22 с, плагин писал «ESP does not
+ * answer», стрелки пропадали. */
+static void command_lock(void) {
+  P->lock_wanted++;
+  core->mutex_lock(P->lock);
+  P->lock_wanted--;
+}
+
 static void stop_all(void) {
   report("stop");
   radio_stop();
   P->load_abort = 1;                      /* декодер в open потоком — не ждать байтов */
-  core->mutex_lock(P->lock);
+  command_lock();
   P->generation++;
   view_reset();
   close_output();
@@ -1843,7 +1889,7 @@ static int open_stream_module(uint32_t size) {
   if (P->ring == NULL) {
     return 0;                             /* кольца нет (PSRAM) — целиком */
   }
-  core->mutex_lock(P->lock);
+  command_lock();
   const int ok = load_decoder("TRACKER.ELF") == ZM_OK &&
                  P->source->size >= offsetof(zm_source_t, streams_whole) + 1 &&
                  P->source->streams_whole;
@@ -1877,19 +1923,22 @@ static void reply_open(int ok) {
 
 /* Новый файл (1.37): ресурсы ESP, которые ему не нужны, — прочь сразу, а не когда памяти не
  * хватило: система однозадачная, а экран Tang своей памяти не отдаёт. MIDI нужен только банк,
- * OPL (VGM, MWM…) — ПЗУ OPL4 и набор MWM, прочим — ничего (все ресурсы разом — прошивка 0.1.112+,
- * старая на NULL ничего не делает, поэтому и по именам). Плагин пришлёт нужный, когда понадобится:
- * банк и набор он шлёт до AUDIO_OPEN, ПЗУ — по флагу и открывает файл заново. После stop_all:
- * прежний декодер закрыт и ресурса уже не читает. */
-static void release_for(int midi, int opl) {
+ * OPL (VGM, MWM…) — ПЗУ OPL4 и набор MWM, SID — база длин (1.43), прочим — ничего (все ресурсы
+ * разом — прошивка 0.1.112+, старая на NULL ничего не делает, поэтому и по именам). Плагин пришлёт
+ * нужный, когда понадобится: банк, набор и базу он шлёт до AUDIO_OPEN, ПЗУ — по флагу и открывает
+ * файл заново. После stop_all: прежний декодер закрыт и ресурса уже не читает. */
+static void release_for(int midi, int opl, int sid) {
   if (core->resource_release == NULL) {
     return;
   }
-  if (!midi && !opl) {
+  if (!midi && !opl && !sid) {
     core->resource_release(NULL);
   }
   if (!midi) {
     core->resource_release(MIDI_BANK);
+  }
+  if (!sid) {
+    core->resource_release(SID_BASE);
   }
   if (!opl) {
     core->resource_release(OPL4_ROM);
@@ -1915,6 +1964,7 @@ static void command_open(const uint8_t* data, uint16_t length) {
       core->log("player: resources released for the plugin");
       core->resource_release(MIDI_BANK);
       core->resource_release(OPL4_ROM);
+      core->resource_release(SID_BASE);
       if (P->kit[0] != 0) {
         core->resource_release(P->kit);
         P->kit[0] = 0;
@@ -1930,7 +1980,7 @@ static void command_open(const uint8_t* data, uint16_t length) {
       const char c = (char)data[5 + i];
       P->file_type[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
     }
-    release_for((data[0] & OPEN_MIDI) != 0, opl_type(P->file_type));
+    release_for((data[0] & OPEN_MIDI) != 0, opl_type(P->file_type), strcmp(P->file_type, "SID") == 0);
     if (size != 0 && strcmp(P->file_type, "IT") == 0 && open_stream_module(size)) {
       reply_open(1);
       return;
@@ -1963,9 +2013,9 @@ static void command_open(const uint8_t* data, uint16_t length) {
     const char c = (char)data[6 + i];
     P->file_type[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
   }
-  release_for(0, 0);
+  release_for(0, 0, 0);
   if (strcmp(P->file_type, "FLA") == 0) {
-    core->mutex_lock(P->lock);
+    command_lock();
     ring_resize(FLAC_RING_BYTES);
     if (P->ring_big == NULL && host_make_room(FLAC_RING_BYTES)) ring_resize(FLAC_RING_BYTES);
     core->mutex_unlock(P->lock);
@@ -1986,7 +2036,7 @@ static void command_open(const uint8_t* data, uint16_t length) {
               (data[5] & 1) ? "yes" : "no", (data[5] & 2) ? "found" : "NOT found",
               (data[5] & 4) ? "yes" : "no");
   }
-  core->mutex_lock(P->lock);
+  command_lock();
   host.stream_offset = 0;                 /* поток — с начала файла */
   const int ok = load_decoder(decoder) == ZM_OK &&
                  (P->instance = P->source->open(P->stream_size, NULL)) != NULL;
@@ -2194,10 +2244,10 @@ static void command_seek(const uint8_t* data, uint16_t length) {
   if (length >= 1 && P->instance != NULL && P->format != FMT_MP3 && P->state == ST_PLAYING) {
     int32_t delta = (int8_t)data[0];
     if (P->source->seek_unit == ZM_SEEK_MS) {
-      delta *= 10000;                    /* MIDI: шаг клавиши — 10 с */
+      delta *= 10000;                    /* Форматы с перемоткой по времени, включая SID: шаг 10 с */
     }
     uint32_t offset = 0;
-    core->mutex_lock(P->lock);
+    command_lock();
     const int ok = P->source->seek(P->instance, delta, &offset) == ZM_OK;
     if (ok) {
       P->generation++;
@@ -2222,7 +2272,7 @@ static void command_flush(const uint8_t* data, uint16_t length) {
    * стрелки во время доигрывания ничего не делали. */
   const int draining = P->state == ST_DRAINING && P->closed && !P->radio;
   if (length >= 4 && (P->stream_open || draining) && P->instance != NULL) {
-    core->mutex_lock(P->lock);
+    command_lock();
     if (draining) {
       P->stream_open = 1;
       P->closed = 0;
@@ -2442,8 +2492,12 @@ static void command_tags(void) {
     memcpy(r + used, fields[i], length + 1);
     used += length + 1;
   }
-  if (whole && (P->format == FMT_OPL || P->format == FMT_SAA || P->format == FMT_TSFM)) {
-    const char* chips = strncmp(P->info.format, "OPL ", 4) == 0 ? P->info.format + 4 : P->info.format;
+  if (whole && (P->format == FMT_OPL || P->format == FMT_SAA || P->format == FMT_TSFM ||
+                P->format == FMT_SID)) {
+    /* «OPL YMF262», «SID 6581 PSID» — окну плагина без имени декодера: расширение у него своё. */
+    const char* chips = strncmp(P->info.format, "OPL ", 4) == 0 || strncmp(P->info.format, "SID ", 4) == 0
+                            ? P->info.format + 4
+                            : P->info.format;
     const size_t length = strnlen(chips, sizeof(P->info.format) - 1);
     memcpy(r + used, chips, length);
     r[used + length] = 0;
@@ -2568,6 +2622,10 @@ static void ui_format(zm_ui_model_t* m) {
       }
       return;
     }
+    case FMT_SID:
+      /* «SID  6581 PSID»; время и полоса — общие, как у MIDI. */
+      snprintf(m->format, sizeof(m->format), "%s  %s", ext, P->info.format + 4);
+      return;
     case FMT_MIDI:
       snprintf(m->format, sizeof(m->format), "MIDI  %u channels", (unsigned)P->info.voices);
       if (P->info.samples != 0 || P->info.effects != 0) {
@@ -3096,7 +3154,7 @@ int main(int argc, char* argv[]) {
   app.abi_major = ZM_APP_ABI_MAJOR;
   app.abi_minor = ZM_APP_ABI_MINOR;
   app.name = "player";
-  app.version = "1.42";
+  app.version = "1.46";
   app.command_first = AUDIO_VIEW;
   app.command_last = AUDIO_TAGS;
   app.start = start;

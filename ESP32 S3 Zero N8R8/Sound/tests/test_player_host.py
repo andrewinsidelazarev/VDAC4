@@ -186,8 +186,17 @@ def build() -> pathlib.Path | None:
     lines = ['@echo off', f'call "{short(vcvars)}" >nul 2>nul || exit /b 1']
     lines += [f'cl {flags} "{short(ROOT / source)}" /Fo:{obj} || exit /b 1'
               for flags, source, obj in units]
+    # SID.ELF (cRSID: GNU C — атрибуты, __builtin_expect) — clang под ту же цель, что cl (x86, MSVC).
+    # -x c: короткое имя 8.3 кончается на «.C», а это clang считает C++.
+    from test_sid_source import CLANG
+    sid_includes = ' '.join(f'-I "{short(ROOT / path)}"' for path in
+                            ('tests/stubs_sid', 'components/crsid')) + \
+        f' -I "{short(FIRMWARE / "modules/sdk/include")}"'
+    lines.append(f'"{short(CLANG)}" --target=i686-pc-windows-msvc -c -O2 -std=gnu11 -w '
+                 f'-D_CRT_SECURE_NO_WARNINGS -Dmain=sid_main {sid_includes} -x c '
+                 f'"{short(ROOT / "modules/sid/main/sid_source.c")}" -o sid_source.obj || exit /b 1')
     lines.append('cl /nologo ' + ' '.join(obj for _, _, obj in units) +
-                 ' winmm.lib /Fe:player_host.exe')
+                 ' sid_source.obj winmm.lib /Fe:player_host.exe')
     script = BUILD / 'build_host.bat'
     script.write_text('\r\n'.join(lines) + '\r\n', encoding='ascii')
     result = subprocess.run(['cmd.exe', '/c', short(script)], capture_output=True,
@@ -925,7 +934,7 @@ class PlayerHostTest(unittest.TestCase):
         self.assertAlmostEqual(int(r['pcm_frames']), int(4 * 7.68 * RATE), delta=2048)
         # PLAYER 1.20: вывод открывается, когда накоплено 200 мс начала — запись во
         # flash в начале трека (оба ядра стоят) лишь задерживает старт.
-        self.assertGreaterEqual(int(r['first_write']), RATE // 5)
+        self.assertGreaterEqual(int(r['frames_before_first_open']), RATE // 5)
         # Файл модуля живёт с декодером (отсчёты XM распакованы в нём на месте):
         # на одну память больше, чем у MP3; её освобождает ядро при выгрузке. С 1.32
         # кольца потока у файла целиком нет (ring_release) — на одну меньше.
@@ -1491,6 +1500,77 @@ class PlayerHostTest(unittest.TestCase):
         self.assertEqual(r['seek'],'1')
         self.assertGreaterEqual(int(r['seconds_after_seek']),10)
         self.assertEqual(r['finished'],'1')
+
+    def test_sid_format_view_tags_and_end(self):
+        # PLAYER 1.43: PSID/RSID — SID.ELF; длина подмелодии — из SIDLEN.BIN (ресурс), конец —
+        # следующий файл; вид — спектр; окну плагина — микросхема без «SID».
+        from test_sid_source import make_sid, base_for
+        data = make_sid()
+        base = pathlib.Path(self.temp.name) / 'SIDLEN.BIN'
+        base.write_bytes(base_for(data, '0:02 0:03'))
+        for extension in ('SID', 'MOD'):
+            with self.subTest(extension=extension):
+                r = self.run_host('module', data, ext=extension, resource=f'SIDLEN.BIN={base}')
+                self.assertEqual(r['info_format'], '10', r)
+                self.assertEqual(r['tags_extra'], '6581 PSID')
+                self.assertEqual(r['view_kind'], '1', 'спектр')
+                self.assertEqual(r['finished'], '1')
+                # Другое расширение: SID узнаётся по подписи, но база — только файлу «.SID» (её и
+                # плагин шлёт только ему): без неё — 3 минуты.
+                self.assertEqual(int(r['pcm_frames']), (2 if extension == 'SID' else 180) * RATE)
+
+    def test_sid_seek_is_ten_seconds_and_keeps_default_song(self):
+        from test_sid_source import make_sid, base_for
+        data = make_sid(start=2)
+        base = pathlib.Path(self.temp.name) / 'SIDLEN.BIN'
+        base.write_bytes(base_for(data, '0:03 0:12'))
+        r = self.run_host('module', data, ext='SID', seek=1, resource=f'SIDLEN.BIN={base}', speed=1)
+        self.assertEqual((r['seek'], r['seek_order'], r['info_length']), ('1', '0', '0'))
+        self.assertEqual(r['seek_ui_detail'], '')
+        self.assertEqual(r['seek_ui_duration'], '12000')
+        self.assertGreaterEqual(int(r['seek_ui_ms']), 10000)
+        self.assertGreaterEqual(int(r['seek_view_seconds']), 10)
+        self.assertGreaterEqual(int(r['seconds_after_seek']), 10)
+        self.assertEqual(r['finished'], '1')
+        self.assertLess(int(r['pcm_frames']), 4 * RATE)
+
+    def test_sid_seek_before_start_and_past_end(self):
+        from test_sid_source import make_sid, base_for
+        data = make_sid(start=2)
+        base = pathlib.Path(self.temp.name) / 'SIDLEN.BIN'
+        base.write_bytes(base_for(data, '0:01 0:03'))
+        for delta in (-1, 1):
+            r = self.run_host('module', data, ext='SID', seek=delta, resource=f'SIDLEN.BIN={base}', speed=1)
+            self.assertEqual(r['seek'], '1')
+            self.assertEqual(r['finished'], '1')
+            self.assertEqual(r['seek_ui_duration'], '3000')
+            if delta < 0:
+                self.assertEqual(r['seconds_after_seek'], '0')
+            else:
+                self.assertEqual(r['seconds_after_seek'], '3')
+
+    def test_commands_enter_even_when_core1_has_a_continuous_backlog(self):
+        # Низкоприоритетная loopTask не может даже выставить lock_wanted до допуска
+        # на ядро. PLAYER 1.44 задерживает команду в этой модели; 1.45 даёт ей квант.
+        from test_sid_source import make_sid
+        r = self.run_host('module', make_sid(), ext='SID', seek=1, seconds=1,
+                          **{'busy-render': 2, 'worker-busy': 500})
+        self.assertEqual(r['seek'], '1')
+        self.assertLess(int(r['seek_ms']), 200)
+        self.assertLess(int(r['close_ms']), 200)
+
+    def test_commands_do_not_starve_behind_a_slow_decoder(self):
+        # PLAYER 1.44: декодер не успевает за звуком (render под замком втрое дольше звука) и, отпустив
+        # замок, сразу брал его снова — команда Evo ждала его секундами (04.11.2026, SID.ELF на
+        # тяжёлой RSID: «ESP does not answer», стрелки и стоп не проходили). Теперь декодер уступает
+        # ждущей команде. Модель ядра 1 (--worker-busy): после render помощник ещё занимает ядро 1, а
+        # задача команд Evo там же, ниже приоритетом, и замок берёт, только когда ядро свободно.
+        from test_sid_source import make_sid
+        r = self.run_host('module', make_sid(), ext='SID', seek=1, seconds=1,
+                          **{'busy-render': 40, 'worker-busy': 10})
+        self.assertEqual(r['seek'], '1')
+        self.assertLess(int(r['seek_ms']), 200)
+        self.assertLess(int(r['close_ms']), 200)
 
     def test_saa_invalid_input_is_skipped(self):
         self.assert_skipped(self.run_host('module',b'ETracker'+bytes(100),ext='COP'))

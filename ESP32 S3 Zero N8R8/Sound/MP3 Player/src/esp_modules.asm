@@ -120,6 +120,17 @@ Esp_Prepare:
         call Esp_StartApp
 .kit:
         call Esp_Kit
+        ; База длин SID (1.27) — ресурсом, как банк MIDI; нет её на карте или нет места — не
+        ; ошибка: мелодии без базы играют по 3 минуты.
+        ld a,(Mp3Kind)
+        cp KIND_SID
+        jr nz,.bank
+        ld a,(EspAppRunning)
+        or a
+        ld hl,EspSidLen
+        call nz,Esp_Resource
+        jr .reopen
+.bank:
         ; Банк MIDI — после запуска: не хватит места — PLAYER освободит ресурсы.
         ld a,(Mp3Kind)
         cp KIND_MIDI
@@ -194,6 +205,9 @@ Esp_Decoder:
         ret z
         ld hl,EspSaa
         cp KIND_SAA
+        ret z
+        ld hl,EspSid
+        cp KIND_SID
         ret z
         ld hl,EspTracker
         dec a

@@ -116,6 +116,10 @@ EspOpl:         db "OPL.ELF",0
 EspTsfm:        db "TSFM.ELF",0
 EspSaa:         db "SAA.ELF",0
                 ds 5
+EspSid:         db "SID.ELF",0
+                ds 5
+EspSidLen:      db "SIDLEN.BIN",0         ; длины мелодий SID (HVSC Songlengths)
+                ds 2
 EspRom:         db "YRW801.ROM",0
                 ds 2
 EspKit:         ds 13                   ; набор волн MWM: «ИМЯ.MWK»

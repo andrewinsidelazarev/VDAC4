@@ -549,7 +549,7 @@ Ui_DrawFormat:
         ld a,UI_ROW_FORMAT
         jp Ui_PrintAt
 
-; «Track 3 of 9» у MP3 и MIDI, «Position 12 of 33   Row 40» у модуля.
+; «Track 3 of 9» у MP3, MIDI и SID; «Position 12 of 33   Row 40» у модуля.
 Ui_DrawTrack:
         ld a,C_GREY
         ld b,1
@@ -2009,6 +2009,7 @@ UiStateChecking:   db "Checking the ESP for: ",0   ; ресурс: PSRAM или 
 UiStageOpen:       db "Opening the audio stream",0
 UiStageLoad:       db "Sending the file to the ESP",0
 UiStageStart:      db "ESP is loading the file",0
+UiStateSeekFailed: db "Seek rejected",0
 UiStatePlaying:    db "Playing",0
 UiStateSkipTag:    db "Skipping the ID3 tag (cover art)",0
 UiStatePaused:     db "Paused",0

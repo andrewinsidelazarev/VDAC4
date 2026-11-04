@@ -36,7 +36,7 @@
         dd #FFFFFFFF                  ; файл любого размера: он не грузится в память
 
 .plugin_name
-        db "VDAC4 Media Player v1.26"
+        db "VDAC4 Media Player v1.29"
         ds 32-($-.plugin_name),' '
         ; Тип #04 — меню выбора просмотрщика (Shift+F3). В меню плагинов F10
         ; проигрывателя нет: без файла ему играть нечего. По расширениям плагин
@@ -126,6 +126,8 @@ WcExtensions:
         ; (AY, TFC, TFD дорожками одновременно) — тоже TSFM.ELF.
         WC_EXTENSION "TFD", KIND_TSFM
         WC_EXTENSION "MTC", KIND_TSFM
+        ; Музыка Commodore 64: PSID и RSID из HVSC (SID.ELF, эмуляция cRSID).
+        WC_EXTENSION "SID", KIND_SID
 WcExtensionsEnd:
 WC_EXTENSION_COUNT equ WC_EXTENSION_COUNT_RUN
         ALIGN 512                     ; код — с границы сектора после списка

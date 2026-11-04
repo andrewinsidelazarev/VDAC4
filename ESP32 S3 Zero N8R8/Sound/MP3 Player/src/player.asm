@@ -111,6 +111,7 @@ KIND_RADIO      equ 5                   ; плейлист интернет-ра
                                         ; станции — MP3 на ESP; окно — как у OPL (метки)
 
 KIND_TSFM       equ 7                   ; компилированная музыка AY/TurboSound и TFC
+KIND_SID        equ 8                   ; музыка Commodore 64: PSID и RSID (SID.ELF, 1.27)
 KIND_SAA        equ 6                   ; E-Tracker: SAA / COP
 
 PLUGIN:
@@ -337,6 +338,7 @@ Mp3Kinds:       db "MP3",KIND_MP3,"WAV",KIND_MP3,"AAC",KIND_MP3,"OGG",KIND_MP3,"
                 db "VGM",KIND_OPL,"VGZ",KIND_OPL,"DRO",KIND_OPL,"IMF",KIND_OPL,"WLF",KIND_OPL
                 db "MWM",KIND_OPL,"MFM",KIND_OPL,"MWK",KIND_KIT,"M3U",KIND_RADIO
                 db "SAA",KIND_SAA,"COP",KIND_SAA
+                db "SID",KIND_SID
                 db "AS0",KIND_TSFM
                 db "ASC",KIND_TSFM
                 db "FTC",KIND_TSFM
@@ -428,6 +430,7 @@ Mp3_Play:
         jp nz,.skip
         call Mp3_Keys
         call Mp3_SeekKeys
+        jp c,Mp3_NoAnswer                ; ошибка SEEK не теряется при следующем STATUS
         jp nz,.skip
         ; Непринятый блок уходит повторно, новый с карты не читается.
         ld hl,(Mp3BlockLen)
@@ -762,6 +765,7 @@ Mp3_WaitEnd:
         jr nz,.skip
         call Mp3_Keys
         call Mp3_SeekKeys
+        jp c,Mp3_NoAnswer                ; ошибка SEEK не теряется при следующем STATUS
         jr nz,.skip
         ; Перемотка потока удалась (PLAYER 1.7 снова открыл поток): файл с нового
         ; места ещё не отдан — обратно к передаче. Только поток (MP3, WAV...):
@@ -813,7 +817,7 @@ Mod_Play:
         ld a,(Mp3Kind)
         cp KIND_MIDI
         jr c,.hint
-        ld hl,UiHintPlay                 ; MIDI и OPL перематываются на 10 с
+        ld hl,UiHintPlay                 ; MIDI, SID и OPL перематываются на 10 с
 .hint:
         call Ui_SetHint
         ; Длину решает ESP: IT она берёт потоком любой длины, прочее — до
@@ -1048,11 +1052,21 @@ Mp3_SeekKeys:
         ld hl,Mp3Arg
         ld bc,1
         call Proto_Send
-        jr c,.none
+        ret c
         ld a,RESP_AUDIO_SEEK
         ld de,MP3_WAIT
         call Mp3_Wait
+        ret c
+        ; Первый байт — принят ли переход. Отказ и таймаут различаются.
+        ld a,(ProtoBuf)
+        or a
+        ld hl,UiStateSeekFailed
+        jr z,.result
+        ld hl,UiStatePlaying
+.result:
+        ld (Mp3PhaseText),hl
         call Mp3_Refresh
+        ret c
 .none:
         xor a
         ret

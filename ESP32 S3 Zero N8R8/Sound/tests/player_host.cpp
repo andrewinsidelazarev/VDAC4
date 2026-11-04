@@ -46,6 +46,12 @@
 // stop_ms — сколько он шёл (декодер в open потоком не должен держать стоп).
 // --no-worker 1 — задачи на ядре 1 с приоритетом 5 (помощник PLAYER) ядро не даёт:
 // декодеры считают всё на ядре 0, как с прошивкой без помощника.
+// --busy-render МС — каждый render декодера ещё столько мс крутится на месте (под замком PLAYER):
+// декодер, не успевающий за звуком; seek_ms и close_ms (module) — сколько шли эти команды
+// (PLAYER 1.44: команды Evo не голодают по замку).
+// --worker-busy МС — модель ядра 1 ESP: после каждого render помощник декодера занимает ядро 1 ещё
+// столько мс (SID.ELF: звук куска), а задача команд Evo там же, с приоритетом ниже, и замок берёт,
+// только когда ядро 1 свободно. Поток сценария (команды) ждёт так же.
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -83,6 +89,7 @@ int midi_main(int argc, char* argv[]);
 int opl_main(int argc, char* argv[]);
 int saa_main(int argc, char* argv[]);
 int tsfm_main(int argc, char* argv[]);
+int sid_main(int argc, char* argv[]);
 }
 
 // Модель TJpgDec: «JPEG» стенда — FF D8 FF и цвет RGB одним куском.
@@ -182,6 +189,11 @@ bool noAac = false;
 bool noOgg = false;
 bool noFlac = false;
 bool noWorker = false;
+int busyRenderMs = 0;                  // --busy-render МС: render декодера дольше на столько
+int workerBusyMs = 0;                  // --worker-busy МС: ядро 1 занято после каждого render
+std::atomic<unsigned> workerPriority{0};
+std::atomic<long long> core1BusyUntil{0};   // ... до этого мига (такты steady_clock)
+std::thread::id scenarioThread;        // поток сценария — «задача команд Evo»
 
 void* coreAlloc(size_t size, uint32_t caps) {
   bool psram = (caps & ZM_MEM_INTERNAL) == 0;
@@ -291,7 +303,9 @@ uint32_t coreMillis() {
 void coreDelay(uint32_t ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
 
 int coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t priority, int8_t core) {
-  if (noWorker && core == 1 && priority == 5) {
+  const bool isWorker = core == 1 && stack == 4096;
+  if (isWorker) workerPriority = priority;
+  if (noWorker && isWorker) {
     return ZM_ERROR;                   // помощник PLAYER на ядре 1
   }
   // ZM_TASK_STACK_PSRAM (прошивка 0.1.112): внутренней нет — стек в PSRAM
@@ -328,7 +342,19 @@ bool syncTake() {
 }
 
 void* coreMutexCreate() { return syncTake() ? new std::mutex() : nullptr; }
-void coreMutexLock(void* mutex) { static_cast<std::mutex*>(mutex)->lock(); }
+void coreMutexLock(void* mutex) {
+  std::mutex* m = static_cast<std::mutex*>(mutex);
+  if (workerBusyMs > 0 && workerPriority > 1 && std::this_thread::get_id() == scenarioThread) {
+    // Команда Evo: ядро 1 занято помощником — ей не достаётся ни ядра, ни замка.
+    for (;;) {
+      if (Clock::now().time_since_epoch().count() >= core1BusyUntil.load() && m->try_lock()) {
+        return;
+      }
+      std::this_thread::yield();
+    }
+  }
+  m->lock();
+}
 void coreMutexUnlock(void* mutex) { static_cast<std::mutex*>(mutex)->unlock(); }
 
 struct Signal {
@@ -386,6 +412,9 @@ int coreReply(uint8_t response, const void* data, uint16_t length) {
 int coreEvent(uint8_t, const void*, uint16_t, uint32_t) { return ZM_ERROR; }
 
 // --- вывод ----------------------------------------------------------------------------
+
+std::atomic<uint64_t> decodedFrames{0};
+uint64_t firstOpenFrames = 0;
 
 struct Sink {
   std::mutex lock;
@@ -451,6 +480,7 @@ int corePcmOpen(const zm_pcm_format_t* format) {
   if (sink.capacityMs != 0) {
     sink.capacity = static_cast<double>(sink.capacityMs) * format->rate / 1000.0;
   }
+  if (sink.opens == 0) firstOpenFrames = decodedFrames.load();
   ++sink.opens;
   return ZM_OK;
 }
@@ -848,6 +878,21 @@ void coreNetClose(void* stream) {
 
 // --- модули ---------------------------------------------------------------------------
 
+// --busy-render: таблица декодера с render, что после настоящего крутится busyRenderMs мс.
+zm_source_t busySource;
+int (*realRender)(void*, float*, uint32_t, uint32_t*) = nullptr;
+int busyRender(void* instance, float* out, uint32_t maxFrames, uint32_t* frames) {
+  const int result = realRender(instance, out, maxFrames, frames);
+  decodedFrames += *frames;
+  const Clock::time_point until = Clock::now() + std::chrono::milliseconds(busyRenderMs);
+  while (Clock::now() < until) {
+  }
+  if (workerBusyMs > 0) {
+    core1BusyUntil = (Clock::now() + std::chrono::milliseconds(workerBusyMs)).time_since_epoch().count();
+  }
+  return result;
+}
+
 int coreModuleOpen(const char* name, void* arg1, void* arg2, void** handle, int* entry) {
   int (*main)(int, char**) = nullptr;
   if (strcmp(name, "MP3.ELF") == 0 && !noMp3) {
@@ -868,12 +913,21 @@ int coreModuleOpen(const char* name, void* arg1, void* arg2, void** handle, int*
     main = saa_main;
   } else if (strcmp(name, "TSFM.ELF") == 0) {
     main = tsfm_main;
+  } else if (strcmp(name, "SID.ELF") == 0) {
+    main = sid_main;
   }
   if (main == nullptr) {
     return ZM_NOT_FOUND;
   }
   char* argv[3] = {const_cast<char*>(name), static_cast<char*>(arg1), static_cast<char*>(arg2)};
   *entry = main(3, argv);
+  const zm_source_t** source = static_cast<const zm_source_t**>(arg2);
+  if (source != nullptr && *source != nullptr && (*source)->render != nullptr) {
+    busySource = **source;
+    realRender = busySource.render;
+    busySource.render = busyRender;
+    *source = &busySource;
+  }
   *handle = new int(1);
   ++modulesOpen;
   ++moduleLoads;
@@ -1000,6 +1054,13 @@ std::vector<uint8_t> command(uint8_t code, const std::vector<uint8_t>& data = {}
   if (appUnloaded) {
     return {0xFF, 0xFF};                // приложения нет: команду ядро не знает
   }
+  /* loopTask должен сначала получить ядро и лишь потом может войти в command_lock.
+   * Прежний стенд ждал только внутри mutex_lock, уже выставив lock_wanted:
+   * он тем самым давал неработающей на ESP задаче возможность попросить замок. */
+  while (workerBusyMs > 0 && workerPriority > 1 &&
+         Clock::now().time_since_epoch().count() < core1BusyUntil.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
   inCommand = true;
   replyCode = -1;
   replyData.clear();
@@ -1088,6 +1149,7 @@ void printSink() {
   std::lock_guard<std::mutex> lock(sink.lock);
   print("pcm_frames", static_cast<long long>(sink.frames));
   print("first_write", static_cast<long long>(sink.firstWrite));
+  print("frames_before_first_open", static_cast<long long>(firstOpenFrames));
   print("pcm_played", static_cast<long long>(sink.played + 0.5));
   print("pcm_discarded", static_cast<long long>(sink.discarded + 0.5));
   print("pcm_peak_permille", static_cast<long long>(sink.peak * 1000));
@@ -1198,6 +1260,7 @@ void stopApp() {
 
 int main(int argc, char** argv) {
   timeBeginPeriod(1);
+  scenarioThread = std::this_thread::get_id();
   if (argc < 2) {
     fail("usage: player_host <scenario> [--key value] [file]");
   }
@@ -1293,6 +1356,8 @@ int main(int argc, char** argv) {
       else if (key == "--no-flac") noFlac = atoi(value) != 0;
       else if (key == "--no-ogg") noOgg = atoi(value) != 0;
       else if (key == "--no-worker") noWorker = atoi(value) != 0;
+      else if (key == "--busy-render") busyRenderMs = atoi(value);
+      else if (key == "--worker-busy") workerBusyMs = atoi(value);
       else fail("unknown key %s", key.c_str());
     } else {
       path = argv[index];
@@ -1998,12 +2063,23 @@ int main(int argc, char** argv) {
     print("info_voices", info[1]);
     print("info_length", le16(&info[2]));
     if (seek != 0 && s.state == 1) {
+      const Clock::time_point seekStart = Clock::now();
       const std::vector<uint8_t> k = command(kSeek, {static_cast<uint8_t>(seek)});
+      print("seek_ms", static_cast<long long>(
+                           std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - seekStart).count()));
       print("seek", k[0]);
       print("seek_order", le16(&k[1]));
       print("frames_at_seek", static_cast<long long>(sinkFrames()));
       std::this_thread::sleep_for(std::chrono::milliseconds(20));
       print("seconds_after_seek", status().seconds);
+      zm_ui_model_t seekModel = {};
+      seekModel.size = sizeof(seekModel);
+      player_ui_model(&seekModel);
+      print("seek_ui_ms", seekModel.played_ms);
+      print("seek_ui_duration", seekModel.duration_ms);
+      printf("seek_ui_detail=%s\n", seekModel.detail);
+      const auto seekView = command(kView);
+      print("seek_view_seconds", le16(&seekView[4]));
     }
     if (s.state == 1) {
       const Clock::time_point until = Clock::now() + std::chrono::seconds(120);
@@ -2045,7 +2121,10 @@ int main(int argc, char** argv) {
           command(kPause, {0});
         }
         if (sinkFrames() >= seconds * 44100) {
+          const Clock::time_point closeStart = Clock::now();
           command(kClose, {0});
+          print("close_ms", static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                Clock::now() - closeStart).count()));
           s = status();
           break;
         }

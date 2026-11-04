@@ -371,7 +371,7 @@ class AudioEsp:
                   else self.view_values)
         self.view_polls += 1
         seconds = self.base_seconds + self.since_flush // BYTES_PER_SECOND
-        if self.module_size:
+        if self.module_size and self.module_format != 10:
             seconds = self.position * 3
         if self.view_text is not None:
             # Радио: [3][0][длительность][позиция][строки TXTPR, 0].
@@ -389,7 +389,7 @@ class AudioEsp:
     def status(self) -> bytes:
         module = bool(self.module_size)
         seconds = self.base_seconds + self.since_flush // BYTES_PER_SECOND
-        if module:
+        if module and self.module_format != 10:
             seconds = self.position * 3
         decoded = (bool(self.received) and (not module or self.state != STATE_LOADING) and
                    self.module_refuse_at is None)
@@ -491,7 +491,12 @@ class AudioEsp:
         if command == AUDIO_SEEK:
             delta = payload[0] - 256 if payload[0] >= 128 else payload[0]
             self.seeks.append(delta)
-            self.position = max(0, min(self.length - 1, self.position + delta))
+            if self.module_format == 10:
+                self.base_seconds = max(0, min(self.view_duration, self.base_seconds + delta * 10))
+                if self.base_seconds == self.view_duration:
+                    self.state, self.finished = STATE_IDLE, True
+            else:
+                self.position = max(0, min(self.length - 1, self.position + delta))
             self.row = 0
             return frame(0xB8, bytes([1]) + self.position.to_bytes(2, "little"))
         if command == AUDIO_FLUSH:
@@ -560,7 +565,7 @@ class AudioEsp:
                     self.loading_polls -= 1
                     if self.loading_polls <= 0:
                         self.state = STATE_PLAYING if self.module_ok else STATE_IDLE
-                elif self.state == STATE_PLAYING and not self.paused:
+                elif self.state == STATE_PLAYING and not self.paused and self.module_format != 10:
                     # «Проигрывание»: позиция растёт с каждым запросом.
                     self.row += 16
                     if self.row >= 64:
@@ -1159,7 +1164,7 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertEqual(data[63], 0, "и Enter, и F3")
         self.assertEqual(data[64:161], bytes(97), "старое поле 32 расширений у #11 пустое")
         self.assertEqual(data[161:165], b"\xFF" * 4, "размер файла не ограничен")
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.26")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.29")
         self.assertEqual((data[34], data[35]), (2, 0), "две страницы, запуск — страница 0")
         self.assertEqual(data[38], 1, "второй блок файла — в страницу 1")
         self.assertEqual(data[197], 4, "меню выбора просмотрщика, в F10 плеера нет")
@@ -1171,9 +1176,9 @@ class Mp3PluginTest(unittest.TestCase):
             ("MWK", 4), ("M3U", 5), ("SAA", 6), ("COP", 6),
             ("AS0", 7), ("ASC", 7), ("FTC", 7), ("GTR", 7), ("PSC", 7), ("PSM", 7), ("PT1", 7),
             ("PT2", 7), ("PT3", 7), ("SQT", 7), ("ST3", 7), ("STC", 7), ("STP", 7), ("TS", 7),
-            ("TFC", 7), ("TFD", 7), ("MTC", 7)],
+            ("TFC", 7), ("TFD", 7), ("MTC", 7), ("SID", 8)],
             "весь список одного плагина: потоки, модули, MIDI, OPL, набор MWM (чтобы его "
-            "пропустить), радио, SAA, AY/TurboSound/TFC; код обработчика — вид файла")
+            "пропустить), радио, SAA, AY/TurboSound/TFC, SID; код обработчика — вид файла")
         names = [name for name, _ in wmf_extensions(data)]
         self.assertEqual(len(names), len(set(names)), "дубликатов нет: WC их не принимает")
         self.assertTrue(all(33 <= ord(c) < 127 and c not in "./\\*?" for n in names for c in n),
@@ -3204,6 +3209,86 @@ class SaaTest(unittest.TestCase):
         self.assertTrue(audio.finished)
         self.assertEqual(h.machine.a,EXIT_NEXT)
         self.assertEqual(h.turbo_requests,[2,0xFF00])
+
+
+class SidTest(unittest.TestCase):
+    def test_time_seek_back_start_end_and_progress_bar(self):
+        cases = [({FN_RIGHT: {80, 120}, FN_LEFT: {100}}, 100, 10, False),
+                 ({FN_LEFT: {80}}, 100, 0, False),
+                 ({FN_RIGHT: {80}}, 5, 5, True)]
+        for keys, duration, position, ended in cases:
+            with self.subTest(keys=keys, duration=duration):
+                audio = AudioEsp()
+                audio.module_format = 10
+                audio.view_known = audio.tags_known = True
+                audio.view_duration, audio.view_kind = duration, 1
+                audio.tags = b'Test\0Author\0Album\x001987\0\x006581 PSID\0'
+                h = Mp3Harness(bytes(4126), name=b'Test.sid', esp=audio)
+                helper = ModuleDeliveryTest()
+                helper.card(h, PLAYER_ELF=helper.elf(1024, 1), SID_ELF=helper.elf(2048, 2))
+                h.keys, h.esc_after = keys, 160
+                h.start(index=2, count=4, extension=8)
+                self.assertEqual(audio.base_seconds, position)
+                self.assertEqual(audio.finished, ended)
+                if ended:
+                    self.assertEqual(h.machine.a, EXIT_NEXT)
+                line = h.at(TIME_ROW, TEXT_MODULE)
+                width = ui('UI_BAR_MP3')
+                full = width * position // duration
+                expected = (f'{position // 60:02d}:{position % 60:02d} ' +
+                            PLAYED * full + LEFT * (width - full) +
+                            f' {duration // 60:02d}:{duration % 60:02d}')
+                self.assertEqual(line, expected)
+                self.assertNotIn('Song ', h.at(TRACK_ROW, TEXT_MODULE))
+
+    def test_seek_failure_and_timeout_are_visible(self):
+        for response, expected in ((frame(0xB8, bytes(3)), 'Seek rejected'),
+                                   (b'', 'ERROR: ESP does not answer')):
+            with self.subTest(expected=expected):
+                audio = AudioEsp()
+                audio.module_format = 10
+                audio.view_duration = 180
+                h = Mp3Harness(bytes(4126), name=b'Test.sid', esp=audio)
+                helper = ModuleDeliveryTest()
+                helper.card(h, PLAYER_ELF=helper.elf(1024, 1), SID_ELF=helper.elf(2048, 2))
+                def app(command, payload):
+                    return response if command == AUDIO_SEEK else audio(command, payload)
+                h.app = app
+                h.keys = {FN_RIGHT: {80}}
+                h.esc_after = 120
+                h.start(extension=8)
+                self.assertEqual(h.at(STATUS_ROW, TEXT_MODULE), expected)
+
+
+    # Плагин 1.27: «.SID» (музыка C64) — SID.ELF, до AUDIO_OPEN — база длин SIDLEN.BIN ресурсом, как
+    # банк MIDI; базы на карте нет — не ошибка, файл играет (длины по 3 минуты). Влево/вправо —
+    # время: AUDIO_SEEK ±1; PLAYER преобразует шаг в ±10 секунд.
+    def test_module_and_length_base_delivery(self):
+        base=bytes(range(256))*20
+        for with_base in (True,False):
+            with self.subTest(with_base=with_base):
+                audio=AudioEsp();audio.module_format=10;audio.tags_known=True
+                audio.view_known=True;audio.view_duration=100;audio.view_kind=1
+                audio.tags=b'Commando\0Rob Hubbard\0Elite\x001985\0\x006581 PSID\0';audio.length=100
+                content=bytes(4126)
+                h=Mp3Harness(content,name=b'Commando.sid',esp=audio)
+                h.link.core.version=2;h.link.core.from_capacity=16384
+                helper=ModuleDeliveryTest()
+                card=dict(PLAYER_ELF=helper.elf(1024,1),SID_ELF=helper.elf(2048,2))
+                if with_base:card['SIDLEN_BIN']=base
+                helper.card(h,**card)
+                h.keys={FN_RIGHT:{80}};h.esc_after=120
+                h.start(index=2,count=4,extension=8)   # код обработчика SID
+                self.assertEqual([q[0] for q in audio.queries][:2],[b'PLAYER.ELF',b'SID.ELF'])
+                self.assertEqual(audio.resources,{b'SIDLEN.BIN':len(base)} if with_base else {})
+                self.assertEqual(audio.opens,[bytes([OPEN_MODULE])+len(content).to_bytes(4,'little')+b'SID'])
+                self.assertEqual(bytes(audio.received),content,'без базы файл тоже играет')
+                self.assertEqual(audio.seeks,[1])
+                self.assertEqual(h.at(FORMAT_ROW,TEXT_MODULE),'SID  6581 PSID')
+                self.assertEqual(h.at(TRACK_ROW, TEXT_MODULE), 'Track 2 of 4')
+                self.assertTrue(h.at(TIME_ROW, TEXT_MODULE).startswith('00:10 '))
+                self.assertTrue(h.at(TIME_ROW, TEXT_MODULE).endswith(' 01:40'))
+                self.assertEqual(h.hint(), HINT_PLAY)
 
 
 class FastMediaTest(unittest.TestCase):

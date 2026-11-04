@@ -224,7 +224,7 @@ Track_Playable:
 TrackKinds:     db "MP3","WAV","MOD","XM ","S3M","IT ","MID","RMI","KAR","VGM","VGZ"
                 db "DRO","IMF","WLF","MWM","MFM","MO ","M3U","AAC","OGG","OGA","FLA","SAA","COP"
                 db "AS0","ASC","FTC","GTR","PSC","PSM","PT1","PT2","PT3","SQT","ST3","STC","STP","TS ","TFC"
-                db "TFD","MTC",0
+                db "TFD","MTC","SID",0
 TrackExt:       ds 3
 TrackDirs:      dw 0                    ; каталогов в панели, с «..»
 TrackOther:     dw 0                    ; файлов не для плеера

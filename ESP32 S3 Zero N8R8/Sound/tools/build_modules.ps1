@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$all = @{ 'mp3' = 'MP3.ELF'; 'aac' = 'AAC.ELF'; 'ogg' = 'OGG.ELF'; 'flac' = 'FLAC.ELF'; 'player' = 'PLAYER.ELF'; 'tracker' = 'TRACKER.ELF'; 'midi' = 'MIDI.ELF'; 'opl' = 'OPL.ELF'; 'saa' = 'SAA.ELF'; 'tsfm' = 'TSFM.ELF' }
+$all = @{ 'mp3' = 'MP3.ELF'; 'aac' = 'AAC.ELF'; 'ogg' = 'OGG.ELF'; 'flac' = 'FLAC.ELF'; 'player' = 'PLAYER.ELF'; 'tracker' = 'TRACKER.ELF'; 'midi' = 'MIDI.ELF'; 'opl' = 'OPL.ELF'; 'saa' = 'SAA.ELF'; 'tsfm' = 'TSFM.ELF'; 'sid' = 'SID.ELF' }
 if (-not $Modules) { $Modules = @($all.Keys | Where-Object { Test-Path (Join-Path $root "modules\$_") }) }
 
 if (-not ($env:IDF_PATH -and $env:IDF_PYTHON_ENV_PATH)) {
@@ -38,10 +38,12 @@ foreach ($module in $Modules) {
         & $python $idf -C $dir set-target esp32s3
         if ($LASTEXITCODE -ne 0) { throw "set-target $module failed" }
     }
-    & $python $idf -C $dir build
+    # Стадии сборки можно вынести на отдельный диск или в разрешённый каталог.
+    $build = if ($env:ZIFI_MODULE_BUILD_ROOT) { Join-Path $env:ZIFI_MODULE_BUILD_ROOT $module } else { Join-Path $dir 'build' }
+    & $python $idf -C $dir -B $build build
     if ($LASTEXITCODE -ne 0) { throw "build $module failed" }
     $project = if ($module -eq 'tracker') { 'tracker_module' } else { $module }
-    $elf = Join-Path $dir "build\$project.app.elf"
+    $elf = Join-Path $build "$project.app.elf"
     Copy-Item $elf (Join-Path $out $file) -Force
     & $python (Join-Path $root 'tools\check_module_symbols.py') (Join-Path $out $file)
     if ($LASTEXITCODE -ne 0) { throw "module $module failed the loader check (symbols, sections, pointers)" }
