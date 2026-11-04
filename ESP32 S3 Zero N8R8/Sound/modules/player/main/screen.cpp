@@ -37,6 +37,9 @@ constexpr uint32_t kCtrl = 0xC0 + 16U * PlayerOverlay::kOverlay;
 constexpr uint32_t kMem = 0x80000;
 
 const zm_core_t* core = nullptr;
+// Выгрузка (1.42): оверлей выключен последней записью — задача экрана, если она ещё жива, в Tang
+// больше не пишет.
+volatile bool gone = false;
 
 bool tangReady() {
   return core->size >= offsetof(zm_core_t, ui_available) + sizeof(core->ui_available) &&
@@ -55,6 +58,7 @@ class LinkPort : public PlayerOverlay::Port {
     return reloads_;
   }
   bool configure(bool on, uint8_t alpha) override {
+    if (gone) return false;
     if (!on) {
       const uint32_t off = 0;
       return core->link_write(kCtrl, &off, 1) == ZM_OK;
@@ -70,6 +74,7 @@ class LinkPort : public PlayerOverlay::Port {
     return core->link_write(kCtrl + 4, regs, 3) == ZM_OK && core->link_write(kCtrl, &ctrl, 1) == ZM_OK;
   }
   bool write(uint32_t word, const uint32_t* words, size_t count) override {
+    if (gone) return false;
     return core->link_write(kMem + 4U * word, words, static_cast<uint32_t>(count)) == ZM_OK;
   }
   int model(zm_ui_model_t* model) override { return player_ui_model(model); }
@@ -112,6 +117,21 @@ void report(PlayerOverlay::State from, PlayerOverlay::State to) {
   }
 }
 
+// Оверлей 1 — выключить записью, что бы ни думал PlayerOverlay (1.42). 04.11.2026 после выхода из
+// радио экран плеера остался висеть на ТВ, хотя ESP PLAYER выгрузила. Состояние экрана может
+// разойтись с Tang молча: отказ записи LINK на ступени ухода (off() пишет «выкл.» той же связью),
+// мигнувший tang::ready (номер перезагрузки сменился: kOff без записи), задача экрана не вышла к
+// выгрузке. Какой путь был на плате, журнал не показал: ступени ухода в screen_end идут мимо него.
+// Пишется, только пока на LINK ядро TS-Config с оверлеями: у другого ядра по этому адресу другое.
+bool overlayOff() {
+  const uint32_t off = 0;
+  for (int tries = 0; tries < 10; ++tries) {
+    if (tangReady() && core->link_write(kCtrl, &off, 1) == ZM_OK) return true;
+    core->delay(20);
+  }
+  return false;
+}
+
 }  // namespace
 
 #ifdef __XTENSA__
@@ -137,6 +157,7 @@ extern "C" int screen_begin(const zm_core_t* c) {
   tangSeen = false;
   yieldAsk = 0;
   suspended = 0;
+  gone = false;
   return ZM_OK;
 }
 
@@ -197,6 +218,7 @@ extern "C" void screen_end(void) {
   }
   // Задача обложек уже вышла: экран — отсюда. Плагин ушёл (снимок не виден) — уйти плавно, по
   // ступени прозрачности за кадр; виден (приложение перезапускают) — сразу.
+  const uint32_t fails = screen->stats().writeFails;
   for (int step = 0; step < 20 && screen->state() != PlayerOverlay::State::kOff; ++step) {
     screen->tick(core->millis());
     if (step >= 2 && screen->state() != PlayerOverlay::State::kFadeOut) break;
@@ -205,9 +227,27 @@ extern "C" void screen_end(void) {
   const PlayerOverlay::State before = screen->state();
   screen->appGone();
   if (before != PlayerOverlay::State::kOff) report(before, PlayerOverlay::State::kOff);
+  gone = true;
+  const bool off = overlayOff();
+  if (!off || screen->stats().writeFails != fails) {
+    core->log("player: screen exit: LINK write fails %u, overlay off %s",
+              (unsigned)(screen->stats().writeFails - fails), off ? "ok" : "FAILED");
+  }
   screen->~PlayerOverlay();
   screen = nullptr;
   flags = 0;
+}
+
+extern "C" void screen_abandon(void) {
+  if (screen == nullptr) {
+    return;
+  }
+  // Задача экрана жива: экран и его память — её до снятия ядром; в Tang она больше не пишет,
+  // запись, что уже идёт, кончается, и оверлей выключается отсюда.
+  gone = true;
+  core->delay(30);
+  const bool off = overlayOff();
+  core->log("player: screen task did not stop in 1 s: overlay off %s", off ? "ok" : "FAILED");
 }
 
 extern "C" uint32_t screen_bytes(void) { return static_cast<uint32_t>(PlayerOverlay::kMemoryBytes); }

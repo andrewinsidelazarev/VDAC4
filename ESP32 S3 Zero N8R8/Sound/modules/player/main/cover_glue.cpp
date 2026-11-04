@@ -239,8 +239,12 @@ extern "C" void cover_end(void) {
   for (int wait = 0; wait < 100 && (!taskDone || jobRunning); ++wait) {
     core->delay(10);
   }
-  if (taskDone && !jobRunning) {
-    screen_end();                        // задача вышла: экран — прочь (иначе его снимет ядро)
+  // Экран рисует только задача обложек: вышла она — экран прочь, сведение обложки ему не мешает
+  // (1.41 ждала и его: долгое сведение — экран оставался). Не вышла — оверлей гасится без неё.
+  if (taskDone) {
+    screen_end();
+  } else {
+    screen_abandon();
   }
   core->mutex_lock(lock);
   release(image);

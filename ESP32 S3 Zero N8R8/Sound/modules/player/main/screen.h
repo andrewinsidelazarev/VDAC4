@@ -24,6 +24,8 @@ int screen_begin(const zm_core_t* core);   /* ZM_OK — экран будет, �
 /* Шаг из задачи обложек: выход — через сколько мс звать снова. */
 uint32_t screen_tick(uint32_t now_ms);
 void screen_end(void);                      /* экран — прочь, память — назад */
+/* Задача обложек не вышла к выгрузке (1.42): её записи в Tang — прочь, оверлей — выключить. */
+void screen_abandon(void);
 uint8_t screen_flags(void);                 /* SCREEN_F_* */
 
 /* Память экрана (1.31). Декодер важнее экрана: банк MIDI TimGM6mb (5,8 МБ) оставлял плееру

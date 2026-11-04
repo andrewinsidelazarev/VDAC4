@@ -568,6 +568,8 @@ long long writtenBeforeOn = -1;        // слов региона записан
 long long linkWords = 0;
 long long wordsAtOn = -1;              // linkWords к первому включению: дальше — кадры
 int linkBad = 0;
+int exitCtrlFails = 0;                 // --exit-ctrl-fails: на выходе столько записей CTRL — отказ
+int ctrlFailsLeft = 0;
 
 int coreLinkWrite(uint32_t address, const uint32_t* words, uint32_t count) {
   std::lock_guard<std::mutex> lock(linkLock);
@@ -587,6 +589,10 @@ int coreLinkWrite(uint32_t address, const uint32_t* words, uint32_t count) {
     }
     linkWords += count;
     return ZM_OK;
+  }
+  if (address == 0xD0 && ctrlFailsLeft > 0) {
+    --ctrlFailsLeft;                   // сбой LINK на ступени ухода (PLAYER 1.42)
+    return ZM_ERROR;
   }
   if (address >= 0xD0 && address + 4 * count <= 0xE0) {
     for (uint32_t i = 0; i < count; ++i) {
@@ -1274,6 +1280,7 @@ int main(int argc, char** argv) {
       else if (key == "--ui") uiOn = atoi(value);
       else if (key == "--ui-open") uiOpen = atoi(value) != 0;
       else if (key == "--ui-block") uiFirst = readFile(value);
+      else if (key == "--exit-ctrl-fails") exitCtrlFails = atoi(value);
       else if (key == "--cover-json") {
         const std::vector<uint8_t> json = readFile(value);
         coverJson.assign(json.begin(), json.end());
@@ -1611,6 +1618,7 @@ int main(int argc, char** argv) {
       {
         std::lock_guard<std::mutex> lock(linkLock);
         before = ovlAlphas.size();
+        ctrlFailsLeft = exitCtrlFails;
       }
       command(kStatus, leave);              // ответ, затем выгрузка: stop гасит экран плавно
       {

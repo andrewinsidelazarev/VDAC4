@@ -765,7 +765,8 @@ class PlayerHostTest(unittest.TestCase):
               r'\/500x500-000000-80-0-0.jpg"}}],"total":2}')
     NET_JPEG = b'\xFF\xD8\xFF' + bytes([0x20, 0x80, 0xE0]) + bytes(2000)   # «картинка» одного цвета
 
-    def ui_run(self, tag: bytes, json: str | None = None, block: bytes | None = None) -> dict[str, str]:
+    def ui_run(self, tag: bytes, json: str | None = None, block: bytes | None = None,
+               **extra) -> dict[str, str]:
         folder = pathlib.Path(self.temp.name)
         (folder / 'deezer.json').write_text(json if json is not None else self.DEEZER, encoding='utf-8')
         (folder / 'net.jpg').write_bytes(self.NET_JPEG)
@@ -773,7 +774,7 @@ class PlayerHostTest(unittest.TestCase):
         if block is not None:
             (folder / 'block.bin').write_bytes(block)
             keys['ui-block'] = folder / 'block.bin'
-        return self.run_host('ui', tag + silent_mp3(800), ui=1, speed=4, **keys)
+        return self.run_host('ui', tag + silent_mp3(800), ui=1, speed=4, **keys, **extra)
 
     def test_screen_whole_chain(self) -> None:
         # Вся цепочка на ПК: тело AUDIO_STATUS, которое собрал настоящий плагин VDAC4MP3.WMF на
@@ -809,8 +810,30 @@ class PlayerHostTest(unittest.TestCase):
         self.assertEqual(r['chain_flags'], '3', 'плагину: Tang есть, экран показан')
         self.assertEqual(r['chain_app_dones'], '1', 'плагин ушёл — PLAYER просит выгрузить себя')
         left = [int(a) for a in r['chain_left_alphas'].split(',')]
-        self.assertEqual(left, list(range(14, -1, -1)) + [-1], 'уходит плавно 15 → 0, затем выкл.')
+        self.assertEqual(left, list(range(14, -1, -1)) + [-1, -1],
+                         'уходит плавно 15 → 0, затем выкл.; при выгрузке — выкл. ещё раз (1.42)')
         self.assertEqual(r['chain_left_on'], '0')
+
+    def test_screen_off_after_link_fails_at_exit(self) -> None:
+        # PLAYER 1.42: 04.11.2026 после выхода из радио экран плеера остался на ТВ, хотя ESP PLAYER
+        # выгрузила. Один из путей, которым состояние экрана молча расходится с Tang: запись CTRL на
+        # ступени ухода не прошла, off() той же связью — тоже, и экран считает себя выключенным
+        # (какой путь был на плате, журнал не показал). При выгрузке оверлей выключается записью
+        # всегда, с повторами.
+        import test_mp3_plugin_z80 as plugin
+        h = plugin.Mp3Harness(bytes(40 * 1024), name=b'CHILDREN.MP3',
+                              esp=plugin.AudioEsp(played_per_status=2048))
+        h.esc_after = 120
+        h.start()
+        for fails in (2, 4):
+            with self.subTest(fails=fails):
+                r = self.ui_run(id3_tag(id3_frame(b'TIT2', b'\x00Children')), block=h.audio.ui_raw[0],
+                                **{'exit-ctrl-fails': fails})
+                self.assertEqual(r['chain_app_dones'], '1')
+                self.assertEqual(r['chain_left_on'], '0', 'оверлей выключен, хоть LINK и отказывал')
+                left = [int(a) for a in r['chain_left_alphas'].split(',')]
+                self.assertEqual(left[-1], -1, 'последняя запись CTRL — выкл.')
+                self.assertIn('player: screen exit: LINK write fails', self.log)
 
     def test_online_cover_by_the_file_name(self) -> None:
         # Меток нет — исполнитель и название из имени файла от плагина (PLAYER 1.33): номер дорожки,
