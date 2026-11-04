@@ -76,11 +76,13 @@ enum {
     FTC_FAULT_DL_FULL,      /* дисплей-лист длиннее 2048 слов */
     FTC_FAULT_INFLATE,      /* испорченный поток CMD_INFLATE */
     FTC_FAULT_3D,           /* команда 3D с негодными параметрами (ft_3d.c) */
-    FTC_FAULT_IMAGE,        /* CMD_LOADIMAGE: не JPEG baseline / PNG 8 бит или испорчена */
+    FTC_FAULT_IMAGE,        /* CMD_LOADIMAGE(_BOX): картинка испорчена, не та или велика — причина в
+                               RAM_CMD (FTC_IMG_REPORT, прошивка 39) */
 };
 
 #define FTC_INFLATE_BYTES (32768 + 11264)  /* tinfl: словарь 32 КБ и его состояние */
-#define FTC_IMG_BYTES_DEF (100u * 1024u)   /* CMD_LOADIMAGE: состояние ft_image.c */
+#define FTC_IMG_BYTES_DEF (100u * 1024u)   /* прошивки ≤ 38: состояние ft_image.c (с 39 — вся
+                                             рабочая память без inflate, FTC_IMG_BYTES) */
 #define FTC_DLQ_WORDS 128
 #define FTC_MW_WORDS  256         /* слов в буфере записи байтов (прошивка 32: два, строка 512 точек RGB565) */
 #define FTC_MF_BUF    2048             /* медиа-FIFO: прочитанные из RAM_G байты потока */
@@ -222,6 +224,10 @@ typedef struct ftc {
     uint32_t bg, fg, grad, scratch, base, rotate;
     uint32_t inflate_end;      /* CMD_GETPTR */
     uint32_t img_addr, img_w, img_h;   /* CMD_GETPROPS */
+    /* CMD_IMAGEINFO (прошивка 39): последняя разобранная картинка — источник w | h << 16, выход
+       w | h << 16, формат | прозрачность << 8 | шаг << 16, байтов палитры */
+    uint32_t img_info[4];
+    int      img_busy;         /* разбор работает без новых данных (FTC_IMG_BUSY) */
 
     /* текст: строка CMD_TEXT из кольца, шрифты 0…15 (CMD_SETFONT); ПЗУ-шрифты 16…31 — по
        таблице ПЗУ (ROM_FONTROOT): образ шрифтов в SDRAM Tang заливает ESP, до того CMD_TEXT
@@ -269,22 +275,63 @@ int ftc_inflate_run(void *st, const uint8_t *in, size_t n, size_t *used,
                     void (*out)(void *u, const uint8_t *p, size_t n), void *u);
 size_t ftc_inflate_state_size(void);
 
-/* --- ft_image.c: CMD_LOADIMAGE (JPEG baseline, PNG 8 бит) -------------------------------- */
-#define FTC_IMG_BYTES FTC_IMG_BYTES_DEF
-enum { FTC_IMG_NEED_INPUT = 0, FTC_IMG_DONE = 1, FTC_IMG_ERROR = 2 };
+/* --- ft_image.c: CMD_LOADIMAGE и CMD_LOADIMAGE_BOX (JPEG, PNG) --------------------------
+ * С прошивки 39 состояние разбора — вся рабочая память сопроцессора, кроме места inflate (у
+ * JPEG и оно — разбору): буферы раскладываются по картинке. */
+#define FTC_IMG_BYTES (FTC_SCRATCH_BYTES - FTC_INFLATE_BYTES)
+/* NEED_INPUT — ждёт данных; BUSY — работа без новых данных (конец прогрессивного JPEG, сборка
+   Adam7): звать снова, данных не брать — их нет в этой картинке */
+enum { FTC_IMG_NEED_INPUT = 0, FTC_IMG_DONE = 1, FTC_IMG_ERROR = 2, FTC_IMG_BUSY = 3 };
+/* Причина ошибки (прошивка 39): код и число к нему */
+enum {
+    FTC_IMG_E_NONE = 0,
+    FTC_IMG_E_CORRUPT,      /* повреждена (arg — где: 1 JPEG, 2 PNG, 3 WebP) */
+    FTC_IMG_E_UNSUPPORTED,  /* не поддерживается (arg — что: FTC_IMG_U_*) */
+    FTC_IMG_E_TOO_BIG,      /* велика для памяти BL616 и рамки: нужно arg байтов */
+    FTC_IMG_E_NO_ROOM,      /* выход не влезает в room: нужно arg байтов RAM_G */
+    FTC_IMG_E_SIZE,         /* размер больше предела: arg = w | h << 16 */
+};
+enum {
+    FTC_IMG_U_FORMAT = 1,   /* не JPEG и не PNG */
+    FTC_IMG_U_ARITH,        /* JPEG с арифметическим кодированием */
+    FTC_IMG_U_LOSSLESS,     /* JPEG lossless или иерархический */
+    FTC_IMG_U_PRECISION,    /* JPEG 12 бит */
+    FTC_IMG_U_COMPONENTS,   /* JPEG: число компонент или прореживание (CMYK, 2×2 у цветности…) */
+    FTC_IMG_U_PNG_TYPE,     /* PNG: вид, глубина, сжатие или фильтр не из стандарта */
+    FTC_IMG_U_OPTION,       /* параметр команды (OPT_MEDIAFIFO) */
+    FTC_IMG_U_SCANS,        /* JPEG: развёртка не по стандарту (последовательный по частям) */
+};
 typedef struct ftc_img_info {
     uint32_t fmt, w, h, stride;    /* формат BITMAP_LAYOUT, размер, шаг строки */
     uint32_t pal_bytes;            /* палитра с ptr (PALETTED565/4444), точки — за ней */
     int      jpeg;                 /* CMD_GETPROPS: у JPEG — начало, у PNG — конец данных */
+    uint32_t src_w, src_h;         /* размер источника */
+    uint32_t alpha;                /* у выхода есть прозрачность */
+    uint32_t err, err_arg;         /* причина ошибки (FTC_IMG_E_*) */
 } ftc_img_info_t;
+/* Запрос разбора. boxed = 0 — CMD_LOADIMAGE (выход как у FT812), иначе CMD_LOADIMAGE_BOX:
+   вписать в box_w × box_h (не увеличивать), выход и черновик — в room байтов с ptr. Черновик в
+   RAM_G — через draft_wr/draft_rd: off — от ptr, off и n кратны 4 (u — тот же, что у emit). */
+typedef struct ftc_img_req {
+    uint32_t opts;                 /* OPT_MONO 1, OPT_NODL 2, OPT_FULLSCREEN 8 (VDAC4: холст 1024×768) */
+    int      boxed;                /* CMD_LOADIMAGE_BOX */
+    uint32_t box_w, box_h, room;
+    void (*draft_wr)(void *u, uint32_t off, const uint8_t *p, size_t n);
+    void (*draft_rd)(void *u, uint32_t off, uint8_t *p, size_t n);
+} ftc_img_req_t;
 size_t ftc_img_state_size(void);
-/* opts — параметр CMD_LOADIMAGE (OPT_MONO 1, OPT_NODL 2, OPT_FULLSCREEN 8 — VDAC4: вписать в
-   1024×768); inflate_state — для PNG (у JPEG — память вписывания) */
+/* CMD_LOADIMAGE: opts — его параметр; inflate_state — для PNG (у JPEG — ещё память) */
 void ftc_img_begin(void *st, uint32_t opts, void *inflate_state);
+void ftc_img_begin_req(void *st, const ftc_img_req_t *req, void *inflate_state);
 /* Данные из in[0..n): *used — сколько взято; выход — байты подряд с ptr через emit(). */
 int  ftc_img_run(void *st, const uint8_t *in, size_t n, size_t *used,
                  void (*emit)(void *u, const uint8_t *p, size_t n), void *u);
 void ftc_img_get_info(const void *st, ftc_img_info_t *info);
+/* Отчёт об ошибке картинки (прошивка 39) — в RAM_CMD с начала, до сброса сопроцессора:
+   слово 0 — 'I' 'M' 'G' и код (FTC_IMG_E_*), слово 1 — число к нему, с байта 8 — строка ASCII
+   с нулём на конце (до FTC_IMG_REPORT_TEXT байтов) */
+#define FTC_IMG_REPORT      0x00474D49u
+#define FTC_IMG_REPORT_TEXT 120u
 
 /* --- ft_3d.c ------------------------------------------------------------------------------- */
 void ftc3d_reset(ftc3d_t *g);

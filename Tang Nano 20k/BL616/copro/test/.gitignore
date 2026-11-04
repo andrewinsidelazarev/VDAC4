@@ -1,0 +1,7 @@
+# Данные, которые делают генераторы: вписывание (make_image_data.py fit — 51 МБ) и видео
+# (make_video_data.py); run.sh делает их, если нет
+data/fit/
+data/video/
+*.got
+host_test
+host_test.exe

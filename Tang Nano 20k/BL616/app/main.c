@@ -76,11 +76,18 @@
    34 — ft_image.c и ft_copro.c собираются с -O2 (были -Os, как весь SDK);
    35 — команда BOOT ящика: переход в любой слот flash Tang (ядро видео — слот 3) — заголовок
    битстрима с адресом перехода по JTAG и Reconfig (core_jtag_boot); ядро из кэша или слота не
-   отвечает — назад в слот 0 тем же переходом по адресу 0 */
+   отвечает — назад в слот 0 тем же переходом по адресу 0;
+   36…38 — ускорения 3D (SSAA быстрым путём, рёбра и подготовка кадра в ITCM) и запуск ядра из кэша
+   (см. git VDAC4);
+   39 — картинки для браузера TSafari (задание task_bl616_images.md, ft_image.c): прогрессивный
+   JPEG (бит в бит с libjpeg; большой — полосами с копией файла), PNG всех глубин и видов с tRNS и
+   Adam7, команды VDAC4 CMD_LOADIMAGE_BOX (0xFFFFFFB0: в рамку и в room байтов RAM_G, уменьшение по
+   площади) и CMD_IMAGEINFO (0xFFFFFFB1), причина ошибки картинки — в RAM_CMD; OPT_FULLSCREEN с
+   уменьшением больше 4 раз — по площади на холст */
 #ifdef FTC_BRIDGE
 #define FW_VERSION 0x0A
 #else
-#define FW_VERSION 0x26
+#define FW_VERSION 0x27
 #endif
 
 #ifndef FTC_BRIDGE

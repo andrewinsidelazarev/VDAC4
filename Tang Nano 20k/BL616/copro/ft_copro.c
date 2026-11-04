@@ -12,7 +12,8 @@
  *   PROGRESS; MEDIAFIFO, VIDEOSTART, VIDEOFRAME (MJPEG AVI из медиа-FIFO, см. «Видео»).
  * Остальное (SETFONT2, ROMFONT, прочие виджеты, PLAYVIDEO) — пока ошибка «нет команды».
  * LOADIMAGE с OPT_MEDIAFIFO — тоже (данные только из кольца).
- * Свои команды VDAC4 — 3D (0xFFFFFFA0…0xFFFFFFAC): ft_3d.c. Свой флаг LOADIMAGE —
+ * Свои команды VDAC4 — 3D (0xFFFFFFA0…0xFFFFFFAC): ft_3d.c; картинки (прошивка 39) —
+ * CMD_LOADIMAGE_BOX (0xFFFFFFB0) и CMD_IMAGEINFO (0xFFFFFFB1), ft_image.c. Свой флаг LOADIMAGE —
  * OPT_FULLSCREEN (8): картинка вписана в холст RGB565 1024×768 (ft_image.c, «Вписывание»).
  *
  * Матрицы — по eve-emu (eve-copro-matrix.cpp, MIT, Copyright alfishe): порядок, шаги угла и
@@ -44,6 +45,8 @@ enum {
     CMD_SETROTATE = 0xFFFFFF36u, CMD_SETBASE = 0xFFFFFF38u, CMD_SETSCRATCH = 0xFFFFFF3Cu,
     CMD_SETBITMAP = 0xFFFFFF43u, CMD_MEDIAFIFO = 0xFFFFFF39u, CMD_VIDEOSTART = 0xFFFFFF40u,
     CMD_VIDEOFRAME = 0xFFFFFF41u,
+    /* VDAC4 (прошивка 39): картинка в рамку и итог разбора */
+    CMD_LOADIMAGE_BOX = 0xFFFFFFB0u, CMD_IMAGEINFO = 0xFFFFFFB1u,
 };
 
 /* Слов параметров после кода; -1 — команды нет. */
@@ -64,7 +67,7 @@ static int cmd_params(uint32_t code)
     case CMD_GETPROPS: case CMD_MEMCRC: case CMD_MEMSET: case CMD_MEMCPY: case CMD_TRACK:
     case CMD_SETBITMAP: case CMD_NUMBER:
         return 3;
-    case CMD_GRADIENT: case CMD_PROGRESS:
+    case CMD_GRADIENT: case CMD_PROGRESS: case CMD_LOADIMAGE_BOX: case CMD_IMAGEINFO:
         return 4;
     case CMD_GETMATRIX:
         return 6;
@@ -589,6 +592,109 @@ static void inflate_out(void *u, const uint8_t *p, size_t n)
     c->done += (uint32_t)n;
 }
 
+/* --- картинки: черновик в RAM_G, отчёт об ошибке ------------------------------------------- */
+
+/* Черновик разбора (CMD_LOADIMAGE_BOX) — в RAM_G с ptr + off, словами (off и n кратны 4) */
+static void img_draft_wr(void *u, uint32_t off, const uint8_t *p, size_t n)
+{
+    ftc_t *c = (ftc_t *)u;
+    uint32_t a = (c->p[0] & 0x3FFFFCu) + off, tmp[64];
+    while (n) {
+        uint32_t k = n < sizeof tmp ? (uint32_t)n : (uint32_t)sizeof tmp;
+        memcpy(tmp, p, k);
+        c->bus.wr(c->bus.ctx, a, tmp, k / 4);
+        a += k;
+        p += k;
+        n -= k;
+    }
+}
+
+static void img_draft_rd(void *u, uint32_t off, uint8_t *p, size_t n)
+{
+    ftc_t *c = (ftc_t *)u;
+    uint32_t a = (c->p[0] & 0x3FFFFCu) + off, tmp[64];
+    while (n) {
+        uint32_t k = n < sizeof tmp ? (uint32_t)n : (uint32_t)sizeof tmp;
+        c->bus.rd(c->bus.ctx, a, tmp, k / 4);
+        memcpy(p, tmp, k);
+        a += k;
+        p += k;
+        n -= k;
+    }
+}
+
+static char *str_put(char *o, char *end, const char *s)
+{
+    while (*s && o < end)
+        *o++ = *s++;
+    return o;
+}
+
+static char *num_put(char *o, char *end, uint32_t v)
+{
+    char t[10];
+    int n = 0;
+    do {
+        t[n++] = (char)('0' + v % 10u);
+        v /= 10u;
+    } while (v);
+    while (n && o < end)
+        *o++ = t[--n];
+    return o;
+}
+
+/* Ошибка картинки: до сброса сопроцессора хост читает причину в RAM_CMD с начала (FTC_IMG_REPORT:
+   'I' 'M' 'G' + код, число, строка ASCII). FT812 на ошибке тоже оставляет там своё слово. */
+static void image_fault(ftc_t *c)
+{
+    ftc_img_info_t in;
+    ftc_img_get_info(FTC_SCRATCH(c), &in);
+    uint32_t rep[2 + FTC_IMG_REPORT_TEXT / 4];
+    char *t = (char *)&rep[2], *o = t, *end = t + FTC_IMG_REPORT_TEXT - 1;
+    static const char *const what[] = {"?", "format", "arithmetic JPEG", "lossless JPEG", "12-bit JPEG",
+                                       "JPEG components", "PNG type", "option", "JPEG scans"};
+    memset(rep, 0, sizeof rep);
+    uint32_t code = in.err ? in.err : FTC_IMG_E_CORRUPT;
+    rep[0] = FTC_IMG_REPORT | code << 24;
+    rep[1] = in.err_arg;
+    switch (code) {
+    case FTC_IMG_E_UNSUPPORTED:
+        o = str_put(o, end, "unsupported: ");
+        o = str_put(o, end, what[in.err_arg < sizeof what / sizeof what[0] ? in.err_arg : 0]);
+        break;
+    case FTC_IMG_E_TOO_BIG:
+    case FTC_IMG_E_NO_ROOM:
+        o = str_put(o, end, code == FTC_IMG_E_TOO_BIG ? "too big: need " : "no room: need ");
+        o = num_put(o, end, in.err_arg);
+        o = str_put(o, end, " bytes");
+        break;
+    case FTC_IMG_E_SIZE:
+        o = str_put(o, end, "too large: ");
+        o = num_put(o, end, in.err_arg & 0xFFFFu);
+        o = str_put(o, end, "x");
+        o = num_put(o, end, in.err_arg >> 16);
+        break;
+    default:
+        o = str_put(o, end, in.err_arg == 2 ? "corrupt PNG" : in.err_arg == 3 ? "corrupt WebP" : "corrupt JPEG");
+        break;
+    }
+    fault(c, FTC_FAULT_IMAGE);
+    for (uint32_t i = 0; i < sizeof rep / 4; i++)
+        c->ring[i] = rep[i];
+    c->bus.wr(c->bus.ctx, FTC_RAM_CMD, rep, sizeof rep / 4);
+}
+
+/* Начало разбора: CMD_LOADIMAGE (box 0) или CMD_LOADIMAGE_BOX */
+static void image_begin(ftc_t *c, uint32_t opts, int boxed, uint32_t box, uint32_t room)
+{
+    ftc_img_req_t rq = {opts, boxed, box & 0xFFFFu, box >> 16, room & ~3u, img_draft_wr, img_draft_rd};
+    c->scratch_dirty = 1;                /* состояние декодера — в рабочей памяти 3D */
+    c->img_busy = 0;
+    ftc_img_begin_req(FTC_SCRATCH(c), &rq, FTC_INFLATE_MEM(c));
+    mw_begin(c, c->p[0] & 0x3FFFFCu);
+    c->done = 0;
+}
+
 /* CMD_LOADIMAGE выполнена: лист и CMD_GETPROPS — как у FT812 (bt8xxemu,
    fpga/vdac2/scripts/ft_probe_loadimage.py): [PALETTE_SOURCE ptr], SOURCE (за палитрой),
    LAYOUT_H, LAYOUT, SIZE_H, SIZE (NEAREST, BORDER); GETPROPS — у JPEG начало, у PNG конец. */
@@ -598,8 +704,14 @@ static void loadimage_done(ftc_t *c)
     ftc_img_get_info(FTC_SCRATCH(c), &in);
     uint32_t ptr = c->p[0] & 0x3FFFFFu, src = ptr + in.pal_bytes;
     c->img_addr = in.jpeg ? ptr : src + in.stride * in.h;
+    if (c->cmd == (uint32_t)CMD_LOADIMAGE_BOX)   /* у новой команды GETPROPS — начало выхода */
+        c->img_addr = ptr;
     c->img_w = in.w;
     c->img_h = in.h;
+    c->img_info[0] = in.src_w | in.src_h << 16;
+    c->img_info[1] = in.w | in.h << 16;
+    c->img_info[2] = in.fmt | (in.alpha ? 1u << 8 : 0) | in.stride << 16;
+    c->img_info[3] = in.pal_bytes;
     if (c->p[1] & 2u)                    /* OPT_NODL */
         return;
     if (in.pal_bytes)
@@ -965,7 +1077,7 @@ static int video(ftc_t *c)
             c->vf_jpeg -= (uint32_t)used;
             c->vf_left -= (uint32_t)used;
             if (r == FTC_IMG_ERROR || (r == FTC_IMG_NEED_INPUT && !c->vf_jpeg)) {
-                fault(c, FTC_FAULT_IMAGE);           /* испорченный или оборванный кадр */
+                image_fault(c);                      /* испорченный или оборванный кадр */
                 return B_DONE;
             }
             if (r == FTC_IMG_DONE) {
@@ -1064,11 +1176,22 @@ static int begin(ftc_t *c)
             fault(c, FTC_FAULT_UNKNOWN);
             return 1;
         }
-        c->scratch_dirty = 1;            /* состояние декодера — в рабочей памяти 3D */
-        ftc_img_begin(FTC_SCRATCH(c), p[1], FTC_INFLATE_MEM(c));
-        mw_begin(c, p[0] & 0x3FFFFCu);
-        c->done = 0;
+        image_begin(c, p[1], 0, 0, 0);
         return 0;
+    case CMD_LOADIMAGE_BOX: {            /* ptr, options, max_w | max_h << 16, room */
+        image_begin(c, p[1], 1, p[2], p[3]);
+        ftc_img_info_t in;
+        ftc_img_get_info(FTC_SCRATCH(c), &in);
+        if (in.err) {                    /* OPT_MEDIAFIFO, пустая рамка */
+            image_fault(c);
+            return 1;
+        }
+        return 0;
+    }
+    case CMD_IMAGEINFO:
+        for (uint32_t i = 0; i < 4; i++)
+            result(c, i, c->img_info[i]);
+        return 1;
     case CMD_GETPTR:
         result(c, 0, c->inflate_end);
         return 1;
@@ -1216,9 +1339,10 @@ static int body(ftc_t *c)
             return B_DONE;
         }
     case CMD_LOADIMAGE:
+    case CMD_LOADIMAGE_BOX:
         for (;;) {
             uint32_t n = data_avail(c);
-            if (!n)
+            if (!n && !c->img_busy)
                 return B_DATA;
             uint32_t at = (c->rp + c->roff) & RING_MASK, k = 4096 - at;
             if (k > n)
@@ -1227,7 +1351,7 @@ static int body(ftc_t *c)
             int r = ftc_img_run(FTC_SCRATCH(c), ring_bytes(c) + at, k, &used, inflate_out, c);
             data_consume(c, (uint32_t)used);
             if (r == FTC_IMG_ERROR) {
-                fault(c, FTC_FAULT_IMAGE);
+                image_fault(c);
                 return B_DONE;
             }
             if (r == FTC_IMG_DONE) {
@@ -1236,7 +1360,12 @@ static int body(ftc_t *c)
                 complete(c);
                 return B_DONE;
             }
-            if (used < k)
+            /* Разбор работает без новых данных (конец прогрессивного JPEG, сборка Adam7): кусок
+               сделан — главному циклу BL616 (почтовый ящик, CP_INFO), потом снова сюда. */
+            c->img_busy = r == FTC_IMG_BUSY;
+            if (c->img_busy)
+                return B_WAIT;
+            if (used < k || !n)
                 return B_DATA;
         }
     case CMD_INFLATE:

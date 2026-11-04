@@ -13,6 +13,8 @@
  *      и с отбрасыванием нелицевых граней, глубина, отсечение, форматы, ошибки. FTC3D_PPM=файл —
  *      кадр сцены в PPM.
  *
+ *   5. Прошивка 39: CMD_LOADIMAGE_BOX, CMD_IMAGEINFO, отчёт об ошибке картинки (data/task).
+ *
  *   host_test DATA_DIR RAMG_BIN
  */
 #include <math.h>
@@ -1618,6 +1620,149 @@ static int t3_after_image(const char *dir)
     return err;
 }
 
+/* CMD_LOADIMAGE_BOX и CMD_IMAGEINFO (прошивка 39) через кольцо: картинки data/task. RAM_G с ptr —
+   тот же выход, что у ft_image.c напрямую (черновик — массив room байтов); IMAGEINFO и GETPROPS
+   (у рамки — начало выхода); прогрессивный JPEG полосами и Adam7 — работа без данных между
+   опросами (FTC_IMG_BUSY), черновик — в RAM_G через шину; 3D после большой картинки — тот же кадр;
+   ошибка — отчёт в RAM_CMD («IMG», код, число, строка). */
+typedef struct {
+    uint8_t *out, *draft;
+    size_t n;
+} boxref_t;
+
+static void boxref_emit(void *u, const uint8_t *p, size_t n)
+{
+    boxref_t *r = (boxref_t *)u;
+    memcpy(r->out + r->n, p, n);
+    r->n += n;
+}
+
+static void boxref_wr(void *u, uint32_t off, const uint8_t *p, size_t n)
+{
+    memcpy(((boxref_t *)u)->draft + off, p, n);
+}
+
+static void boxref_rd(void *u, uint32_t off, uint8_t *p, size_t n)
+{
+    memcpy(p, ((boxref_t *)u)->draft + off, n);
+}
+
+/* Эталон: ft_image.c напрямую */
+static size_t box_ref(const uint8_t *data, size_t n, uint32_t box, uint32_t room, uint8_t *out, ftc_img_info_t *info)
+{
+    static _Alignas(8) uint8_t st[FTC_IMG_BYTES + FTC_INFLATE_BYTES];
+    boxref_t r = {out, calloc(1, room + 8), 0};
+    ftc_img_req_t rq = {0, 1, box & 0xFFFFu, box >> 16, room, boxref_wr, boxref_rd};
+    ftc_img_begin_req(st, &rq, st + FTC_IMG_BYTES);
+    size_t at = 0;
+    int rr;
+    do {
+        size_t used = 0;
+        rr = ftc_img_run(st, data + at, n - at, &used, boxref_emit, &r);
+        at += used;
+    } while (rr == FTC_IMG_BUSY || (rr == FTC_IMG_NEED_INPUT && at < n));
+    ftc_img_get_info(st, info);
+    free(r.draft);
+    return rr == FTC_IMG_DONE ? r.n : 0;
+}
+
+static int t_loadimage_box(const char *dir, size_t chunk)
+{
+    static const struct {
+        const char *file;
+        uint32_t box;
+    } cases[] = {
+        {"telegram-logo.png", 32u | 32u << 16},     /* 1000×1000 палитра + tRNS → 32×32 ARGB4 */
+        {"rss-logo.png", 32u | 32u << 16},          /* влезает как есть */
+        {"p4_adam7.png", 30u | 20u << 16},          /* Adam7: сборка без данных */
+        {"prog_1024x768.jpg", 1008u | 567u << 16},  /* прогрессивный полосами, копия в RAM_G */
+        {"vt_l1.jpg", 650u | 30u << 16},            /* прогрессивный целиком */
+    };
+    const uint32_t ptr = 0x114000u, room = 0x200000u - ptr;
+    static uint8_t ref[0x200000];
+    int bad = 0;
+    for (size_t ci = 0; ci < sizeof cases / sizeof cases[0]; ci++) {
+        char path[1024];
+        snprintf(path, sizeof path, "%s/task/%s", dir, cases[ci].file);
+        size_t n;
+        uint8_t *data = load(path, &n);
+        if (!data) {
+            printf("LOADIMAGE_BOX: нет %s\n", path);
+            bad++;
+            continue;
+        }
+        ftc_img_info_t in;
+        size_t rn = box_ref(data, n, cases[ci].box, room, ref, &in);
+        size_t padded = (n + 3) & ~(size_t)3;
+        uint8_t *s = calloc(1, padded + 96);
+        uint32_t hdr[6] = {0xFFFFFF00u, 0xFFFFFFB0u, ptr, 0, cases[ci].box, room};
+        memcpy(s, hdr, sizeof hdr);
+        memcpy(s + 24, data, n);
+        uint32_t tail[9] = {0xFFFFFFB1u, 0, 0, 0, 0, 0xFFFFFF25u, 0, 0, 0};
+        memcpy(s + 24 + padded, tail, sizeof tail);
+        chip_reset();
+        int err = feed(s, 24 + padded + sizeof tail, chunk);
+        uint32_t rd = peek32(FTC_REG_CMD_READ), r[7];
+        for (int i = 0; i < 7; i++)          /* IMAGEINFO 4 слова, GETPROPS 3 — перед rd */
+            r[i] = peek32(FTC_RAM_CMD + ((i < 4 ? rd - 32 + 4 * (uint32_t)i : rd - 12 + 4 * (uint32_t)(i - 4)) & 0xFFF));
+        if (err)
+            printf("  отчёт: %08x %u «%s», async %d\n", peek32(FTC_RAM_CMD), peek32(FTC_RAM_CMD + 4),
+                   (const char *)mem + FTC_RAM_CMD + 8, async_bus);
+        int mem_ok = rn && !memcmp(mem + ptr, ref, rn);
+        uint32_t want[7] = {in.src_w | in.src_h << 16, in.w | in.h << 16,
+                            in.fmt | (in.alpha ? 1u << 8 : 0) | in.stride << 16, in.pal_bytes, ptr, in.w, in.h};
+        int info_ok = !memcmp(r, want, sizeof want);
+        int ok = !err && mem_ok && info_ok;
+        printf("LOADIMAGE_BOX %-20s куски %u: %s выход %ux%u fmt %u, байтов %u, IMAGEINFO %08x %08x %08x %u%s\n",
+               cases[ci].file, (unsigned)chunk, ok ? "да" : "НЕТ", in.w, in.h, in.fmt, (unsigned)rn, r[0], r[1],
+               r[2], r[3], mem_ok ? "" : " (RAM_G расходится)");
+        bad += !ok;
+        /* 3D после большой картинки (рабочая память — общая): кадр тот же. Картинка — выше сеток
+           сцены (0x100000…0x13FFFF) */
+        if (ci == 3 && !chunk) {
+            static uint8_t a[256 * 192 * 2];
+            chip_reset();
+            put_scene();
+            scene_flags = 8;
+            scene(7, 1);
+            int e3 = run3();
+            memcpy(a, mem + T3_TARGET, sizeof a);
+            uint32_t hdr3[6] = {0xFFFFFF00u, 0xFFFFFFB0u, 0x140000u, 0, cases[ci].box, 0x200000u - 0x140000u};
+            memcpy(s, hdr3, sizeof hdr3);
+            e3 |= feed(s, 24 + padded + sizeof tail, 0);
+            scene(7, 1);
+            e3 |= run3();
+            int same = !memcmp(a, mem + T3_TARGET, sizeof a);
+            printf("3D после CMD_LOADIMAGE_BOX (прогрессивный полосами): кадр %s\n", same && !e3 ? "тот же" : "ДРУГОЙ");
+            bad += !same || e3;
+        }
+        free(s);
+        free(data);
+    }
+    /* ошибка: не JPEG и не PNG — отчёт в RAM_CMD до сброса */
+    {
+        uint8_t s[24 + 64];
+        uint32_t hdr[6] = {0xFFFFFF00u, 0xFFFFFFB0u, ptr, 0, 32u | 32u << 16, room};
+        memcpy(s, hdr, sizeof hdr);
+        memcpy(s + 24, "GIF89a", 6);
+        memset(s + 30, 0, sizeof s - 30);
+        chip_reset();
+        int err = feed(s, sizeof s, chunk);
+        char text[121];
+        for (int i = 0; i < 120; i++)
+            text[i] = (char)mem[FTC_RAM_CMD + 8 + i];
+        text[120] = 0;
+        int ok = err && peek32(FTC_REG_CMD_READ) == 0xFFFu &&
+                 peek32(FTC_RAM_CMD) == (FTC_IMG_REPORT | (uint32_t)FTC_IMG_E_UNSUPPORTED << 24) &&
+                 peek32(FTC_RAM_CMD + 4) == FTC_IMG_U_FORMAT && !strcmp(text, "unsupported: format");
+        printf("LOADIMAGE_BOX ошибка (GIF): REG_CMD_READ %03x, отчёт %08x %u «%s»: %s\n", peek32(FTC_REG_CMD_READ),
+               peek32(FTC_RAM_CMD), peek32(FTC_RAM_CMD + 4), text, ok ? "да" : "НЕТ");
+        bad += !ok;
+    }
+    printf("LOADIMAGE_BOX (куски %u): %s\n", (unsigned)chunk, bad ? "НЕ ПРОЙДЕН" : "да");
+    return bad != 0;
+}
+
 /* Поток кольца RAM_CMD от хоста (например, команды FTVIEW.WMF из модели Z80) — через
    сопроцессор; RAM_G (2 МБ) и показанный лист (после CMD_SWAP и смены кадра, 8 КБ) — в
    файлы. Для проверки всей цепочки «плагин → BL616» на ПК (ftview tests/test_ftview.py,
@@ -1675,6 +1820,8 @@ int main(int argc, char **argv)
     err |= t_loadimage(argv[1], 60);
     err |= t_loadimage_fit(argv[1], 0);
     err |= t_loadimage_fit(argv[1], 60);
+    err |= t_loadimage_box(argv[1], 0);
+    err |= t_loadimage_box(argv[1], 60);
     err |= t_video(argv[1]);
     err |= t_video_stream(argv[1]);
     printf(err ? "ТЕСТ НЕ ПРОЙДЕН\n" : "ТЕСТ ПРОЙДЕН\n");
