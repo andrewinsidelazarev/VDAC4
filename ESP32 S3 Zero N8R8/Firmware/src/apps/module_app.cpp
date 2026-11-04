@@ -48,6 +48,8 @@ void* g_diskFiles[kMaxDiskFiles] = {};
 #include <fcntl.h>
 #include <lwip/netdb.h>
 #include <lwip/sockets.h>
+#include <esp_crt_bundle.h>
+#include <esp_tls.h>
 
 namespace zifi {
 
@@ -260,6 +262,7 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.sd_close = coreSdClose;
   core_.sd_create = coreSdCreate;
   core_.wifi_rssi = coreWifiRssi;
+  core_.sock_open_tls = coreSockOpenTls;
 }
 
 void ModuleApp::begin() {
@@ -1675,7 +1678,29 @@ int ModuleApp::coreSockSend(int sock, const void* data, uint32_t count) {
     return ZM_ERROR;
   }
   const uint8_t* p = static_cast<const uint8_t*>(data);
+  esp_tls_t* tls = self->tls_[sock];
+  const uint32_t start = millis();
   while (count > 0) {
+    if (tls != nullptr) {
+      // TLS: сокет без блокировки — «подожди» (WANT_*) значит, что буфер полон: ждать места
+      // не дольше kSendTimeoutMs, как обычный сокет
+      const ssize_t sent = esp_tls_conn_write(tls, p, count);
+      if (sent > 0) {
+        p += sent;
+        count -= static_cast<uint32_t>(sent);
+        continue;
+      }
+      if ((sent != ESP_TLS_ERR_SSL_WANT_WRITE && sent != ESP_TLS_ERR_SSL_WANT_READ) ||
+          millis() - start > kSendTimeoutMs) {
+        return ZM_ERROR;
+      }
+      fd_set w;
+      FD_ZERO(&w);
+      FD_SET(self->sockets_[sock], &w);
+      timeval tv = {0, 50000};
+      select(self->sockets_[sock] + 1, nullptr, &w, nullptr, &tv);
+      continue;
+    }
     const int sent = send(self->sockets_[sock], p, count, 0);
     if (sent <= 0) {
       return ZM_ERROR;
@@ -1692,16 +1717,28 @@ int ModuleApp::coreSockRecv(int sock, void* data, uint32_t count, uint32_t timeo
     return -1;
   }
   const int fd = self->sockets_[sock];
-  fd_set r;
-  FD_ZERO(&r);
-  FD_SET(fd, &r);
-  timeval tv = {static_cast<long>(timeoutMs / 1000), static_cast<long>((timeoutMs % 1000) * 1000)};
-  const int ready = select(fd + 1, &r, nullptr, nullptr, &tv);
-  if (ready == 0) {
-    return 0;
+  esp_tls_t* tls = self->tls_[sock];
+  // У TLS расшифрованные байты могут уже лежать в буфере mbedTLS — тогда ждать сокет не нужно
+  if (tls == nullptr || esp_tls_get_bytes_avail(tls) <= 0) {
+    fd_set r;
+    FD_ZERO(&r);
+    FD_SET(fd, &r);
+    timeval tv = {static_cast<long>(timeoutMs / 1000), static_cast<long>((timeoutMs % 1000) * 1000)};
+    const int ready = select(fd + 1, &r, nullptr, nullptr, &tv);
+    if (ready == 0) {
+      return 0;
+    }
+    if (ready < 0) {
+      return -1;
+    }
   }
-  if (ready < 0) {
-    return -1;
+  if (tls != nullptr) {
+    // пришла только часть записи TLS — «подожди», это ещё не данные; 0 — сервер закрыл
+    const ssize_t got = esp_tls_conn_read(tls, data, count);
+    if (got > 0) {
+      return static_cast<int>(got);
+    }
+    return got == ESP_TLS_ERR_SSL_WANT_READ || got == ESP_TLS_ERR_SSL_WANT_WRITE ? 0 : -1;
   }
   const int got = recv(fd, data, count, 0);
   if (got > 0) {
@@ -1724,13 +1761,66 @@ void ModuleApp::coreSockClose(int sock) {
     return;
   }
   int fd = -1;
+  esp_tls_t* tls = nullptr;
   portENTER_CRITICAL(&self->sockLock_);
   fd = self->sockets_[sock];
+  tls = self->tls_[sock];
   self->sockets_[sock] = -1;
+  self->tls_[sock] = nullptr;
   portEXIT_CRITICAL(&self->sockLock_);
-  if (fd >= 0) {
+  if (tls != nullptr) {
+    esp_tls_conn_destroy(tls);               // закрывает и сам сокет
+  } else if (fd >= 0) {
     close(fd);
   }
+}
+
+// ABI 1.12 (браузер TSafari, 04.11.2026: формы POST по HTTPS — net_open умеет только GET).
+// Соединение и договор TLS — esp_tls; сертификат сервера — по набору корневых сертификатов
+// ESP-IDF, тому же, что у net_open (WiFiClientSecure::useBuiltinCACertBundle). Договор идёт в
+// задаче приложения, стек — её. После договора сокет без блокировки: sock_recv ждёт его select,
+// а неполная запись TLS — «пока ничего» (0), а не ожидание внутри mbedTLS.
+int ModuleApp::coreSockOpenTls(const char* host, uint16_t port, uint32_t timeoutMs) {
+  ModuleApp* self = instance_;
+  if (host == nullptr || host[0] == 0) {
+    return ZM_ERROR;
+  }
+  esp_tls_t* tls = esp_tls_init();
+  if (tls == nullptr) {
+    return ZM_NO_MEMORY;
+  }
+  esp_tls_cfg_t cfg = {};
+  cfg.crt_bundle_attach = esp_crt_bundle_attach;
+  cfg.timeout_ms = static_cast<int>(timeoutMs);
+  if (esp_tls_conn_new_sync(host, static_cast<int>(strlen(host)), port, &cfg, tls) != 1) {
+    bringupLog(kTag, "sock tls: %.40s:%u: no connection or bad certificate", host, static_cast<unsigned>(port));
+    esp_tls_conn_destroy(tls);
+    return ZM_ERROR;
+  }
+  int fd = -1;
+  if (esp_tls_get_conn_sockfd(tls, &fd) != ESP_OK || fd < 0) {
+    esp_tls_conn_destroy(tls);
+    return ZM_ERROR;
+  }
+  int slot = -1;
+  portENTER_CRITICAL(&self->sockLock_);
+  for (size_t i = 0; i < kMaxSockets; ++i) {
+    if (self->sockets_[i] < 0) {
+      self->sockets_[i] = fd;
+      self->tls_[i] = tls;
+      slot = static_cast<int>(i);
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&self->sockLock_);
+  if (slot < 0) {
+    esp_tls_conn_destroy(tls);
+    return ZM_ERROR;
+  }
+  const int on = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+  fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+  return slot;
 }
 
 int ModuleApp::coreNetResolve(const char* host, char ip[16]) {

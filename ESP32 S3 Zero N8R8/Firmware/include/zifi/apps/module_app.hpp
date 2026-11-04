@@ -13,6 +13,8 @@
 #include "zifi/ft_detach_guard.hpp"
 #include "zm_app.h"
 
+struct esp_tls;                          // соединение TLS ESP-IDF (esp_tls.h) — сокеты ABI 1.12
+
 namespace zifi {
 
 class AudioPlayer;
@@ -153,6 +155,7 @@ class ModuleApp : public App {
   static int coreNetResolve(const char* host, char ip[16]);
   static int coreWifiInfo(char ssid[33], char ip[16], char mac[18]);
   static int coreWifiRssi(int* dbm);
+  static int coreSockOpenTls(const char* host, uint16_t port, uint32_t timeoutMs);
   static int coreUiAvailable();
   static void coreAppDone();
   static int coreSdList(const char*, const char*, uint32_t, zm_sd_entry_t*, uint32_t,
@@ -166,6 +169,8 @@ class ModuleApp : public App {
   static int coreSdCreate(const char*, uint32_t);
   bool coreLoaded_ = false;               // приложение загрузило ядро из кэша: при выгрузке — слот 0
   int sockets_[kMaxSockets] = {-1, -1, -1, -1, -1};
+  // Сокет с TLS (ABI 1.12): его соединение esp_tls; nullptr — обычный сокет или место свободно.
+  ::esp_tls* tls_[kMaxSockets] = {};
   portMUX_TYPE sockLock_ = portMUX_INITIALIZER_UNLOCKED;
 
   void replyQuery(uint8_t state);

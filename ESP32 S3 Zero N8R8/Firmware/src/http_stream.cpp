@@ -280,6 +280,10 @@ bool HttpStream::open(const char* url, const char* extra, uint32_t timeoutMs, in
     int length = 0;
     if (startsWithNoCase(location, "http://") || startsWithNoCase(location, "https://")) {
       length = snprintf(next, sizeof(next), "%s", location);
+    } else if (port == (tls ? 443 : 80)) {
+      // Порт по умолчанию не пишем: этот адрес видит приложение (header(":url"), строка адреса браузера).
+      length = snprintf(next, sizeof(next), "%s://%s%s%s", tls ? "https" : "http", host,
+                        location[0] == '/' ? "" : "/", location);
     } else {
       length = snprintf(next, sizeof(next), "%s://%s:%u%s%s", tls ? "https" : "http", host,
                         static_cast<unsigned>(port), location[0] == '/' ? "" : "/", location);
@@ -296,6 +300,12 @@ bool HttpStream::open(const char* url, const char* extra, uint32_t timeoutMs, in
 }
 
 const char* HttpStream::header(const char* name) {
+  // «:url» — не заголовок ответа, а адрес, с которого он пришёл, после всех переадресаций (имя
+  // настоящего заголовка с двоеточия не начинается). Браузеру он нужен как адрес страницы: от
+  // него считаются относительные ссылки (google.com → www.google.com: «/images/…» с google.com — 404).
+  if (strcmp(name, ":url") == 0) {
+    return url_[0] != 0 ? url_ : nullptr;
+  }
   const size_t nameLength = strlen(name);
   for (const char* line = head_; *line != 0;) {
     const char* end = strchr(line, '\n');

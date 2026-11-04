@@ -22,7 +22,7 @@ class HttpStream {
   // тело читает read.
   bool open(const char* url, const char* extra, uint32_t timeoutMs, int& status);
   // Значение заголовка ответа (имя без учёта регистра) или nullptr; строка живёт
-  // до следующего вызова.
+  // до следующего вызова. «:url» — адрес ответа после переадресаций (с 0.1.119).
   const char* header(const char* name);
   // До count байтов тела: >0 — сколько, 0 — за timeoutMs ничего, −1 — конец/обрыв.
   int read(uint8_t* data, size_t count, uint32_t timeoutMs);
@@ -47,7 +47,10 @@ class HttpStream {
   // Заголовки ответа — строками «имя:значение\n» (без пробелов вокруг двоеточия).
   char head_[1536] = {};
   size_t headLength_ = 0;
-  char value_[256] = {};
+  // Значение заголовка — не короче адреса: Location переадресации бывает длинным (Google из ЕС
+  // ведёт через consent.google.com/ml?continue=…, 270–330 знаков; при 256 адрес обрезался, и
+  // сервер отвечал 400 — браузер TSafari, 04.11.2026).
+  char value_[sizeof(url_)] = {};
   char error_[64] = {};
 };
 

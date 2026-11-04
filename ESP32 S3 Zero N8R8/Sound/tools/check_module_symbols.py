@@ -6,6 +6,14 @@
 ZM_SYM). Символа нет ни там, ни там —
 модуль на плате не загрузится. Проверка на ПК ловит это сразу после сборки.
 
+По имени загрузчик ищет и символы, определённые в самом модуле, если перемещение к ним
+названо (R_XTENSA_32, R_XTENSA_GLOB_DAT): общих объектов (SHARED_OBJECT) прошивка не
+включает, и в самом модуле он такое имя не смотрит. Так бывает с функцией или переменной,
+видимой снаружи (visibility default): TSAFARI.ELF с libwebp (WEBP_EXTERN, переменная
+VP8GetCPUInfo) на плате 04.11 — «relocate failed (-88)», хотя все неопределённые символы
+ядро давало. Такое перемещение — ошибка
+проверки, если имени нет в таблицах прошивки.
+
 Загрузчик кладёт в память только .text, .rodata, .data, .data.rel.ro и .bss.
 Код или данные в другой секции (.iram1.* от IRAM_ATTR, .dram1.* и т. п.) на
 плате не окажутся там, куда на них ссылаются, — так TRACKER.ELF ронял ESP при
@@ -79,6 +87,21 @@ def unloaded_sections(path: str, tool: str) -> list[str]:
     return result
 
 
+def named_in_module(path: str, tool: str, known: set[str]) -> list[str]:
+    """Названные перемещения к своим символам модуля, которые загрузчик ищет в таблицах прошивки."""
+    output = subprocess.run([tool, "-r", "-W", path], capture_output=True, text=True).stdout
+    result = set()
+    for line in output.splitlines():
+        parts = line.split()
+        # Смещение, info, вид, значение символа, имя (у безымянных пятым идёт «+» или ничего)
+        if len(parts) < 5 or parts[2] not in ("R_XTENSA_32", "R_XTENSA_GLOB_DAT", "R_XTENSA_RELATIVE"):
+            continue
+        name = parts[4]
+        if name != "+" and int(parts[3], 16) and name not in known:
+            result.add(name)
+    return sorted(result)
+
+
 def relative_outside(path: str, tool: str) -> list[str]:
     """Указатели R_XTENSA_RELATIVE, которые не попадают внутрь загружаемых секций."""
     output = subprocess.run([tool, "-S", "-W", path], capture_output=True, text=True).stdout
@@ -122,6 +145,12 @@ def main() -> int:
             print(f"{path}: the core does not give {', '.join(sorted(missing))}")
         else:
             print(f"{path}: {len(needed)} external symbols, all given by the core")
+        named = named_in_module(path, tool, known)
+        if named:
+            status = 1
+            shown = ", ".join(named[:6]) + (f" and {len(named) - 6} more" if len(named) > 6 else "")
+            print(f"{path}: module symbols the ELF loader looks up by name in the core and does not find"
+                  f" (make them hidden): {shown}")
         foreign = unloaded_sections(path, tool)
         if foreign:
             status = 1
