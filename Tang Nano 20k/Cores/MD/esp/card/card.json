@@ -1,0 +1,11 @@
+{
+  "title": "Mega Drive",
+  "full_name": "Sega Mega Drive / Genesis",
+  "year": "1988",
+  "manufacturer": "Sega",
+  "line1": "16-bit",
+  "line2": "home console",
+  "category": "CONSOLE",
+  "manage_key": "F1",
+  "accent": "#70b8ff"
+}

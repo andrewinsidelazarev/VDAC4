@@ -11,10 +11,11 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.9 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
 | **Amiga / AGA** (на основе NanoMig) — 68020, 2 МиБ chip + 4 МиБ fast, дискета DF0, жёсткий диск HDF | карта Tang, `CORES` | 0.10, слой ESP 0.14 | [`SD/CORES/AMIGA.BIN`](SD/CORES/AMIGA.BIN), [`AMIGA.ELF`](SD/CORES/AMIGA.ELF) |
+| **Mega Drive / Genesis** (на основе mdtang) — YM2612 и PSG синтезирует ESP, снимки F5/F6, HDMI 720p60/720p50 по стандарту; нужна прошивка ESP 0.1.111 | карта Tang, `CORES` | 0.8, слой ESP 1.4 | [`SD/CORES/MD.BIN`](SD/CORES/MD.BIN), [`MD.ELF`](SD/CORES/MD.ELF) |
 
 `.BIN` — само ядро. `.ELF` — его слой на ESP: клавиатура и мышь Evo, звук на ЦАП ESP, сохранения на
 карты, выход в WC. Исходники TS-Config, FT812 и ядра видео — в [`../Firmware`](../Firmware), Next,
-NES и Amiga — здесь, в [`Next`](Next), [`NES`](NES) и [`AMIGA`](AMIGA), слой ESP ядра видео — в [`VIDEO/esp`](VIDEO/esp)
+NES, Amiga и Mega Drive — здесь, в [`Next`](Next), [`NES`](NES), [`AMIGA`](AMIGA) и [`MD`](MD), слой ESP ядра видео — в [`VIDEO/esp`](VIDEO/esp)
 (описание ядра — [`../Docs/video-core.md`](../Docs/video-core.md)). Слой ядра видео — не на карте
 Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит в `/WC/ESP` карты Evo рядом с модулями плеера,
 в ESP его отдаёт плагин [FTVIEW4](../FTVIEW4).
