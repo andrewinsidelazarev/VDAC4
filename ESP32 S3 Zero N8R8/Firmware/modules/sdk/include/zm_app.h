@@ -29,10 +29,11 @@ extern "C" {
 #endif
 
 #define ZM_APP_ABI_MAJOR 1
-#define ZM_APP_ABI_MINOR 10   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
+#define ZM_APP_ABI_MINOR 11   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
                                 4: core_* (ядра ПЛИС из кэша BL616), link_*, sock_* (TCP/UDP);
                                 5: ui_* — экран приложения оверлеем Tang поверх картинки Evo;
-                                6: app_done — приложение кончило работу: выгрузить */
+                                6: app_done — приложение кончило работу: выгрузить;
+                                11: wifi_rssi — уровень сигнала Wi-Fi */
 
 /* core->temperature: датчика нет (или ещё не прочитан). */
 #define ZM_TEMPERATURE_UNKNOWN (-32768)
@@ -113,6 +114,8 @@ typedef struct {
   uint16_t faults_i2s;            /* отказов вывода в ЦАП */
   uint16_t cover_serial;          /* меняется со сменой обложки; 0 — обложки нет */
   char stations[ZM_UI_STATIONS][ZM_UI_STATION_TEXT];
+  /* ABI 1.11 */
+  int8_t wifi_dbm;                /* радио: уровень Wi-Fi, дБм (core->wifi_rssi); 0 — неизвестен */
 } zm_ui_model_t;
 
 /* ABI 1.7: UTF-8 имена на microSD Tang; flags bit 0 — каталог. */
@@ -325,6 +328,11 @@ struct zm_core {
    * Открыть его — sd_open. ZM_NO_MEMORY — нет места на карте, ZM_BUSY — карта занята,
    * ZM_ERROR — файл уже есть или иной отказ; при отказе файла не остаётся. */
   int (*sd_create)(const char* path, uint32_t sectors);
+
+  /* ABI 1.11: wifi_rssi — уровень сигнала точки доступа: ZM_OK, *dbm — дБм (меньше нуля);
+   * ZM_ERROR — Wi-Fi не подключена. Драйвер Wi-Fi при каждом вызове — звать не чаще раза в
+   * секунду. Звать, только если size таблицы вмещает поле. */
+  int (*wifi_rssi)(int* dbm);
 };
 
 /* Таблица приложения: заполняет приложение в main. */

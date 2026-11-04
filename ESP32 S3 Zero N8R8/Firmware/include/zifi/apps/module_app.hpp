@@ -152,6 +152,7 @@ class ModuleApp : public App {
   static void coreSockClose(int sock);
   static int coreNetResolve(const char* host, char ip[16]);
   static int coreWifiInfo(char ssid[33], char ip[16], char mac[18]);
+  static int coreWifiRssi(int* dbm);
   static int coreUiAvailable();
   static void coreAppDone();
   static int coreSdList(const char*, const char*, uint32_t, zm_sd_entry_t*, uint32_t,

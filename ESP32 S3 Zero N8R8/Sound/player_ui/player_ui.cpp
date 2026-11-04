@@ -14,6 +14,8 @@ constexpr Color amber{255, 196, 101}, red{255, 120, 117}, line{38, 55, 66};
 constexpr Color panel{18, 32, 43};
 constexpr Rect whole{0, 0, kWidth, kHeight};
 constexpr int bx = 248, by = 230, bw = 352, bh = 28;
+// Левый край длительности у правого края полосы прогресса: «99:59:59» шрифтом 1 — 72 точки.
+constexpr int kDurationX = 528;
 constexpr uint8_t bayer[16] = {0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5};
 
 // Неизменный фон: точные результаты прежней целочисленной формулы, во flash.
@@ -62,6 +64,7 @@ struct State {
   uint32_t headHash, lastMs, timeKey, infoHash;
   uint32_t valuesHash;              // формат и длительность (drawValues)
   int progress, volume, temperature;
+  int wifi;                         // нарисованный уровень Wi-Fi, дБм; 0 — нет
   uint8_t levels[32], peaks[32];
   uint32_t holdUntil[32];
 };
@@ -192,6 +195,13 @@ void drawBackground() {
     pixels[y*kWidth+x]=background.shades[light][(y&3)*4+(x&3)];
   }
 }
+// Фон там, где копии нет (верхняя полоса вне kBaseBands): та же формула, что у drawBackground.
+void restoreBackground(int x,int y,int w,int h) {
+  for (int yy=hi(y,0); yy<lo(y+h,kHeight); ++yy) for (int xx=hi(x,0); xx<lo(x+w,kWidth); ++xx) {
+    const int light=hi(0,255-background.dx[xx]-background.dy[yy]);
+    put(xx,yy,background.shades[light][(yy&3)*4+(xx&3)]);
+  }
+}
 void brand(const zm_ui_model_t& m) {
   box(32,25,3,8,teal); box(38,21,3,12,teal); box(44,23,3,10,teal);
   label(57,20,"VDAC4",0,white);
@@ -226,11 +236,10 @@ void drawCover(const zm_ui_model_t& m,const uint16_t* cover) {
 }
 void drawFooter(const zm_ui_model_t& m) {
   box(32,319,576,1,line);
+  // Внизу из клавиш — только «H Help» (04.11.2026): Space, I, Esc и остальные — на странице помощи.
   if (m.page==ZM_UI_PAGE_MAIN) {
-    label(321,331,"Space",0,white); label(370,331,m.state==ZM_UI_PAUSED?"Play":"Pause",0,muted);
-    label(426,331,"H",0,white); label(444,331,"Help",0,muted);
-    label(488,331,"I",0,white); label(503,331,"Info",0,muted);
-    label(548,331,"Esc",0,white); label(580,331,"Exit",0,muted);
+    const int help=608-width("Help",4,0);
+    label(help-18,331,"H",0,white); label(help,331,"Help",0,muted);
   } else {
     rightLabel(608,331,"Esc  Back to player",0,white);
   }
@@ -296,7 +305,7 @@ void drawMain(const zm_ui_model_t& m,const uint16_t* cover) {
   else if (m.radio) label(155,280,"Listening time",0,muted);
   const char* hint=m.status[0]?m.status:(m.state==ZM_UI_FINISHING?"File sent / playing the queue":(m.radio?"LIVE STREAM":""));
   if (m.state==ZM_UI_ERROR || m.state==ZM_UI_LOADING || m.state==ZM_UI_BUFFERING) hint="";
-  ellipsis(310,280,hint,ZM_UI_TEXT,0,m.radio?teal:muted);
+  ellipsis(310,280,hint,ZM_UI_TEXT,0,m.radio?teal:muted,m.radio?608:kDurationX-8);
   box(32,306,576,3,line);
 }
 void keyRow(int x,int y,const char* key,const char* description) {
@@ -311,7 +320,7 @@ void drawHelp(const zm_ui_model_t& m) {
   keyRow(32,174,"Left / Right",m.radio?"Change station":"Seek 10 seconds");
   keyRow(32,211,"PgUp / PgDn",m.radio?"Change station":"Previous / next file");
   keyRow(32,248,"Up / Down","Adjust volume");
-  keyRow(334,137,"I","Technical details");
+  keyRow(334,137,"I","Info: technical details");
   keyRow(334,174,"H","Show help");
   keyRow(334,211,"Esc","Close this page");
   label(334,254,"Esc on player: stop and exit",0,muted);
@@ -383,22 +392,44 @@ void drawTime(const zm_ui_model_t& m,bool full) {
 }
 void drawVitals(const zm_ui_model_t& m,bool full) {
   if(full || s.volume!=m.volume) {
-    resetChange(); restore(32,330,126,17);
+    // Индикатор — 20 делений по 5 % (04.11.2026: вдвое длиннее прежних 10 по 10 %).
+    resetChange(); restore(32,330,166,17);
     char t[20]; snprintf(t,sizeof(t),"Vol %u%%",unsigned(lo(m.volume,100)));
     label(32,331,t,0,white);
-    for(int i=0;i<10;++i) box(110+i*4,336,2,5,i*10<m.volume?teal:line);
+    for(int i=0;i<20;++i) box(110+i*4,336,2,5,i*5<m.volume?teal:line);
     s.volume=m.volume; flushChange();
   }
   if(full || s.temperature!=m.temperature) {
-    resetChange(); restore(174,330,140,17);
+    // Температура — по центру нижней панели (04.11.2026), вместе с «WARM»/«HOT».
+    resetChange(); restore(220,330,200,17);
     char t[24];
     if(m.temperature==ZM_UI_TEMPERATURE_UNKNOWN) snprintf(t,sizeof(t),"ESP --");
     else snprintf(t,sizeof(t),"ESP %d%cC",int(m.temperature),static_cast<char>(0xf8));
     const Color c=m.temperature>=75?red:(m.temperature>=70?amber:muted);
-    label(174,331,t,0,c);
-    if(m.temperature>=70) label(259,331,m.temperature>=75?"HOT":"WARM",0,c);
+    const char* warn=m.temperature>=75?"HOT":(m.temperature>=70?"WARM":nullptr);
+    const int textWidth=width(t,sizeof(t),0);
+    const int x=320-(textWidth+(warn?10+width(warn,8,0):0))/2;
+    label(x,331,t,0,c);
+    if(warn) label(x+textWidth+10,331,warn,0,c);
     s.temperature=m.temperature; flushChange();
   }
+}
+// Уровень Wi-Fi — у радио по центру верхней полосы (04.11.2026): четыре столбика и дБм. Меняется
+// раз в секунду — своим участком, фон под ним считается заново.
+void drawWifi(const zm_ui_model_t& m,bool full) {
+  const int dbm=m.radio && m.wifi_dbm<0?m.wifi_dbm:0;
+  if(!full && dbm==s.wifi) return;
+  resetChange();
+  if(!full) restoreBackground(240,18,160,18);
+  if(dbm<0) {
+    const int bars=dbm>=-55?4:(dbm>=-65?3:(dbm>=-75?2:(dbm>=-85?1:0)));
+    const Color c=bars>=2?teal:(bars==1?amber:red);
+    char t[20]; snprintf(t,sizeof(t),"Wi-Fi %d dBm",dbm);
+    const int x=320-(26+width(t,sizeof(t),0))/2;
+    for(int i=0;i<4;++i) box(x+i*5,29-i*3,3,4+i*3,i<bars?c:line);
+    label(x+26,20,t,0,muted);
+  }
+  s.wifi=dbm; flushChange();
 }
 // Формат и длительность — поверх фона полной перерисовки (s.base), своими участками: меняются они
 // часто, а весь холст — это 115 200 слов в Tang.
@@ -422,13 +453,12 @@ void drawValues(const zm_ui_model_t& m,bool full) {
     flushChange();
   }
   if(duration) {
-    resetChange(); restore(155,278,150,19);
+    // Длительность — по правому краю полосы прогресса, без «/» (04.11.2026); неизвестна — ничего.
+    resetChange(); restore(kDurationX,278,608-kDurationX,19);
     if (m.duration_ms) {
-      char t[24];
-      if (sec>=3600) snprintf(t,sizeof(t),"/ %u:%02u:%02u",sec/3600,sec/60%60,sec%60);
-      else snprintf(t,sizeof(t),"/ %u:%02u",sec/60,sec%60);
-      label(155,279,t,1,muted);
-    } else label(155,280,"/ --:--",0,muted);
+      char t[24]; clockText(t,sizeof(t),m.duration_ms);
+      rightLabel(608,279,t,1,muted);
+    }
     flushChange();
   }
 }
@@ -536,6 +566,7 @@ int render(const zm_ui_model_t& m,const uint16_t* cover,bool coverChanged,bool f
   if(m.page==ZM_UI_PAGE_MAIN) { drawTime(m,repaint); drawLevels(m,nowMs,repaint,dt); }
   else if(m.page==ZM_UI_PAGE_INFO) drawInfoValues(m,repaint);
   drawVitals(m,repaint);
+  drawWifi(m,repaint);
   s.drawn=true;
   if(repaint) { dirty[0]=whole; return 1; }
   return outputCount;

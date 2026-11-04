@@ -259,6 +259,7 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.sd_pwrite = coreSdPwrite;
   core_.sd_close = coreSdClose;
   core_.sd_create = coreSdCreate;
+  core_.wifi_rssi = coreWifiRssi;
 }
 
 void ModuleApp::begin() {
@@ -1915,6 +1916,15 @@ int ModuleApp::coreWifiInfo(char ssid[33], char ip[16], char mac[18]) {
   snprintf(ip, 16, "%s", WiFi.localIP().toString().c_str());
   snprintf(mac, 18, "%s", WiFi.macAddress().c_str());
   return ZM_OK;
+}
+
+// ABI 1.11: уровень сигнала (экран интернет-радио, 04.11.2026).
+int ModuleApp::coreWifiRssi(int* dbm) {
+  if (dbm == nullptr || WiFi.status() != WL_CONNECTED) {
+    return ZM_ERROR;
+  }
+  *dbm = WiFi.RSSI();
+  return *dbm < 0 ? ZM_OK : ZM_ERROR;
 }
 
 // Пока поток открыт, Wi-Fi не спит (с 0.1.34). В энергосбережении ESP забирает кадры

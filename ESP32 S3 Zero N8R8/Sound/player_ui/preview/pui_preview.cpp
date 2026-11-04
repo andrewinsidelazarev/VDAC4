@@ -93,6 +93,7 @@ int main() {
   set(m.detail,"Instruments: 20  Tracks: 9");
   ok=snapshot("06_midi",m,false)&&ok;
   zm_ui_model_t radio=base(); radio.radio=1; radio.duration_ms=0; radio.played_ms=754000;
+  radio.wifi_dbm=-58;
   radio.tracks=11; set(radio.station,"Nightwave FM"); set(radio.title,"A city after midnight");
   set(radio.artist,"Harbour Lights"); set(radio.album,"Live from the stream"); set(radio.year,"");
   set(radio.file,"RADIO.M3U"); set(radio.format,"M3U  HE-AAC  64 kbps  44.1 kHz  stereo");

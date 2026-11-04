@@ -2708,6 +2708,19 @@ static int ui_model(zm_ui_model_t* model) {
       m.temperature = (int8_t)(celsius > 127 ? 127 : (celsius < -127 ? -127 : celsius));
     }
   }
+  /* Радио: уровень Wi-Fi по центру верхней полосы (1.41, ядро 0.1.116+, ABI 1.11). Драйвер Wi-Fi —
+   * раз в секунду: снимок зовут 25–50 раз в секунду. */
+  if (P->radio && core->size >= offsetof(zm_core_t, wifi_rssi) + sizeof(core->wifi_rssi) &&
+      core->wifi_rssi != NULL) {
+    static uint32_t wifi_ms;
+    static int8_t wifi_dbm;
+    if (wifi_ms == 0 || now - wifi_ms >= 1000u) {
+      int dbm = 0;
+      wifi_dbm = (int8_t)(core->wifi_rssi(&dbm) == ZM_OK ? (dbm < -127 ? -127 : dbm) : 0);
+      wifi_ms = now | 1u;
+    }
+    m.wifi_dbm = wifi_dbm;
+  }
   if (P->radio && P->radio_list_ms != 0 &&
       (int32_t)(now - P->radio_list_ms) < RADIO_LIST_MS) {
     m.view = ZM_UI_VIEW_STATIONS;
@@ -3083,7 +3096,7 @@ int main(int argc, char* argv[]) {
   app.abi_major = ZM_APP_ABI_MAJOR;
   app.abi_minor = ZM_APP_ABI_MINOR;
   app.name = "player";
-  app.version = "1.40";
+  app.version = "1.41";
   app.command_first = AUDIO_VIEW;
   app.command_last = AUDIO_TAGS;
   app.start = start;
