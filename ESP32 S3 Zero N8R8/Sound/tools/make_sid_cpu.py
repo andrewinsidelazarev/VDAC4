@@ -39,6 +39,19 @@ def generate():
     start = code.index('static unsigned char fast_cpu')
     stop = code.index('static INLINE char fast_interrupts')
     code = code[:start] + re.sub(r'\breturn ([^;]+);', r'{ *state = regs; return \1; }', code[start:stop]) + code[stop:]
+    # A small inlined, predecoded front-end; the general interpreter receives
+    # the already fetched opcode so CIA register instruction fetches occur once.
+    code=code.replace('static unsigned char fast_cpu(cRSID_CPUinstance* state)',
+                      'static unsigned char fast_cpu_general(cRSID_CPUinstance* state, unsigned char opcode)')
+    code=code.replace('IR = fast_read(r->PC);','IR = opcode;',1)
+    quick=(Path(__file__).with_name('sid_cpu_quick.inc')).read_text(encoding='utf-8')
+    at=code.index('static INLINE char fast_interrupts')
+    code=code[:at]+quick+'\n'+code[at:]
+    at=code.index('static INLINE char fast_interrupts(')
+    interrupts=code[at:].replace('fast_interrupts(cRSID_CPUinstance* r)',
+                                'fast_interrupts_state(cRSID_CPUinstance* r,unsigned irq,unsigned nmi)')
+    interrupts=interrupts.replace('cRSID_C64.NMI','nmi').replace('cRSID_C64.IRQ','irq')
+    code=code[:at]+interrupts+'\nstatic INLINE char fast_interrupts(cRSID_CPUinstance* r) {\n return fast_interrupts_state(r,cRSID_C64.IRQ,cRSID_C64.NMI);\n}\n'
     lib = uncomment((ROOT / 'components/crsid/libcRSID.c').read_text(encoding='utf-8'))
     init = lib[lib.index('void cRSID_initSIDtune'):lib.index('char* cRSID_setSongLengthData')]
     before, rest = init.split(' if (!cRSID.RealSIDmode) {', 1)
