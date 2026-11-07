@@ -50,6 +50,61 @@ def make_sid(freqs=(440.0, 660.0), start=1, title=b'Test Tone', author=b'VDAC4',
     return header + code
 
 
+
+def make_cascade_sid() -> bytes:
+    """RSID 2x8580: включить звук только после переполнения каскада CIA A -> B."""
+    code = bytearray([0x78, 0xA9, 0x35, 0x85, 0x01])  # SEI, RAM + I/O
+    def store(address, value):
+        code.extend([0xA9, value, 0x8D, address & 255, address >> 8])
+    for sid, hz in ((0xD400, 440.0), (0xD420, 660.0)):
+        freq = sid_register(hz)
+        for reg, value in ((0,freq&255),(1,freq>>8),(5,0),(6,0xF0),(4,0x11),(24,0)):
+            store(sid+reg,value)
+    for address,value in ((0xDC0E,0),(0xDC0F,0),(0xDC04,2),(0xDC05,0),
+                          (0xDC06,4),(0xDC07,0),(0xDC0E,0x11),(0xDC0F,0x51)):
+        store(address,value)
+    code.extend([0xAD,0x0D,0xDC,0x29,2,0xF0,0xF9])  # ждать ICR Timer B
+    store(0xD418,15); store(0xD438,15)
+    address=0x1000+len(code)
+    code.extend([0x4C,address&255,address>>8])
+    header=bytearray(make_sid(freqs=(440.0,))[:0x7C])
+    header[:4]=b'RSID'
+    struct.pack_into('>HHHHH',header,4,3,0x7C,0,0x1000,0)
+    header[118:124]=bytes([0,0xA4,0,0,0x42,0])
+    return bytes(header)+b'\x00\x10'+code
+
+
+
+def make_frozen_pulse_sid(model=2) -> bytes:
+    """PSID меняет pulse/TEST, шум, кольцо, маршрутизацию и громкость каждый кадр."""
+    code=bytearray()
+    def store(addr,value):
+        code.extend([0xA9,value,0x8D,addr&255,addr>>8])
+    store(0x80,0)
+    for voice,hz in enumerate((330.0,550.0,770.0)):
+        reg=0xD400+7*voice;freq=sid_register(hz)
+        for offset,value in ((0,freq&255),(1,freq>>8),(2,0x80),(3,8),(5,0),(6,0xF0),(4,0x41)):
+            store(reg+offset,value)
+    store(0xD416,0x80);store(0xD418,15)
+    code.append(0x60)
+    code.extend(b'\xEA'*(0x100-len(code)))
+    # $1100: new frame, X=0..7. Tables are at $1200.
+    code.extend([0xE6,0x80,0xA5,0x80,0x29,7,0xAA])
+    tables=[(0xD404,[0x41,0x49,0x4F,0x81,0x49,0x21,0x11,0x49]),
+            (0xD40B,[0x45,0x49,0x49,0x81,0x49,0x41,0x11,0x49]),
+            (0xD412,[0x43,0x49,0x4B,0x81,0x49,0x21,0x11,0x49]),
+            (0xD417,[0,1,3,4,7,0,0x81,0xF3]),
+            (0xD418,[15,0x1F,0x87,0x4F,0x53,0x2B,15,0xD8])]
+    for i,(reg,values) in enumerate(tables):
+        code.extend([0xBD,i*8,0x12,0x8D,reg&255,reg>>8])
+    code.append(0x60)
+    code.extend(b'\xEA'*(0x200-len(code)))
+    for reg,values in tables:code.extend(values)
+    header=bytearray(make_sid(freqs=(440.0,),model=model)[:0x7C])
+    struct.pack_into('>H',header,12,0x1100)
+    return bytes(header)+code
+
+
 def base_for(data: bytes, times: str) -> bytes:
     md5 = hashlib.md5(data).hexdigest()
     return make_sidlen.build(make_sidlen.parse(f'[Database]\n; /TEST/Test.sid\n{md5}={times}\n'))
@@ -201,6 +256,37 @@ class SidSourceTest(unittest.TestCase):
         r = self.run_host(data, 'close.sid', seek=10000, **{'close-pending': 1})
         self.assertEqual(r['pending_frames'], '0')
         self.assertLess(float(r['close_ms']), 100)
+
+
+    def test_rsid_cia_cascade_starts_both_sid_chips(self):
+        for worker in (0, 1):
+            r = self.run_host(make_cascade_sid(), 'cascade.sid', seconds=1, worker=worker, normalize=0)
+            self.assertEqual(r['voices'], '6')
+            self.assertGreater(float(r['rms']), 0.02, r)
+            self.assertGreater(float(r['stereo_diff']), 0.01, r)
+            self.assertEqual(r['ended'], '0')
+
+    def test_rsid_cia_cascade_survives_time_seek(self):
+        for before, seek in ((0, 10000), (12, -10000)):
+            r = self.run_host(make_cascade_sid(), 'cascade-seek.sid', before=before,
+                              seek=seek, seconds=1, normalize=0)
+            self.assertEqual(r['song'], '1')
+            self.assertGreater(float(r['rms']), 0.02, r)
+            self.assertGreater(float(r['stereo_diff']), 0.01, r)
+
+
+    def test_frozen_pulse_transitions_match_crsid(self):
+        for model in (1, 2):
+            data=make_frozen_pulse_sid(model)
+            self.run_host(data,'frozen.sid',seconds=3,reference=1,normalize=0,wav=BUILD/'frozen-ref.wav')
+            reference=self.pcm(BUILD/'frozen-ref.wav')
+            for worker in (0,1):
+                self.run_host(data,'frozen.sid',seconds=3,worker=worker,normalize=0,wav=BUILD/'frozen.wav')
+                actual=self.pcm(BUILD/'frozen.wav')
+                # render и эталон завершают последний блок разной длины.
+                n=min(len(actual),len(reference))
+                self.assertGreaterEqual(n,3*RATE*4)
+                self.assertEqual(actual[:n],reference[:n],(model,worker))
 
     def test_not_sid(self):
         path = BUILD / 'junk.sid'

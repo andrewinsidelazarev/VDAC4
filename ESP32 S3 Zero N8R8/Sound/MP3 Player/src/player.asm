@@ -1653,8 +1653,6 @@ Mp3_SectorBytes:
 
 ; Карта не прочиталась.
 Mp3_CardError:
-        xor a
-        call Mp3_Close
         ld hl,UiErrorCard
         jr Mp3_Fatal
 
@@ -1671,6 +1669,14 @@ Mp3_NoAnswer:
 ; HL — сообщение. Показать и ждать Esc.
 Mp3_Fatal:
         push hl
+        ; Ошибка плагина не означает, что ESP остановила звук. До ожидания Esc
+        ; явно оборвать воспроизведение, если канал ещё отвечает.
+        ld a,(Mp3Silent)
+        or a
+        jr nz,.show
+        xor a
+        call Mp3_Close
+.show:
         call Ui_Show                     ; ошибка — в окне на Evo
         pop hl
         call Ui_SetState

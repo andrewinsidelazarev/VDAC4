@@ -19,6 +19,7 @@
  * Последняя секунда — затухание, затем плагин берёт следующий
  * файл.
  *
+ * Версия 1.6: каскад CIA A -> B (Stereophonik и другие RSID).
  * Версия 1.5: init и перемотка выполняются порциями в render. Догон считает
  * только C64, ADSR и OSC3/ENV3; волны и фильтры звуковой части пропускаются. Предел времени render проверяется между кусками. Перегрузка не
  * завершает песню. Регистровое ядро 6502 и CIA/VIC — в c64_fast.h. */
@@ -27,14 +28,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "zm_app.h"
 #include "zm_source.h"
+/* Reuse the exact gain calculation while its input is unchanged. */
+static float sid_level_powf(float base,float exponent) {
+  static float last_base,last_exponent,last_value;
+  static int valid;
+  if(valid&&base==last_base&&exponent==last_exponent)return last_value;
+  const float value=powf(base,exponent);
+  last_base=base;last_exponent=exponent;last_value=value;valid=1;
+  return value;
+}
+#define powf sid_level_powf
 #include "zm_level.h"
+#undef powf
 
 /* Стенд может отключить только последующую обработку для сверки самого cRSID. */
 #ifndef SID_LEVEL_ENABLED
 #define SID_LEVEL_ENABLED 1
+#endif
+#ifndef SID_DETAIL_CYCLES
+#define SID_DETAIL_CYCLES 0                /* retain whole-chunk timing; fine profiling is optional */
 #endif
 
 /* cRSID — одним файлом, как его собирает libcRSID.c, без платформы ПК: звук и файлы — у плеера.
@@ -66,13 +82,16 @@ static int sid_sscanf(const char* s, const char* format, ...) {
 #define strspn sid_strspn
 #define strcspn sid_strcspn
 #define sscanf sid_sscanf
-/* Запись процессора в регистры SID ($D400..$D7FF, $DE00..$DFFF — и вторые SID): сперва огибающие
- * догоняют накопленные такты со старыми регистрами (adsr_catch_up ниже). Прочие адреса — лишний, но
- * безвредный догон: регистры не менялись. */
+/* Перед изменением control/AD/SR (смещения 4..6, 11..13, 18..20 каждого SID)
+ * огибающие догоняют накопленные такты со старыми регистрами. Громкость D418,
+ * частота и фильтр не меняют ADSR; цифровой звук не требует догона на каждой записи. */
 static void adsr_catch_up(void);
+static void adsr_invalidate(void);
 #define CRSID_SID_WRITE_HOOK(address)                                                         \
   do {                                                                                        \
-    if (RARELY(((address) & 0xFC00) == 0xD400 || ((address) & 0xFE00) == 0xDE00)) adsr_catch_up(); \
+    if (RARELY(((address) & 0xFC00) == 0xD400 || ((address) & 0xFE00) == 0xDE00)) {                \
+      if ((0x001C3870u >> ((address) & 31)) & 1u) { adsr_catch_up(); adsr_invalidate(); }             \
+    }                                                                                         \
   } while (0)
 #include "libcRSID.c"
 #undef strchr
@@ -81,6 +100,7 @@ static void adsr_catch_up(void);
 #undef sscanf
 
 #include "c64_fast.h"
+#include "mahoney_dac.h"
 
 #define RATE 44100u
 #define DEFAULT_SECONDS 180u               /* нет в базе — 3 минуты */
@@ -89,7 +109,7 @@ static void adsr_catch_up(void);
 #define BASE_BUCKETS 4096u                 /* корзины по старшим 12 битам MD5 */
 #define BASE_TABLE 12u                     /* смещения корзин — после заголовка */
 #define SONGS_MAX CRSID_SUBTUNE_AMOUNT_MAX
-#define CHUNK 64u                          /* отсчётов в куске конвейера (1.3: был 512) */
+#define CHUNK 128u                         /* fewer worker handoffs; 2.9 ms of PCM */
 #define RENDER_MAX 512u                    /* кадров за render — несколько кусков */
 #define CPU_HZ 240000000u                  /* такты ESP (ccount) */
 #define SLICE_CYCLES (CPU_HZ / 500u)        /* 2 мс между проверками очередной команды */
@@ -106,8 +126,26 @@ static int busy;                           /* cRSID один на модуль: 
 /* Снимок отсчёта: то, что звуковой части cRSID нужно от C64. */
 typedef struct {
   int16_t digi;                            /* цифровой звук PSID (cRSID_playPSIDdigi), 0 — нет */
-  uint8_t chip[CHIPS][SNAP_CHIP];          /* [0..0x18] — регистры, [0x19..0x1B] — огибающие */
+  _Alignas(4) uint8_t chip[CHIPS][SNAP_CHIP]; /* aligned register snapshots */
 } Snap;
+
+typedef struct {
+  uint32_t step;                           /* шаг фазы за шаг передискретизации */
+  uint32_t pw;                             /* порог импульса: 16 бит (WV_PULSE) или 12 (комбинированные) */
+  const unsigned char* table;              /* комбинированная волна */
+  uint32_t mask;                           /* 6581: старший бит индекса таблицы прочь */
+  int env;                                 /* огибающая (у 6581 — через его ЦАП) */
+  uint8_t kind, test, sync, ring, dest;    /* dest: 0 — никуда, 1 — мимо фильтра, 2 — в фильтр */
+  uint16_t digi_out;                       /* WV_DIGI: старший байт частоты << 8 */
+} Voice;
+
+typedef struct {
+  Voice voice[3];
+  _Alignas(4) uint8_t regs[SNAP_CHIP];
+  uint16_t model;
+  uint8_t real,valid;
+  int cutoff,resonance;
+} VoiceCache;
 
 /* Звуковая часть (ядро 1): копии SID cRSID со своими волнами и фильтрами и прочее, что cRSID держит
  * в статических переменных своих функций сведения (C64_SIDrouting.c) и cRSID_generateSample. */
@@ -121,6 +159,8 @@ typedef struct {
   int lfsr;                                /* шум дизеринга cRSID_generateSample */
   short volume_mul;                        /* cRSID.MainVolume * FadeLevel */
   uint8_t chips, stereo;
+  int32_t dac_dc[CHIPS + 1];               /* output coupling of calibrated digi DAC, Q8 */
+  uint8_t dac_active[CHIPS + 1];
 } Synth;
 
 /* Кусок конвейера: снимки отсчётов и звук из них. */
@@ -164,7 +204,14 @@ typedef struct {
   char format[24];
 } Source;
 
-static Synth synth;
+/* The waveform/filter state is touched for every oversampling step. Prefer
+ * internal RAM; the static copy remains available to stand-alone checks and
+ * as a fallback. Preserve its dither state across close/open in one module. */
+static VoiceCache params_fallback[CHIPS+1];
+static VoiceCache* synth_params=params_fallback;
+static Synth synth_fallback;
+static Synth* synth_state = &synth_fallback;
+#define synth (*synth_state)
 
 /* Горячее состояние ядра 0 (1.2): огибающие ADSR и фазы для OSC3 — во внутренней памяти (host->alloc
  * ZM_MEM_INTERNAL, несколько сотен байт), а не в структуре cRSID в PSRAM. На плате 04.11.2026 поток
@@ -172,11 +219,14 @@ static Synth synth;
 typedef struct {
   uint16_t rc[3];                          /* счётчики скорости голосов 1..3 */
   uint8_t state[3], env[3], exp[3];        /* состояние, огибающая, счётчик экспоненты */
+  uint32_t until;                         /* next envelope rate event, for all three voices */
+  uint8_t cached;
 } Adsr;
 typedef struct {                           /* фазы трёх голосов и волна голоса 3 — ради OSC3 */
   uint32_t acc[3], prev[3], out3, lfsr3, ring;
   int digi3;
   unsigned rise;
+  uint8_t held_test;
 } Osc3;
 typedef struct {
   Adsr adsr[CHIPS + 1];
@@ -186,11 +236,47 @@ typedef struct {
   uint8_t is6581[CHIPS + 1];
   cRSID_CPUinstance cpu;                    /* регистры 6502 во внутренней памяти */
   cRSID_CIAinstance cia[3];
+  FastCiaIo cia_io;
+  FastCiaPlan cia_plan;
   cRSID_VICinstance vic;
   int osc_cnt;                             /* свой счётчик шагов передискретизации */
   uint8_t chips;
+  uint8_t last_env3[CHIPS + 1];
 } Hot;
 static Hot* hot;
+
+static void adsr_invalidate(void) {
+  if (hot == NULL) return;
+  for (unsigned n = 1; n <= hot->chips; ++n) hot->adsr[n].cached = 0;
+}
+
+/* Перед init/закрытием вернуть CIA в стандартную память cRSID. */
+static void cia_cache_unbind(void) {
+  fast_cia_plan = NULL;
+  if (fast_cia_io == NULL) return;
+  memcpy(cRSID_C64.IObankRD + 0xDC00, fast_cia_io->rd, 512);
+  memcpy(cRSID_C64.IObankWR + 0xDC00, fast_cia_io->wr, 512);
+  for (unsigned n = 1; n <= 2; ++n) {
+    cRSID_C64.CIA[n].BasePtrRD = cRSID_C64.IObankRD + 0xDB00 + 256 * n;
+    cRSID_C64.CIA[n].BasePtrWR = cRSID_C64.IObankWR + 0xDB00 + 256 * n;
+  }
+  fast_cia_io = NULL;
+}
+
+static void cia_cache_bind(void) {
+  FastCiaIo* io = &hot->cia_io;
+  memcpy(io->rd, cRSID_C64.IObankRD + 0xDC00, 512);
+  memcpy(io->wr, cRSID_C64.IObankWR + 0xDC00, 512);
+  for (unsigned n = 1; n <= 2; ++n) {
+    cRSID_C64.CIA[n].BasePtrRD = io->rd + 256 * (n - 1);
+    cRSID_C64.CIA[n].BasePtrWR = io->wr + 256 * (n - 1);
+    hot->cia[n] = cRSID_C64.CIA[n];
+  }
+  fast_cia_io = io;
+  fast_cia_plan = &hot->cia_plan;
+  fast_cia_plan->valid = 0;
+  fast_cia_plan->owner = NULL;
+}
 
 /* Такты процессора ESP (у каждого ядра свой счётчик): сколько стоит отсчёт — в журнал при закрытии. */
 static INLINE uint32_t ccount(void) {
@@ -252,6 +338,14 @@ static uint32_t adsr_pending;              /* тактов с прошлого �
 
 static INLINE void adsr_run(Adsr* e, const uint8_t* regs, uint32_t cycles) {
   enum { GATE = 0x01, ATTACK = 0x80, DECAYSUSTAIN = 0x40, HOLDZERON = 0x10, RC_RANGE = 0x8000 };
+  if (MOSTLY(e->cached && cycles < e->until)) {
+    e->rc[0] = (uint16_t)((e->rc[0] + cycles) & 0x7FFF);
+    e->rc[1] = (uint16_t)((e->rc[1] + cycles) & 0x7FFF);
+    e->rc[2] = (uint16_t)((e->rc[2] + cycles) & 0x7FFF);
+    e->until -= cycles;
+    return;
+  }
+  uint32_t next = UINT32_MAX;
   for (unsigned v = 0; v < 3; ++v) {
     const uint8_t* r = regs + 7 * v;
     const uint8_t ctrl = r[4], ad = r[5], sr = r[6];
@@ -290,7 +384,12 @@ static INLINE void adsr_run(Adsr* e, const uint8_t* regs, uint32_t cycles) {
     e->rc[v] = (uint16_t)rc;
     e->env[v] = env;
     e->exp[v] = exp;
+    const uint32_t period = adsr_periods[state & ATTACK ? ad >> 4 : state & DECAYSUSTAIN ? ad & 0x0F : sr & 0x0F];
+    const uint32_t until = rc < period ? period - rc : RC_RANGE - rc + period;
+    if (until < next) next = until;
   }
+  e->until = next;
+  e->cached = 1;
 }
 
 static void adsr_catch_up(void) {
@@ -303,41 +402,54 @@ static void adsr_catch_up(void) {
 /* Первая половина cRSID_emulateC64 (C64/C64.c) слово в слово: такты процессора, CIA, VIC и
  * огибающих до конца отсчёта, часы TOD для PSID; затем — ENV3 для процессора и снимок для ядра 1. */
 static INLINE void c64_sample(Snap* snap) {
+  if (RARELY(fast_cia_io == NULL && cRSID_C64.RealSIDmode)) cia_cache_bind();
   FASTVAR unsigned char InstructionCycles;
+  const int real=cRSID_C64.RealSIDmode,ratio=cRSID_C64.SampleClockRatio;
+  int sample_cycles=cRSID_C64.SampleCycleCnt,finished=cRSID_C64.Finished;
+  unsigned irq=cRSID_C64.IRQ,nmi=cRSID_C64.NMI;
 
   uint32_t cpu = 0, ciavic = 0;
-  while (cRSID_C64.SampleCycleCnt <= cRSID_C64.SampleClockRatio) {
+  while (sample_cycles <= ratio) {
     PROF_AT(t0);
-    const uint32_t c0 = ccount();
-    if (CALMLY(!cRSID_C64.RealSIDmode)) {
+    const uint32_t c0 = SID_DETAIL_CYCLES ? ccount() : 0;
+    if (CALMLY(!real)) {
       if (RARELY(cRSID_C64.FrameCycleCnt >= cRSID.FrameCycles)) {
         cRSID_C64.FrameCycleCnt -= cRSID.FrameCycles;
-        if (RARELY(cRSID_C64.Finished)) {
+        if (RARELY(finished)) {
           cRSID_initCPU(cRSID.PlayAddress);
           hot->cpu = cRSID_C64.CPU;
-          cRSID_C64.Finished = 0;
+          finished = 0;
           if (LIKELY(cRSID.TimerSource == 0)) cRSID_C64.IObankRD[0xD019] = 0x81;
           else cRSID_C64.IObankRD[0xDC0D] = 0x83;
         }
       }
-      if (TIGHTLY(cRSID_C64.Finished == 0)) {
-        if (RARELY((InstructionCycles = fast_cpu(&hot->cpu)) >= 0xFE)) {
+      if (TIGHTLY(finished == 0)) {
+        if (RARELY((InstructionCycles = fast_cpu_mode(&hot->cpu,real,nmi)) >= 0xFE)) {
           InstructionCycles = 6;
-          cRSID_C64.Finished = 1;
+          finished = 1;
         }
       } else {
-        InstructionCycles = 7;
+        /* Batch seven-cycle idle steps up to the next PCM/play-call boundary.
+         * Timer readback and ADSR receive the same total C64 clocks. */
+        const unsigned sample_steps=(unsigned)(ratio-sample_cycles)/(7u<<CRSID_CLOCK_FRACTIONAL_BITS)+1;
+        const int frame_left=cRSID.FrameCycles-cRSID_C64.FrameCycleCnt;
+        unsigned idle_steps=sample_steps;
+        if(frame_left>0) {
+          const unsigned frame_steps=((unsigned)frame_left+6u)/7u;
+          if(idle_steps>frame_steps)idle_steps=frame_steps;
+        } else idle_steps=1;
+        InstructionCycles=(unsigned char)(7u*idle_steps);
       }
       cRSID_C64.FrameCycleCnt += InstructionCycles;
       cRSID_C64.IObankRD[0xDC04] += InstructionCycles;
-      cpu += ccount() - c0;
+      cpu += SID_DETAIL_CYCLES ? ccount() - c0 : 0;
     } else {
-      if (RARELY(fast_interrupts(&hot->cpu))) {
-        cRSID_C64.Finished = 0;
+      if (RARELY(fast_interrupts_state(&hot->cpu,irq,nmi))) {
+        finished = 0;
         InstructionCycles = 7;
-      } else if (MOSTLY(cRSID_C64.Finished == 0)) {
-        if (RARELY((InstructionCycles = fast_cpu(&hot->cpu)) >= 0xFE)) {
-          cRSID_C64.Finished = 1;
+      } else if (MOSTLY(finished == 0)) {
+        if (RARELY((InstructionCycles = fast_cpu_mode(&hot->cpu,real,nmi)) >= 0xFE)) {
+          finished = 1;
           InstructionCycles = 6;
         }
       } else {
@@ -345,24 +457,24 @@ static INLINE void c64_sample(Snap* snap) {
       }
       PROF_ADD(PROF_CPU, t0);
       PROF_AT(t1);
-      const uint32_t c1 = ccount();
+      const uint32_t c1 = SID_DETAIL_CYCLES ? ccount() : 0;
       cpu += c1 - c0;
-      cRSID_C64.IRQ = cRSID_C64.NMI = 0;
-      cRSID_C64.IRQ |= fast_cia(&hot->cia[1], InstructionCycles);
-      cRSID_C64.NMI |= fast_cia(&hot->cia[2], InstructionCycles);
-      cRSID_C64.IRQ |= fast_vic(&hot->vic, InstructionCycles);
+      irq=fast_cia(&hot->cia[1],InstructionCycles);
+      nmi=fast_cia(&hot->cia[2],InstructionCycles);
+      irq|=fast_vic(&hot->vic,InstructionCycles);
       PROF_ADD(PROF_CIAVIC, t1);
-      ciavic += ccount() - c1;
+      ciavic += SID_DETAIL_CYCLES ? ccount() - c1 : 0;
     }
-    cRSID_C64.SampleCycleCnt += (InstructionCycles << CRSID_CLOCK_FRACTIONAL_BITS);
+    sample_cycles += (InstructionCycles << CRSID_CLOCK_FRACTIONAL_BITS);
     adsr_pending += InstructionCycles;     /* огибающие — пакетом (adsr_catch_up) */
   }
-  cRSID_C64.SampleCycleCnt -= cRSID_C64.SampleClockRatio;
+  cRSID_C64.SampleCycleCnt=sample_cycles-ratio;
+  cRSID_C64.IRQ=irq;cRSID_C64.NMI=nmi;cRSID_C64.Finished=finished;
   PROF_AT(t2);
-  const uint32_t c2 = ccount();
+  const uint32_t c2 = SID_DETAIL_CYCLES ? ccount() : 0;
   adsr_catch_up();
   PROF_ADD(PROF_ADSR, t2);
-  const uint32_t c3 = ccount();
+  const uint32_t c3 = SID_DETAIL_CYCLES ? ccount() : 0;
   cycles_cpu += cpu;
   cycles_ciavic += ciavic;
   cycles_adsr += c3 - c2;
@@ -386,19 +498,24 @@ static INLINE void c64_sample(Snap* snap) {
   }
 
   snap->digi = RARELY(cRSID.PSIDdigiMode) ? cRSID_playPSIDdigi() : 0;
-  const Hot* const h = hot;
+  Hot* const h = hot;
   for (unsigned n = 1; n <= h->chips; ++n) {
     uint8_t* chip = snap->chip[n - 1];
     const Adsr* e = &h->adsr[n];
-    memcpy(chip, h->regs[n], SNAP_REGS);
+    _Static_assert(offsetof(cRSID_C64instance,IObankWR)%4==0,"SID source alignment");
+    /* Copy seven aligned words, then replace the last three bytes with ENV. */
+    __builtin_memcpy(__builtin_assume_aligned(chip,4),__builtin_assume_aligned(h->regs[n],4),SNAP_CHIP);
     chip[SNAP_ENV] = e->env[0];
     chip[SNAP_ENV + 1] = e->env[1];
     chip[SNAP_ENV + 2] = e->env[2];
-    h->rd[n][0x1C] = e->env[2];            /* ENV3 — без задержки */
+    if (h->last_env3[n] != e->env[2]) {
+      h->last_env3[n] = e->env[2];
+      h->rd[n][0x1C] = e->env[2];          /* ENV3 changes are still visible immediately */
+    }
   }
   osc3_sample(snap);                       /* OSC3 — тоже здесь: процессор читает его следующим отсчётом */
   PROF_ADD(PROF_SNAP, t3);
-  cycles_snap += ccount() - c3;
+  cycles_snap += SID_DETAIL_CYCLES ? ccount() - c3 : 0;
 }
 
 /* --- ядро 1: звуковая часть одного отсчёта по снимку ------------------------------------ */
@@ -415,18 +532,12 @@ enum {
   WV_NONE, WV_NOISE, WV_PULSE, WV_SAW, WV_TRI, WV_COMBINED, WV_COMBINED_PULSE, WV_PULTRI, WV_HOLD,
   WV_DIGI, WV_ZERO
 };
-typedef struct {
-  uint32_t step;                           /* шаг фазы за шаг передискретизации */
-  uint32_t pw;                             /* порог импульса: 16 бит (WV_PULSE) или 12 (комбинированные) */
-  const unsigned char* table;              /* комбинированная волна */
-  uint32_t mask;                           /* 6581: старший бит индекса таблицы прочь */
-  int env;                                 /* огибающая (у 6581 — через его ЦАП) */
-  uint8_t kind, test, sync, ring, dest;    /* dest: 0 — никуда, 1 — мимо фильтра, 2 — в фильтр */
-  uint16_t digi_out;                       /* WV_DIGI: старший байт частоты << 8 */
-} Voice;
+
 
 enum { CYCLES = CRSID_OVERSAMPLING_CYCLES, ACC_RANGE = 0x1000000, ACC_MSB = 0x800000, NOISE_CLOCK = 0x100000,
        WAVE_MID = 0x8000, ENV_DIV = 256 * CRSID_WAVGEN_PREDIV, DIGI_HOLD = 24, STEPS_MAX = 8 };
+
+#include "synth_params.h"
 
 /* Один голос на все шаги отсчёта — короткий цикл под его волну. ring_in и rise_in — старший бит фазы
  * предыдущего голоса и его подъём на каждом шаге (синхронизация, кольцо), ring_out и rise_out — свои,
@@ -547,43 +658,95 @@ static INLINE void voice_pass(const Voice* x, VoiceState* vs, int real, unsigned
   vs->out = w;
 }
 
-static INLINE void synth_chip(cRSID_SIDinstance* sid, const uint8_t* regs, const uint8_t* env, unsigned steps,
-                              int* nonfilt_io, int* prev_nonfilt_io, int* filt_io, int* prev_filt_io) {
-  const int count = (int)steps;            /* делитель среднего (быстрый путь обнуляет steps) */
-  const int real = cRSID_C64.RealSIDmode;
-  const int is8580 = sid->ChipModel == 8580;
-  const uint8_t route = regs[0x17], volband = regs[0x18];
-  Voice v[3];
-  for (unsigned i = 0; i < 3; ++i) {
-    const uint8_t* ch = regs + 7 * i;
-    const uint8_t wf = ch[4];
-    Voice* x = &v[i];
-    x->step = ((uint32_t)ch[1] << 8 | ch[0]) * CYCLES;
-    x->test = (wf & 0x08) != 0;
-    x->sync = (wf & 0x02) != 0;
-    x->ring = (wf & 0x04) != 0;
-    x->env = is8580 ? env[i] : cRSID_ADSR_DAC_6581[env[i]];
-    x->dest = (route & (1u << i)) ? 2 : (i != 2 || !(volband & 0x80)) ? 1 : 0;
-    x->mask = 0xFFF;
-    x->table = NULL;
-    x->pw = (uint32_t)((ch[3] & 0x0F) << 8 | ch[2]);
-    switch (wf & 0xF0) {
-      case 0x80: x->kind = WV_NOISE; break;
-      case 0x70: x->kind = WV_COMBINED_PULSE; x->table = cRSID_PulseSawTriangle; break;
-      case 0x60: x->kind = WV_COMBINED_PULSE; x->table = cRSID_PulseSawtooth; break;
-      case 0x50: x->kind = WV_PULTRI; x->table = cRSID_PulseTriangle; break;
-      case 0x40: x->kind = WV_PULSE; x->pw <<= 4; break;
-      case 0x30: x->kind = WV_COMBINED; x->table = cRSID_SawTriangle; break;
-      case 0x20: x->kind = WV_SAW; break;
-      case 0x10: x->kind = WV_TRI; break;
-      case 0x00:
-        x->kind = real && wf == 0x01 ? WV_DIGI : WV_HOLD;   /* SounDemon: частота — ЦАП напрямую */
-        x->digi_out = (uint16_t)(ch[1] << 8);
-        break;
-      default: x->kind = WV_ZERO; break;                     /* шум с другой волной — тишина */
+/* Independent voices need only their final phase/rise for the next sample.
+ * HOLD/ZERO/DIGI and muted simple waves have no intermediate state to retain.
+ * Keep every oversampling contribution for the Nyquist filters, but avoid
+ * temporary wave/ring arrays and repeated multiplication of pulse levels. */
+static INLINE int voice_flat(const Voice* x,VoiceState* vs,int real,unsigned steps,
+                             int* nonfilt,int* filt,uint32_t* ring_last,uint8_t* rise_last) {
+  if(!steps)return 0;
+  if(x->kind!=WV_HOLD&&x->kind!=WV_ZERO&&x->kind!=WV_DIGI&&
+     x->kind!=WV_PULSE&&x->kind!=WV_SAW&&x->kind!=WV_TRI)return 0;
+  if(x->kind==WV_TRI&&real&&vs->digi>0)return 0;
+  const unsigned kind=x->kind;
+  const int env=x->dest?x->env:0;
+  int* to=x->dest==2?filt:nonfilt;
+  uint32_t a=vs->acc,w=vs->out;
+  const int constant=kind==WV_HOLD||kind==WV_ZERO||kind==WV_DIGI||x->test;
+  if(constant||!env) {
+    a=x->test?0:(a+x->step*steps)&(ACC_RANGE-1);
+    switch(kind) {
+      case WV_ZERO:w=0;break;
+      case WV_DIGI:w=x->digi_out;vs->digi=DIGI_HOLD;break;
+      case WV_PULSE:w=x->test||(a>>8)>=x->pw?0xFFFF:0;break;
+      case WV_SAW:w=a>>8;break;
+      case WV_TRI:w=((a^(a&ACC_MSB?ACC_RANGE-1:0))>>7)&0xFFFF;break;
+      default:break;
     }
-    if (x->table != NULL && !is8580 && x->table != cRSID_PulseTriangle) x->mask = 0x7FF;
+    const int value=((int)w-WAVE_MID)*env/ENV_DIV;
+    if(value)for(unsigned s=0;s<steps;++s)to[s]+=value;
+  } else if(kind==WV_PULSE) {
+    const int low=-(int)WAVE_MID*env/ENV_DIV,high=(0xFFFF-WAVE_MID)*env/ENV_DIV;
+    for(unsigned s=0;s<steps;++s) {
+      a=(a+x->step)&(ACC_RANGE-1);
+      w=(a>>8)>=x->pw?0xFFFF:0;
+      to[s]+=w?high:low;
+    }
+  } else {
+    for(unsigned s=0;s<steps;++s) {
+      a=(a+x->step)&(ACC_RANGE-1);
+      w=kind==WV_SAW?a>>8:((a^(a&ACC_MSB?ACC_RANGE-1:0))>>7)&0xFFFF;
+      to[s]+=((int)w-WAVE_MID)*env/ENV_DIV;
+    }
   }
+  const uint32_t before_last=x->test?0:steps>1?(a-x->step)&(ACC_RANGE-1):vs->prev;
+  *ring_last=a&ACC_MSB;
+  *rise_last=(a&ACC_MSB)>(before_last&ACC_MSB);
+  vs->acc=vs->prev=a;vs->out=w;
+  return 1;
+}
+
+static INLINE void synth_chip(cRSID_SIDinstance* sid, const uint8_t* regs, const uint8_t* env, unsigned steps,
+                              int* nonfilt_io, int* prev_nonfilt_io, int* filt_io, int* prev_filt_io, VoiceCache* params) {
+  /* Удерживаемый TEST + pulse: все фазы нулевые, выходы постоянны. Сохраняем
+   * точную последовательность фильтра Найквиста и состояние для выхода из TEST. */
+  if (RARELY((regs[4] & 0xF8) == 0x48 && (regs[11] & 0xF8) == 0x48 &&
+             (regs[18] & 0xF8) == 0x48)) {
+    params->valid=0;
+    int to_nonfilt = 0, to_filt = 0;
+    const unsigned route = regs[0x17], volband = regs[0x18];
+    for (unsigned i = 0; i < 3; ++i) {
+      const unsigned voice = 7 * i;
+      const int e = sid->ChipModel == 8580 ? env[i] : cRSID_ADSR_DAC_6581[env[i]];
+      const int value = (0xFFFF - WAVE_MID) * e / ENV_DIV;
+      if (route & (1u << i)) to_filt += value;
+      else if (i != 2 || !(volband & 0x80)) to_nonfilt += value;
+      sid->PhaseAccu[voice] = sid->PrevPhaseAccu[voice] = 0;
+      sid->PrevWavGenOut[voice] = 0xFFFF;
+    }
+    sid->RingSourceMSB = sid->SyncSourceMSBrise = 0;
+    sid->BasePtrRD[0x1B] = 0xFF;
+    int nonfilt = *nonfilt_io, prev_nonfilt = *prev_nonfilt_io;
+    int filt = *filt_io, prev_filt = *prev_filt_io;
+    int sum_nonfilt = 0, sum_filt = 0;
+    for (unsigned i = 0; i < steps; ++i) {
+      int t = prev_nonfilt; prev_nonfilt = nonfilt;
+      nonfilt += (to_nonfilt + nonfilt * 3 - (t << 2)) >> 3;
+      t = prev_filt; prev_filt = filt;
+      filt += (to_filt + filt * 3 - (t << 2)) >> 3;
+      sum_nonfilt += nonfilt; sum_filt += filt;
+    }
+    *nonfilt_io = nonfilt; *prev_nonfilt_io = prev_nonfilt;
+    *filt_io = filt; *prev_filt_io = prev_filt;
+    sid->NonFiltedSample = sum_nonfilt / (int)steps;
+    sid->FilterInputSample = sum_filt / (int)steps;
+    return;
+  }
+
+  const int count=(int)steps;
+  const int real=cRSID_C64.RealSIDmode;
+  synth_prepare_params(params,sid,regs,env,real);
+  Voice* v=params->voice;
   /* Состояние голосов — в регистры. */
   uint32_t acc0 = (uint32_t)sid->PhaseAccu[0], acc1 = (uint32_t)sid->PhaseAccu[7], acc2 = (uint32_t)sid->PhaseAccu[14];
   uint32_t prev0 = (uint32_t)sid->PrevPhaseAccu[0], prev1 = (uint32_t)sid->PrevPhaseAccu[7],
@@ -604,12 +767,15 @@ static INLINE void synth_chip(cRSID_SIDinstance* sid, const uint8_t* regs, const
     uint32_t ring_s[4][STEPS_MAX], wave[STEPS_MAX];
     uint8_t rise_s[4][STEPS_MAX];
     int to_nonfilt[STEPS_MAX] = {0}, to_filt[STEPS_MAX] = {0};
+    const int independent=!(v[1].sync||v[1].ring||v[2].sync||v[2].ring);
     for (unsigned i = 0; i < 3; ++i) {
       vs[i].acc = accs[i];
       vs[i].prev = prevs[i];
       vs[i].out = out[i];
       vs[i].lfsr = lfsr[i];
       vs[i].digi = digi[i];
+      if(independent&&voice_flat(&v[i],&vs[i],real,steps,to_nonfilt,to_filt,
+                                  &ring_s[i+1][steps-1],&rise_s[i+1][steps-1]))continue;
       voice_pass(&v[i], &vs[i], real, steps, ring_s[i], rise_s[i], ring_s[i + 1], rise_s[i + 1], wave);
       const int e = v[i].env;
       if (v[i].dest != 0 && e != 0) {      /* огибающая 0 или голос никуда — вклада нет */
@@ -724,6 +890,33 @@ static INLINE void synth_chip(cRSID_SIDinstance* sid, const uint8_t* regs, const
 
 /* cRSID_emulateOversampledSIDwaves + cRSID_emulateOversampledSIDoutputs (C64_SIDrouting.c) и конец
  * cRSID_generateSample (host/audio.c) — на копиях SID synth. Отсчёт int16 в pcm[0..1]. */
+/* Frozen DC voices, two routed through the filter: D418's filter/voice3 bits
+ * form additional DAC levels. Splitting D418 into a smoothed volume and a
+ * separate 4-bit digi, as cRSID does, destroys this encoding. Match the hardware
+ * setup, not a tune name. The measured table applies only to an 8580. */
+static INLINE int mahoney_mode(const cRSID_SIDinstance* sid, const uint8_t* r) {
+  return sid->ChipModel == 8580 && r[4] == 0x49 && r[11] == 0x49 && r[18] == 0x49 &&
+         (r[6] & 0xF0) == 0xF0 && (r[13] & 0xF0) == 0xF0 && (r[20] & 0xF0) == 0xF0 &&
+         (r[21] & 7) == 7 && r[22] == 0xFF && r[23] == 3;
+}
+
+static INLINE int synth_output(unsigned n) {
+  cRSID_SIDinstance* sid = &synth.sid[n];
+  const int ordinary = synth_cached_output(sid,&synth_params[n]); /* keep state on mode transitions */
+  if (RARELY(cRSID_C64.RealSIDmode && mahoney_mode(sid, sid->BasePtr))) {
+    const int signal = mahoney_dac_8580[sid->BasePtr[24]] * 4;
+    /* AC coupling: keep DC out of normalization/limiting and DMA gaps.
+     * One pole ~14 Hz at 44.1 kHz; Q8 retains fractional state. */
+    if (!synth.dac_active[n]) synth.dac_dc[n] = signal * 256;
+    synth.dac_active[n] = 1;
+    synth.dac_dc[n] += (signal * 256 - synth.dac_dc[n]) / 512;
+    sid->Output = signal - synth.dac_dc[n] / 256;
+    return sid->Output;
+  }
+  synth.dac_active[n] = 0;
+  return ordinary;
+}
+
 static INLINE void synth_sample(const Snap* snap, int16_t* pcm) {
   Synth* const st = &synth;
   FASTVAR int Temp;
@@ -744,7 +937,7 @@ static INLINE void synth_sample(const Snap* snap, int16_t* pcm) {
     cRSID_SIDinstance* sid = &st->sid[n];
     sid->BasePtr = (unsigned char*)snap->chip[n - 1];
     synth_chip(sid, snap->chip[n - 1], snap->chip[n - 1] + SNAP_ENV, steps, &st->nonfilt[n], &st->prev_nonfilt[n],
-               &st->filt[n], &st->prev_filt[n]);
+               &st->filt[n], &st->prev_filt[n], &synth_params[n]);
   }
   PROF_ADD(PROF_WAVES, t4);
   (void)Temp;
@@ -793,21 +986,21 @@ static INLINE void synth_sample(const Snap* snap, int16_t* pcm) {
 
   int L, R;
   if (st->stereo == CRSID_CHANNELMODE_MONO) {
-    L = cRSID_emulateSIDoutputStage(&st->sid[1]);
-    for (unsigned n = 2; n <= chips; ++n) L += cRSID_emulateSIDoutputStage(&st->sid[n]);
+    L = synth_output(1);
+    for (unsigned n = 2; n <= chips; ++n) L += synth_output(n);
     R = L /= st->attenuation;
   } else {                                 /* CRSID_CHANNELMODE_NARROW: узкое стерео */
     L = R = 0;
     for (unsigned n = 1; n <= chips; ++n) {
       cRSID_SIDinstance* sid = &st->sid[n];
-      const int Tmp = cRSID_emulateSIDoutputStage(sid);
+      const int Tmp = synth_output(n);
       const int Tmp2 = Tmp >> CRSID_CHANNELPANNING_DIVSHIFTS;
       if (sid->Channel == CRSID_CHANNEL_LEFT) {
-        L += Tmp + Tmp2;
-        R += Tmp - Tmp2;
+        if (st->dac_active[n]) L += Tmp * 2; /* a stereo DAC has independent channels */
+        else { L += Tmp + Tmp2; R += Tmp - Tmp2; }
       } else if (sid->Channel == CRSID_CHANNEL_RIGHT) {
-        R += Tmp + Tmp2;
-        L += Tmp - Tmp2;
+        if (st->dac_active[n]) R += Tmp * 2;
+        else { R += Tmp + Tmp2; L += Tmp - Tmp2; }
       } else {
         L += Tmp;
         R += Tmp;
@@ -856,6 +1049,7 @@ static void synth_reset(unsigned chips) {
   static int lfsr = 0x0055A5AA;            /* шум дизеринга идёт дальше, как static в cRSID */
   if (synth.chips != 0) lfsr = synth.lfsr;
   memset(&synth, 0, sizeof(synth));
+  memset(synth_params,0,(chips+1)*sizeof(*synth_params));
   synth.chips = (uint8_t)chips;
   synth.stereo = chips > 1 ? cRSID.Stereo : CRSID_CHANNELMODE_MONO;
   synth.sample_clock_ratio = cRSID_C64.SampleClockRatio;
@@ -883,6 +1077,19 @@ static void synth_reset(unsigned chips) {
  * cRSID_emulateHQwaves. */
 static INLINE void osc3_chip(Osc3* o, uint8_t* rd, const uint8_t* regs, unsigned steps, int is6581, int real) {
   const uint8_t w1 = regs[4], w2 = regs[11], w3 = regs[18];
+  /* OSC3 в том же режиме постоянен; шум и SounDemon-состояние не меняются. */
+  if (RARELY((w1 & w2 & w3 & 0x08) && (w3 & 0xF0) == 0x40)) {
+    if (o->held_test) return;
+    o->held_test = 1;
+    o->acc[0] = o->acc[1] = o->acc[2] = 0;
+    o->prev[0] = o->prev[1] = o->prev[2] = 0;
+    o->ring = o->rise = 0;
+    o->out3 = 0xFFFF;
+    rd[0x1B] = 0xFF;
+    return;
+  }
+  o->held_test = 0;
+
   const uint32_t f1 = ((uint32_t)regs[1] << 8 | regs[0]) * CYCLES;
   const uint32_t f2 = ((uint32_t)regs[8] << 8 | regs[7]) * CYCLES;
   const uint32_t f3 = ((uint32_t)regs[15] << 8 | regs[14]) * CYCLES;
@@ -900,7 +1107,20 @@ static INLINE void osc3_chip(Osc3* o, uint8_t* rd, const uint8_t* regs, unsigned
   else (a) = ((a) + (f)) & (ACC_RANGE - 1);                        \
   rise = ((a) & ACC_MSB) > ((p) & ACC_MSB);                        \
   ring = (a) & ACC_MSB
-  for (unsigned s = 0; s < steps; ++s) {
+  if(steps&&!((w1|w2|w3)&2)&&kind3<0x80&&!(kind3==0x10&&real&&digi>0)) {
+    /* No synchronization: intermediate phases cannot affect another voice.
+     * Keep the last rise, ring source, waveform and all state for transitions. */
+    a1=(w1&8)?0:(a1+f1*steps)&(ACC_RANGE-1);
+    a2=(w2&8)?0:(a2+f2*steps)&(ACC_RANGE-1);
+    a3=test3?0:(a3+f3*steps)&(ACC_RANGE-1);
+    const uint32_t before_last=test3?0:steps>1?(a3-f3)&(ACC_RANGE-1):p3;
+    p1=a1;p2=a2;p3=a3;m2=a2&ACC_MSB;ring=a3&ACC_MSB;
+    rise=ring>(before_last&ACC_MSB);
+    if(kind3==0x10) {
+      const uint32_t t=a3^(m2&ringmask3);
+      out=((t^(t&ACC_MSB?ACC_RANGE-1:0))>>7)&0xFFFF;
+    }
+  } else for (unsigned s = 0; s < steps; ++s) {
     OSC3_VOICE(a1, p1, w1, f1);
     p1 = a1;
     OSC3_VOICE(a2, p2, w2, f2);
@@ -970,18 +1190,17 @@ static INLINE void osc3_chip(Osc3* o, uint8_t* rd, const uint8_t* regs, unsigned
 
 static void osc3_sample(const Snap* snap) {
   Hot* const h = hot;
-  unsigned steps = 0;
-  while (h->osc_cnt <= cRSID_C64.SampleClockRatio) {
-    h->osc_cnt += (CRSID_OVERSAMPLING_CYCLES << CRSID_CLOCK_FRACTIONAL_BITS);
-    ++steps;
-  }
-  h->osc_cnt -= cRSID_C64.SampleClockRatio;
+  const int quantum = CRSID_OVERSAMPLING_CYCLES << CRSID_CLOCK_FRACTIONAL_BITS;
+  const int ratio = cRSID_C64.SampleClockRatio;
+  const unsigned steps = h->osc_cnt <= ratio ? (unsigned)(ratio - h->osc_cnt) / quantum + 1 : 0;
+  h->osc_cnt += (int)steps * quantum - ratio;
   const int real = cRSID_C64.RealSIDmode;
   for (unsigned n = 1; n <= h->chips; ++n) osc3_chip(&h->osc[n], h->rd[n], snap->chip[n - 1], steps, h->is6581[n], real);
 }
 
 /* Горячее состояние — с C64 после init подмелодии (cRSID_initC64). */
 static void hot_reset(unsigned chips) {
+  cia_cache_unbind();
   Hot* const h = hot;
   memset(h, 0, sizeof(*h));
   h->chips = (uint8_t)chips;
@@ -993,6 +1212,7 @@ static void hot_reset(unsigned chips) {
     const cRSID_SIDinstance* sid = &cRSID_C64.SID[n];
     h->regs[n] = sid->BasePtr;
     h->rd[n] = sid->BasePtrRD;
+    h->last_env3[n] = sid->BasePtrRD[0x1C];
     h->is6581[n] = sid->ChipModel != 8580;
     Adsr* e = &h->adsr[n];
     Osc3* o = &h->osc[n];
@@ -1110,6 +1330,7 @@ static void start_job(Source* s, unsigned slot) {
 /* Подмелодия с начала. Команда Evo не исполняет программу init: её продолжает
  * render на ядре 0 короткими порциями, освобождая замок PLAYER после каждой. */
 static void start_song(Source* s, uint16_t song) {
+  cia_cache_unbind();
   finish_job(s);
   s->pending = 0;
   s->ready_pos = s->ready_n = 0;
@@ -1192,6 +1413,7 @@ static void close_source(void* instance) {
   Source* s = (Source*)instance;
   if (s == NULL) return;
   finish_job(s);
+  cia_cache_unbind();
   if (s->level_frames) {
     host->log("sid: level %d tenths LUFS, gain %d tenths dB, %u bytes, %u cycles/frame, max %u us",
               (int)(s->level.song_lufs * 10), (int)(s->level.gain_db * 10), (unsigned)sizeof(s->level),
@@ -1201,7 +1423,7 @@ static void close_source(void* instance) {
   if (frames_c64 != 0 && frames_sound != 0) {
     host->log("sid: cycles per sample of %u: core 0 C64 %u, core %u sound %u", (unsigned)(240000000u / RATE),
               (unsigned)(cycles_c64 / frames_c64), s->pipelined ? 1u : 0u, (unsigned)(cycles_sound / frames_sound));
-    host->log("sid: core 0 per sample: cpu %u, cia+vic %u, adsr %u, snapshot+osc3 %u", (unsigned)(cycles_cpu / frames_c64),
+    if (SID_DETAIL_CYCLES) host->log("sid: core 0 per sample: cpu %u, cia+vic %u, adsr %u, snapshot+osc3 %u", (unsigned)(cycles_cpu / frames_c64),
               (unsigned)(cycles_ciavic / frames_c64), (unsigned)(cycles_adsr / frames_c64),
               (unsigned)(cycles_snap / frames_c64));
   }
@@ -1222,6 +1444,14 @@ static void close_source(void* instance) {
   if (s->file != NULL) host->free(s->file);
   if (hot != NULL) host->free(hot);
   hot = NULL;
+  if(synth_params!=params_fallback) {
+    host->free(synth_params);synth_params=params_fallback;
+  }
+  if (synth_state != &synth_fallback) {
+    synth_fallback = *synth_state;
+    host->free(synth_state);
+    synth_state = &synth_fallback;
+  }
   host->free(s);
   busy = 0;
 }
@@ -1230,7 +1460,8 @@ static void* open_source(uint32_t file_size, const uint8_t* file) {
   if (busy || file == NULL || probe(file, file_size) == 0 || file_size > 0x10000 + 0x7C + 2) {
     return NULL;
   }
-  Source* s = (Source*)host->alloc(sizeof(Source), ZM_MEM_PSRAM);
+  Source* s = (Source*)host->alloc(sizeof(Source), ZM_MEM_INTERNAL);
+  if (s == NULL) s = (Source*)host->alloc(sizeof(Source), ZM_MEM_PSRAM);
   if (s == NULL) return NULL;
   memset(s, 0, sizeof(*s));
   busy = 1;
@@ -1269,7 +1500,7 @@ static void* open_source(uint32_t file_size, const uint8_t* file) {
    * есть. Снимки и звук — во внутренней памяти (1.3): у одной SID 2 × 64 × 30 байтов. У 2SID и
    * больше снимки — в PSRAM: внутренней во время игры ~19 КБ, и она нужна Wi-Fi. Нет внутренней —
    * хост даёт PSRAM. */
-  const uint32_t stride = (uint32_t)(offsetof(Snap, chip) + SNAP_CHIP * s->chips + 1) & ~1u;
+  const uint32_t stride = (uint32_t)(offsetof(Snap, chip) + SNAP_CHIP * s->chips + 3) & ~3u;
   for (unsigned i = 0; i < 2; ++i) {
     s->jobs[i].stride = stride;
     s->jobs[i].snap = (Snap*)host->alloc(CHUNK * stride, s->chips == 1 ? ZM_MEM_INTERNAL : ZM_MEM_PSRAM);
@@ -1279,6 +1510,21 @@ static void* open_source(uint32_t file_size, const uint8_t* file) {
     close_source(s);
     return NULL;
   }
+  /* Allocate after required buffers so this optimization cannot prevent open. */
+  Synth* fast_synth = (Synth*)host->alloc(sizeof(Synth), ZM_MEM_INTERNAL);
+  if (fast_synth != NULL) {
+    *fast_synth = synth_fallback;
+    synth_state = fast_synth;
+  }
+  VoiceCache* fast_params=(VoiceCache*)host->alloc((s->chips+1)*sizeof(VoiceCache),ZM_MEM_INTERNAL);
+  if(fast_params) {
+    synth_params=fast_params;
+    memset(synth_params,0,(s->chips+1)*sizeof(*synth_params));
+  }
+  host->log("sid: synthesis parameters %u bytes at %08X",(unsigned)((s->chips+1)*sizeof(VoiceCache)),
+            (unsigned)(uintptr_t)synth_params);
+  host->log("sid: synthesis state %u bytes at %08X", (unsigned)sizeof(Synth),
+            (unsigned)(uintptr_t)synth_state);
   const unsigned model = cRSID_getSIDmodel(1);
   if (s->chips > 1) {
     snprintf(s->format, sizeof(s->format), "SID %ux%u %s", (unsigned)s->chips, model,
@@ -1436,7 +1682,7 @@ int main(int argc, char* argv[]) {
   table.abi_major = ZM_SOURCE_ABI_MAJOR;
   table.abi_minor = ZM_SOURCE_ABI_MINOR;
   table.name = "sid";
-  table.version = "1.5";
+  table.version = "1.9-opt10";
   table.extensions = "SID";
   table.input = ZM_INPUT_WHOLE;
   table.keeps_file = 0;

@@ -1164,7 +1164,7 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertEqual(data[63], 0, "и Enter, и F3")
         self.assertEqual(data[64:161], bytes(97), "старое поле 32 расширений у #11 пустое")
         self.assertEqual(data[161:165], b"\xFF" * 4, "размер файла не ограничен")
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.29")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.30")
         self.assertEqual((data[34], data[35]), (2, 0), "две страницы, запуск — страница 0")
         self.assertEqual(data[38], 1, "второй блок файла — в страницу 1")
         self.assertEqual(data[197], 4, "меню выбора просмотрщика, в F10 плеера нет")
@@ -3289,6 +3289,28 @@ class SidTest(unittest.TestCase):
                 self.assertTrue(h.at(TIME_ROW, TEXT_MODULE).startswith('00:10 '))
                 self.assertTrue(h.at(TIME_ROW, TEXT_MODULE).endswith(' 01:40'))
                 self.assertEqual(h.hint(), HINT_PLAY)
+
+
+    def test_error_screen_stops_active_sid_before_waiting_for_escape(self):
+        class TransientStatus(AudioEsp):
+            injected=False
+            def status(self):
+                data=super().status()
+                if self.module_size and self.state==STATE_PLAYING and not self.injected:
+                    self.injected=True
+                    return bytes([STATE_IDLE])+data[1:]
+                return data
+        audio=TransientStatus()
+        audio.module_format=10
+        h=Mp3Harness(bytes(5000),esp=audio,name=b'TEST.SID')
+        helper=ModuleDeliveryTest()
+        helper.card(h,PLAYER_ELF=helper.elf(1024,1),SID_ELF=helper.elf(2048,2))
+        h.esc_after=160
+        h.start(extension=8)
+        self.assertTrue(audio.injected)
+        self.assertEqual(audio.closes,[0])
+        self.assertEqual(audio.state,STATE_IDLE)
+        self.assertEqual(h.at(STATUS_ROW,TEXT_MODULE),'ERROR: ESP could not load the file')
 
 
 class FastMediaTest(unittest.TestCase):
