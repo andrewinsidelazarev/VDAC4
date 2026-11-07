@@ -1677,6 +1677,9 @@ static int t_loadimage_box(const char *dir, size_t chunk)
         {"p4_adam7.png", 30u | 20u << 16},          /* Adam7: сборка без данных */
         {"prog_1024x768.jpg", 1008u | 567u << 16},  /* прогрессивный полосами, копия в RAM_G */
         {"vt_l1.jpg", 650u | 30u << 16},            /* прогрессивный целиком */
+        {"webp_1280x720.webp", 1008u | 567u << 16}, /* прошивка 40: VP8, файл в RAM_G, разделы окнами */
+        {"webp_lossy_alpha.webp", 100u | 100u << 16},   /* VP8 + ALPH в пуле */
+        {"webp_anim.webp", 200u | 150u << 16},      /* анимация: первый кадр VP8L на холсте, как есть */
     };
     const uint32_t ptr = 0x114000u, room = 0x200000u - ptr;
     static uint8_t ref[0x200000];
@@ -1758,6 +1761,37 @@ static int t_loadimage_box(const char *dir, size_t chunk)
         printf("LOADIMAGE_BOX ошибка (GIF): REG_CMD_READ %03x, отчёт %08x %u «%s»: %s\n", peek32(FTC_REG_CMD_READ),
                peek32(FTC_RAM_CMD), peek32(FTC_RAM_CMD + 4), text, ok ? "да" : "НЕТ");
         bad += !ok;
+    }
+    /* ошибка WebP (прошивка 40): длина блока VP8 больше файла — «corrupt WebP» */
+    {
+        char path[1024];
+        size_t n;
+        snprintf(path, sizeof path, "%s/task/webp_err_chunk.webp", dir);
+        uint8_t *data = load(path, &n);
+        if (!data) {
+            printf("LOADIMAGE_BOX: нет %s\n", path);
+            bad++;
+        } else {
+            size_t padded = (n + 3) & ~(size_t)3;
+            uint8_t *s = calloc(1, padded + 24);
+            uint32_t hdr[6] = {0xFFFFFF00u, 0xFFFFFFB0u, ptr, 0, 100u | 100u << 16, room};
+            memcpy(s, hdr, sizeof hdr);
+            memcpy(s + 24, data, n);
+            chip_reset();
+            int err = feed(s, 24 + padded, chunk);
+            char text[121];
+            for (int i = 0; i < 120; i++)
+                text[i] = (char)mem[FTC_RAM_CMD + 8 + i];
+            text[120] = 0;
+            int ok = err && peek32(FTC_REG_CMD_READ) == 0xFFFu &&
+                     peek32(FTC_RAM_CMD) == (FTC_IMG_REPORT | (uint32_t)FTC_IMG_E_CORRUPT << 24) &&
+                     peek32(FTC_RAM_CMD + 4) == 3u && !strcmp(text, "corrupt WebP");
+            printf("LOADIMAGE_BOX ошибка (WebP): REG_CMD_READ %03x, отчёт %08x %u «%s»: %s\n",
+                   peek32(FTC_REG_CMD_READ), peek32(FTC_RAM_CMD), peek32(FTC_RAM_CMD + 4), text, ok ? "да" : "НЕТ");
+            bad += !ok;
+            free(s);
+            free(data);
+        }
     }
     printf("LOADIMAGE_BOX (куски %u): %s\n", (unsigned)chunk, bad ? "НЕ ПРОЙДЕН" : "да");
     return bad != 0;

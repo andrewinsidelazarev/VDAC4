@@ -292,7 +292,7 @@ enum {
     FTC_IMG_E_SIZE,         /* размер больше предела: arg = w | h << 16 */
 };
 enum {
-    FTC_IMG_U_FORMAT = 1,   /* не JPEG и не PNG */
+    FTC_IMG_U_FORMAT = 1,   /* не JPEG, не PNG и не WebP (с прошивки 40) */
     FTC_IMG_U_ARITH,        /* JPEG с арифметическим кодированием */
     FTC_IMG_U_LOSSLESS,     /* JPEG lossless или иерархический */
     FTC_IMG_U_PRECISION,    /* JPEG 12 бит */

@@ -38,11 +38,19 @@
  *   пределах room (draft_wr/draft_rd).
  * - OPT_FULLSCREEN с уменьшением больше 4 раз (ядро фильтра Pillow не помещается) — тем же
  *   уменьшением по площади на холст (раньше — ошибка).
+ *
+ * Прошивка 40: WebP (VP8, VP8 с альфой, VP8L, первый кадр анимации) — libwebp, см. раздел «WebP».
  */
 #include <stddef.h>
 #include <string.h>
 
 #include "ft_copro.h"
+
+/* WebP: декодер libwebp 1.5.0 (third_party/libwebp, правки — README.VDAC4.md) */
+#include "src/dec/vp8i_dec.h"
+#include "src/dec/vp8li_dec.h"
+#include "src/dec/webpi_dec.h"
+#include "src/dsp/dsp.h"
 
 #define JB_BYTES  8192u           /* буфер сжатых данных JPEG */
 #define JB_NEED   3072u           /* столько — на одну MCU с запасом */
@@ -101,11 +109,9 @@ typedef struct area {
     uint32_t fmt;                 /* выход: FMT_L8, FMT_RGB565, FMT_ARGB4 */
     int      black;               /* прозрачность — на чёрный (холст) */
     uint32_t sy, oy;              /* строк источника принято, строк выхода выдано */
-    int      mode;                /* вход: AM_GRAY, AM_RGB, AM_RGBA, AM_GA, AM_PAL */
+    int      mode;                /* вход: AM_GRAY, AM_RGB, AM_RGBA, AM_GA, AM_PAL, AM_RGBX */
     const uint32_t *pal;          /* AM_PAL: 4 слова на индекс (у прозрачной — предумноженные) */
-    uint32_t *hacc;               /* суммы строки по x (целые): ow × nch */
-    uint32_t *span;               /* по точке выхода: x0, x1 источника и доли (w0 | w1 << 16) */
-    float   *vacc;                /* суммы по y: ow × nch */
+    float   *vacc;                /* суммы по y нынешней строки выхода: ow × nch */
     uint8_t *src;                 /* строка источника sw × nch (её заполняет декодер, если нужно) */
     uint8_t *row;                 /* строка выхода (холста) */
 } area_t;
@@ -249,8 +255,55 @@ typedef struct {
     int      err;
 } png_t;
 
+/* --------------------------------------------------------------------------------------- */
+/* WebP (прошивка 40)                                                                      */
+/* --------------------------------------------------------------------------------------- */
+
 typedef struct {
-    int kind;                    /* 0 — не известно, 1 — JPEG, 2 — PNG */
+    int      state;              /* W_* */
+    uint8_t  hdr[12];            /* «RIFF», длина, «WEBP» */
+    uint32_t hdr_got;
+    uint8_t *file;               /* файл целиком — в пуле (не far) */
+    uint32_t size, got;          /* длина файла (8 + длина RIFF), принято */
+    int      far;                /* рамка, файл больше WP_NEAR_MAX: файл — в RAM_G в конце room */
+    uint32_t base;               /* его место в RAM_G (от ptr); выход — до него */
+    uint8_t  stage[256];         /* приём в RAM_G словами (draft_wr — кратно 4) */
+    uint32_t staged, flushed;
+    uint32_t img_off, alph_off;  /* места блоков в файле */
+    uint32_t parts_off;          /* VP8 из RAM_G: таблица размеров разделов токенов — место в файле */
+    uint8_t *win;                /* VP8 из RAM_G: окна разделов (MAX_NUM_PARTITIONS × WP_WIN) */
+    uint32_t ppos[MAX_NUM_PARTITIONS], pend[MAX_NUM_PARTITIONS];   /* разделы: следующий байт, конец */
+    uint8_t *pool0;              /* начало пула (сколько нужно памяти — от него) */
+    int      lossless;           /* VP8L */
+    int      alpha;              /* у выхода прозрачность: флаг VP8X, у простого VP8L — его подсказка */
+    uint32_t cw, ch;             /* холст */
+    uint32_t fx, fy, fw, fh;     /* кадр на холсте (у анимации — первый; иначе весь холст) */
+    const uint8_t *img;          /* полезная нагрузка VP8 / VP8L */
+    uint32_t img_size;
+    const uint8_t *alph;         /* ALPH (у VP8) */
+    uint32_t alph_size;
+    uint32_t y;                  /* строк холста выдано */
+    uint32_t fy_out;             /* строк кадра выдано */
+    int      out;                /* OUT_* */
+    fit_t   *fit;
+    area_t  *area;
+    uint8_t *canvas;             /* строка холста RGBA (кадр меньше холста) */
+    uint8_t *frow;               /* VP8L: строка кадра RGBA из слов ARGB */
+    uint8_t *out_row;            /* строка выхода (RAW) */
+    uint8_t *pair;               /* VP8: две строки кадра RGBA */
+    uint8_t *tmp_y, *tmp_u, *tmp_v;   /* VP8: строка, отложенная «гладким» восстановлением цветности */
+    uint8_t *heap;               /* с этого места пул — память libwebp (стопкой, VDAC4WebPAlloc) */
+    uint32_t want;               /* libwebp не хватило: нужно байтов пула (оценка — от pool0) */
+    uint32_t lrow;               /* VP8L: строк разобрано */
+    VP8Io    io;
+    WebPDecParams params;        /* VP8L: io.opaque */
+    WebPDecBuffer buf;           /* VP8L: только вид точек и высота (строки — в wp_lrows) */
+    VP8Decoder  *vp8;
+    VP8LDecoder *vp8l;
+} webp_t;
+
+typedef struct {
+    int kind;                    /* 0 — не известно, 1 — JPEG, 2 — PNG, 3 — WebP */
     ftc_img_info_t info;
     /* запрос (ftc_img_begin_req) */
     uint32_t opts;
@@ -269,6 +322,7 @@ typedef struct {
     union {
         jpeg_t j;
         png_t  p;
+        webp_t w;
     } u;
 } img_t;
 
@@ -276,6 +330,7 @@ _Static_assert(sizeof(img_t) <= FTC_IMG_BYTES, "FTC_IMG_BYTES");
 
 #define IMG_OF_J(j) ((img_t *)((uint8_t *)(j) - offsetof(img_t, u)))
 #define IMG_OF_P(p) ((img_t *)((uint8_t *)(p) - offsetof(img_t, u)))
+#define IMG_OF_W(w) ((img_t *)((uint8_t *)(w) - offsetof(img_t, u)))
 
 /* Причина ошибки — первая (дальше обычно следствия) */
 static void img_err(img_t *im, uint32_t code, uint32_t arg)
@@ -566,8 +621,14 @@ static int fit_init_pool(img_t *im, fit_t *f, uint32_t w, uint32_t h, uint32_t i
  * FT812 — округлением до 8 бит и усечением, как у CMD_LOADIMAGE. Вход — строка декодера как есть
  * (серый, RGB, RGBA, серый с альфой, индексы палитры — по предумноженной таблице).
  * Модель BL616 (rvsim, 04.11.2026): так втрое быстрее, чем float по каждой точке.
+ * Прошивка 41: всё — один проход по строке источника. Сумма по x точки выхода сразу ложится в
+ * суммы по y (vacc), без массива сумм строки и второго прохода; последняя строка источника у строки
+ * выхода сразу же выдаёт точку выхода и кладёт в vacc свою долю следующей строки (без прохода по
+ * vacc на выдачу и обнуления); границы точек по x — на ходу, без массива. Раньше массивы строки (у
+ * 829 точек RGB ~35 КБ) не помещались в кэш данных BL616 (16 КБ), и каждая строка источника
+ * выметала его. Порядок и точность сложений прежние — выход бит в бит тот же.
  */
-enum { AM_GRAY, AM_RGB, AM_RGBA, AM_GA, AM_PAL };   /* вход: байтов на точку 1, 3, 4, 2, 1 */
+enum { AM_GRAY, AM_RGB, AM_RGBA, AM_GA, AM_PAL, AM_RGBX };   /* вход: байтов на точку 1, 3, 4, 2, 1, 4 */
 
 static int area_init(img_t *im, area_t *a, uint32_t sw, uint32_t sh, uint32_t ow, uint32_t oh, int nch,
                      uint32_t fmt, int canvas)
@@ -590,25 +651,15 @@ static int area_init(img_t *im, area_t *a, uint32_t sw, uint32_t sh, uint32_t ow
     a->x0 = canvas ? (FIT_W - ow) / 2 : 0;
     a->y0 = canvas ? (FIT_H - oh) / 2 : 0;
     uint32_t obpp = fmt == FMT_L8 ? 1u : 2u;
-    size_t need = 2u * (size_t)ow * (size_t)nch * 4u + 12u * ow + (size_t)sw * (size_t)nch + a->cw * obpp + 16u;
+    size_t need = (size_t)ow * (size_t)nch * sizeof(float) + (size_t)sw * (size_t)nch + a->cw * obpp + 8u;
     if (pool_free(im) < need) {
         img_err(im, FTC_IMG_E_TOO_BIG, (uint32_t)need);
         return 0;
     }
-    a->hacc = pool_take(im, (size_t)ow * (size_t)nch * 4u);
     a->vacc = pool_take(im, (size_t)ow * (size_t)nch * sizeof(float));
     a->src = pool_take(im, (size_t)sw * (size_t)nch);
     a->row = pool_take(im, (size_t)a->cw * obpp + 4u);
-    a->span = pool_take(im, 12u * ow);
     memset(a->vacc, 0, (size_t)ow * (size_t)nch * sizeof(float));
-    /* границы точек выхода по x — раз на картинку (деления — не на каждую строку) */
-    for (uint32_t X = 0; X < ow; X++) {
-        uint32_t lo = X * sw, hi = lo + sw, x0 = lo / ow;
-        uint32_t w0 = ((x0 + 1) * ow < hi ? (x0 + 1) * ow : hi) - lo, x1 = (hi - 1) / ow;
-        a->span[3 * X] = x0;
-        a->span[3 * X + 1] = x1;
-        a->span[3 * X + 2] = w0 | (hi - x1 * ow) << 16;   /* доли ≤ ow < 2^16 */
-    }
     return 1;
 }
 
@@ -631,115 +682,136 @@ static inline uint32_t to8(float v)
     return v <= 0.0f ? 0u : v >= 254.5f ? 255u : (uint32_t)(v + 0.5f);
 }
 
-/* Строка выхода из vacc */
-static void area_put(area_t *a, void (*emit)(void *, const uint8_t *, size_t), void *u)
+/* Точка выхода из сумм по площади v (n каналов; k — 1 / площадь sw·sh) — в формат FT812 по o */
+static inline uint8_t *area_px(const area_t *a, const float *v, int n, float k, uint8_t *o)
 {
-    const float k = 1.0f / ((float)a->sw * (float)a->sh);
-    const float *v = a->vacc;
-    uint8_t *o = a->row;
-    if (a->black)
-        memset(o, 0, 2u * a->cw);
-    o += (a->fmt == FMT_L8 ? 1u : 2u) * a->x0;
-    for (uint32_t x = 0; x < a->ow; x++, v += a->nch) {
-        uint32_t r, g, b, al = 255;
-        if (a->nch == 1) {
-            r = g = b = to8(v[0] * k);
-        } else if (a->nch == 3) {
-            r = to8(v[0] * k);
-            g = to8(v[1] * k);
-            b = to8(v[2] * k);
-        } else if (a->black) {               /* холст: предумноженный цвет и есть цвет на чёрном */
-            r = to8(v[0] * k * (1.0f / 255.0f));
-            g = to8(v[1] * k * (1.0f / 255.0f));
-            b = to8(v[2] * k * (1.0f / 255.0f));
-        } else {
-            al = to8(v[3] * k);
-            float ia = v[3] > 0.0f ? 1.0f / v[3] : 0.0f;
-            r = to8(v[0] * ia);
-            g = to8(v[1] * ia);
-            b = to8(v[2] * ia);
-        }
-        if (a->fmt == FMT_L8) {
-            *o++ = (uint8_t)r;
-        } else {
-            uint32_t w = a->fmt == FMT_ARGB4 ? ((al >> 4) << 12) | ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4)
-                                             : ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
-            *o++ = (uint8_t)w;
-            *o++ = (uint8_t)(w >> 8);
-        }
+    uint32_t r, g, b, al = 255;
+    if (n == 1) {
+        r = g = b = to8(v[0] * k);
+    } else if (n == 3) {
+        r = to8(v[0] * k);
+        g = to8(v[1] * k);
+        b = to8(v[2] * k);
+    } else if (a->black) {                   /* холст: предумноженный цвет и есть цвет на чёрном */
+        r = to8(v[0] * k * (1.0f / 255.0f));
+        g = to8(v[1] * k * (1.0f / 255.0f));
+        b = to8(v[2] * k * (1.0f / 255.0f));
+    } else {
+        al = to8(v[3] * k);
+        float ia = v[3] > 0.0f ? 1.0f / v[3] : 0.0f;
+        r = to8(v[0] * ia);
+        g = to8(v[1] * ia);
+        b = to8(v[2] * ia);
     }
+    if (a->fmt == FMT_L8) {
+        *o++ = (uint8_t)r;
+    } else {
+        uint32_t w = a->fmt == FMT_ARGB4 ? ((al >> 4) << 12) | ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4)
+                                         : ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+        *o++ = (uint8_t)w;
+        *o++ = (uint8_t)(w >> 8);
+    }
+    return o;
+}
+
+/* Строка выхода (a->row) готова: в выход; за последней — нижнее поле холста */
+static void area_emit(area_t *a, void (*emit)(void *, const uint8_t *, size_t), void *u)
+{
     emit(u, a->row, (a->fmt == FMT_L8 ? 1u : 2u) * a->cw);
-    memset(a->vacc, 0, (size_t)a->ow * (size_t)a->nch * sizeof(float));
     if (++a->oy == a->oh && a->black && a->y0 + a->oh < a->ch)
         area_margin(a, a->ch - a->y0 - a->oh, emit, u);
 }
 
-/* Сумма по x точек источника [x0, x1] для одной точки выхода: доли w0 (первая) и w1 (последняя,
-   если не первая), внутренние — ow. Вход — по режиму a->mode, выход — a->nch каналов. */
-#define AREA_SPAN(LOAD)                                                                           \
-    do {                                                                                          \
-        uint32_t c0, c1, c2, c3, t0 = 0, t1 = 0, t2 = 0, t3 = 0;                                  \
-        LOAD(x0);                                                                                 \
-        if (x1 == x0) {                                                                           \
-            t0 = c0 * w0; t1 = c1 * w0; t2 = c2 * w0; t3 = c3 * w0;                              \
-        } else {                                                                                  \
-            uint32_t i0 = 0, i1 = 0, i2 = 0, i3 = 0;                                              \
-            t0 = c0 * w0; t1 = c1 * w0; t2 = c2 * w0; t3 = c3 * w0;                              \
-            for (uint32_t x = x0 + 1; x < x1; x++) {                                              \
-                LOAD(x);                                                                          \
-                i0 += c0; i1 += c1; i2 += c2; i3 += c3;                                           \
-            }                                                                                     \
-            LOAD(x1);                                                                             \
-            t0 += i0 * ow + c0 * w1; t1 += i1 * ow + c1 * w1;                                    \
-            t2 += i2 * ow + c2 * w1; t3 += i3 * ow + c3 * w1;                                    \
+/* Строка источника по точкам выхода (N каналов): сумма по x точек источника, задевающих точку
+   выхода — первая и последняя с долей пересечения, внутренние с долей ow (границы ведутся на ходу,
+   без делений и без массива), — сразу в суммы по y с долей f1. Строка источника последняя у
+   строки выхода (END): точка выхода готова — сразу в формат FT812 (area_px, по o), а в v — доля f2
+   этой строки источника в следующей строке выхода (0, если граница строк ровно на её конце). Вход —
+   по режиму LOAD. Суммы по x — целые, те же, что у прошивки 39, по y — то же сложение float. */
+#define AREA_ROW(LOAD, N, END)                                                                    \
+    for (uint32_t X = 0, x = 0, sb = ow, lo = 0; X < ow; X++, v += (N), lo += sw) {               \
+        /* точка выхода — [lo, hi); точка источника x — [sb − ow, sb), в ней lo */               \
+        const uint32_t hi = lo + sw;                                                              \
+        uint32_t c0, c1, c2, c3, t0, t1, t2, t3, w = sb - lo;    /* sb ≤ lo + ow ≤ hi */          \
+        uint32_t i0 = 0, i1 = 0, i2 = 0, i3 = 0;                                                  \
+        LOAD(x);                                                                                  \
+        t0 = c0 * w; t1 = c1 * w; t2 = c2 * w; t3 = c3 * w;                                      \
+        for (x++, sb += ow; sb <= hi; x++, sb += ow) {           /* внутренние — целиком */       \
+            LOAD(x);                                                                              \
+            i0 += c0; i1 += c1; i2 += c2; i3 += c3;                                               \
         }                                                                                         \
-        h[0] = t0;                                                                                \
-        if (n >= 3) { h[1] = t1; h[2] = t2; if (n == 4) h[3] = t3; }                              \
-    } while (0)
+        t0 += i0 * ow; t1 += i1 * ow; t2 += i2 * ow; t3 += i3 * ow;                              \
+        if (sb - ow < hi) {                                      /* последняя — с долей */        \
+            LOAD(x);                                                                              \
+            w = hi - (sb - ow);                                                                   \
+            t0 += c0 * w; t1 += c1 * w; t2 += c2 * w; t3 += c3 * w;                              \
+        }                                                                                         \
+        if (END) {                                                                                \
+            float e[4];                                                                           \
+            e[0] = v[0] + (float)t0 * f1;                                                         \
+            v[0] = (float)t0 * f2;                                                                \
+            if ((N) >= 3) {                                                                       \
+                e[1] = v[1] + (float)t1 * f1; e[2] = v[2] + (float)t2 * f1;                       \
+                v[1] = (float)t1 * f2; v[2] = (float)t2 * f2;                                     \
+            }                                                                                     \
+            if ((N) == 4) { e[3] = v[3] + (float)t3 * f1; v[3] = (float)t3 * f2; }                \
+            o = area_px(a, e, (N), k, o);                                                         \
+        } else {                                                                                  \
+            v[0] += (float)t0 * f1;                                                               \
+            if ((N) >= 3) { v[1] += (float)t1 * f1; v[2] += (float)t2 * f1; }                     \
+            if ((N) == 4) v[3] += (float)t3 * f1;                                                 \
+        }                                                                                         \
+    }
+/* Все режимы входа (выбор — раз на строку, не на точку) */
+#define AREA_MODES(END)                                                                           \
+    switch (a->mode) {                                                                            \
+    case AM_GRAY: AREA_ROW(LD_GRAY, 1, END); break;                                               \
+    case AM_RGB:  AREA_ROW(LD_RGB, 3, END); break;                                                \
+    case AM_RGBX: AREA_ROW(LD_RGBX, 3, END); break;                                               \
+    case AM_GA:   AREA_ROW(LD_GA, 4, END); break;                                                 \
+    case AM_PAL:                                                                                  \
+        if (a->nch == 4) {                                                                        \
+            AREA_ROW(LD_PAL, 4, END);                                                             \
+        } else {                                                                                  \
+            AREA_ROW(LD_PAL, 3, END);                                                             \
+        }                                                                                         \
+        break;                                                                                    \
+    default:      AREA_ROW(LD_RGBA, 4, END); break;                                               \
+    }
 #define LD_GRAY(x) (c0 = s[x], c1 = c2 = c3 = 0)
 #define LD_RGB(x)  (c0 = s[3 * (x)], c1 = s[3 * (x) + 1], c2 = s[3 * (x) + 2], c3 = 0)
 #define LD_RGBA(x) (c3 = s[4 * (x) + 3], c0 = s[4 * (x)] * c3, c1 = s[4 * (x) + 1] * c3, c2 = s[4 * (x) + 2] * c3)
 #define LD_GA(x)   (c3 = s[2 * (x) + 1], c0 = c1 = c2 = s[2 * (x)] * c3)
 #define LD_PAL(x)  (pe = pal + 4u * s[x], c0 = pe[0], c1 = pe[1], c2 = pe[2], c3 = pe[3])
+#define LD_RGBX(x) (c0 = s[4 * (x)], c1 = s[4 * (x) + 1], c2 = s[4 * (x) + 2], c3 = 0)   /* RGBA без альфы (WebP) */
 
-/* Строка источника s (по a->mode) */
+/* Строка источника s (по a->mode; каналов у режима — a->nch: серый 1, RGB и RGBX 3, прочие 4,
+   палитра — 3 или 4) */
 static void area_row(area_t *a, const uint8_t *s, void (*emit)(void *, const uint8_t *, size_t), void *u)
 {
     if (a->sy >= a->sh)
         return;
-    const int n = a->nch;
-    const uint32_t sw = a->sw, ow = a->ow;
-    const uint32_t *pal = a->pal, *pe;
-    uint32_t *h = a->hacc;
-    (void)sw;
-    for (uint32_t X = 0; X < ow; X++, h += n) {
-        const uint32_t *sp = a->span + 3 * X;
-        const uint32_t x0 = sp[0], x1 = sp[1], w0 = sp[2] & 0xFFFFu, w1 = sp[2] >> 16;
-        switch (a->mode) {
-        case AM_GRAY: AREA_SPAN(LD_GRAY); break;
-        case AM_RGB:  AREA_SPAN(LD_RGB); break;
-        case AM_GA:   AREA_SPAN(LD_GA); break;
-        case AM_PAL:  AREA_SPAN(LD_PAL); break;
-        default:      AREA_SPAN(LD_RGBA); break;
-        }
-    }
-    (void)pe;
-    /* по y: строка sy — отрезок [sy·oh, (sy+1)·oh), строка выхода oy — до (oy+1)·sh */
-    const uint32_t *hc = a->hacc;
-    uint32_t y0 = a->sy * a->oh, y1 = y0 + a->oh, ybound = (a->oy + 1) * a->sh, cnt = a->ow * (uint32_t)n;
-    uint32_t w1 = y1 > ybound ? ybound - y0 : a->oh;
-    float f = (float)w1;
-    for (uint32_t i = 0; i < cnt; i++)
-        a->vacc[i] += (float)hc[i] * f;
+    /* по y: строка sy — отрезок [sy·oh, (sy+1)·oh), строка выхода oy — до (oy+1)·sh; oh ≤ sh, поэтому
+       строка источника задевает не больше двух строк выхода */
+    const uint32_t y0 = a->sy * a->oh, y1 = y0 + a->oh, ybound = (a->oy + 1) * a->sh;
+    const uint32_t wy = y1 > ybound ? ybound - y0 : a->oh;
+    const float f1 = (float)wy, f2 = (float)(a->oh - wy);
+    const uint32_t ow = a->ow, sw = a->sw, *pal = a->pal, *pe;
+    const float k = 1.0f / ((float)a->sw * (float)a->sh);
+    float *v = a->vacc;
+    uint8_t *o = a->row;
     a->sy++;
-    if (y1 >= ybound) {
-        area_put(a, emit, u);
-        if (w1 < a->oh && a->oy < a->oh) {
-            f = (float)(a->oh - w1);
-            for (uint32_t i = 0; i < cnt; i++)
-                a->vacc[i] = (float)hc[i] * f;
-        }
+    if (y1 < ybound) {                           /* строка выхода ещё не закрыта */
+        AREA_MODES(0)
+    } else {
+        if (a->black)
+            memset(o, 0, 2u * a->cw);
+        o += (a->fmt == FMT_L8 ? 1u : 2u) * a->x0;
+        AREA_MODES(1)
+        area_emit(a, emit, u);
     }
+    (void)pal;
+    (void)pe;
 }
 
 /* ---- Рамка: размер выхода -------------------------------------------------------------- */
@@ -3399,6 +3471,642 @@ static int png_run(img_t *im, const uint8_t *in, size_t n, size_t *used)
     return p->state == P_DONE ? FTC_IMG_DONE : FTC_IMG_NEED_INPUT;
 }
 
+/* ---- WebP (прошивка 40) ---------------------------------------------------------------- */
+/*
+ * Разбор — libwebp 1.5.0 (third_party/libwebp, правки — README.VDAC4.md): VP8 (с потерями,
+ * прозрачность — блок ALPH), VP8L (без потерь), у анимации — первый кадр на прозрачном холсте.
+ * Эталон — Pillow 12 (Image.open — WebPAnimDecoder: точки RGBA без предумножения, у VP8 —
+ * «гладкое» восстановление цветности).
+ *
+ * Файл копится в пул целиком (длина — из заголовка RIFF): VP8 читает свои разделы вперемешку,
+ * VP8L ссылается назад по всей картинке. Потом — разбор без новых данных, кусками
+ * (FTC_IMG_BUSY): VP8 — строками макроблоков (16 строк точек), VP8L — по 16 строк. Память
+ * libwebp — тоже из пула, стопкой (VDAC4WebPAlloc вместо malloc, правка utils.c): VP8 — ~2 КБ на
+ * столбец макроблоков (кэш строк для фильтра, коэффициенты строки), с прозрачностью — ещё 2 байта
+ * на точку (плоскость альфы и её VP8L); VP8L — вся картинка, 4 байта на точку. Не влезает —
+ * «велика» (FTC_IMG_E_TOO_BIG) с оценкой, сколько нужно.
+ *
+ * У рамки файл больше WP_NEAR_MAX кладётся не в пул, а в RAM_G — в конец room (выход — до него,
+ * поэтому, если room тесен, он мельче рамки). В пул из него читаются только заголовок VP8 с
+ * разделом 0 (режимы макроблоков), ALPH и у VP8L — весь блок, а разделы токенов VP8 — окнами
+ * по WP_WIN байтов (правки vp8_dec.c и bit_reader_utils.c: VP8PartitionsHookFn,
+ * VP8BitReaderRefillFn). Так VP8 1920×1080 (файл 400 КБ) помещается: пулу остаётся кэш строк.
+ *
+ * Выход — как у PNG RGBA: с прозрачностью (флаг VP8X, у простого VP8L — его подсказка; у Pillow
+ * это режим RGBA) — ARGB4, без — RGB565; рамка — уменьшение по площади, вписывание — на чёрный.
+ */
+enum { W_HDR, W_FILE, W_RUN, W_DONE, W_ERR };
+#define WP_VP8_MBS 128u          /* VP8: макроблоков за кусок (строка — целиком) */
+#define WP_VP8L_PX 32768u        /* VP8L: точек за кусок (не меньше 16 строк) */
+#define WP_NEAR_MAX 49152u       /* рамка: файл больше — в RAM_G */
+#define WP_WIN     512u          /* окно раздела токенов VP8 из RAM_G */
+
+static webp_t *wp_cur;           /* чья память у libwebp (VDAC4WebPAlloc) */
+
+#define WP_OF_IO(io) ((webp_t *)((uint8_t *)(io) - offsetof(webp_t, io)))
+
+static uint32_t wp_le24(const uint8_t *p)
+{
+    return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16;
+}
+
+static uint32_t wp_le32(const uint8_t *p)
+{
+    return wp_le24(p) | (uint32_t)p[3] << 24;
+}
+
+/* Память libwebp (правка utils.c): из пула картинки стопкой. Блок — 8 байтов заголовка (длина,
+   освобождён ли), данные, хвост с длиной; free снимает с верха пула освобождённые блоки, а
+   освобождённые в середине ждут конца картинки (тогда пул — заново). */
+void *VDAC4WebPAlloc(size_t size, int zero)
+{
+    webp_t *w = wp_cur;
+    if (!w || !w->heap)
+        return NULL;
+    img_t *im = IMG_OF_W(w);
+    size_t need = ((size + 7u) & ~(size_t)7) + 16u;
+    if (size > 0x7FFFFFF0u || pool_free(im) < need) {
+        uint64_t want = (uint64_t)(im->pool_at - w->pool0) + need;
+        if (want > w->want)
+            w->want = want > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)want;
+        return NULL;
+    }
+    uint32_t *h = (uint32_t *)im->pool_at;
+    im->pool_at += need;
+    h[0] = (uint32_t)need;
+    h[1] = 0;
+    ((uint32_t *)im->pool_at)[-1] = (uint32_t)need;
+    if (zero)
+        memset(h + 2, 0, size);
+    return h + 2;
+}
+
+void VDAC4WebPFree(void *ptr)
+{
+    webp_t *w = wp_cur;
+    if (!ptr || !w || !w->heap)
+        return;
+    img_t *im = IMG_OF_W(w);
+    ((uint32_t *)ptr)[-1] = 1;
+    while (im->pool_at > w->heap) {
+        uint32_t *h = (uint32_t *)(im->pool_at - ((const uint32_t *)im->pool_at)[-1]);
+        if (!h[1])
+            break;
+        im->pool_at = (uint8_t *)h;
+    }
+}
+
+/* Ошибка libwebp: не хватило памяти — «велика», иначе — «повреждена» */
+static int wp_fail(img_t *im, webp_t *w, int status)
+{
+    if (status == VP8_STATUS_OUT_OF_MEMORY || w->want)
+        img_err(im, FTC_IMG_E_TOO_BIG, w->want);
+    else
+        img_err(im, FTC_IMG_E_CORRUPT, 3);
+    return 0;
+}
+
+/* Строка холста RGBA → выход */
+static void wp_row(img_t *im, webp_t *w, const uint8_t *s)
+{
+    if (w->y >= w->ch)
+        return;
+    w->y++;
+    if (w->out == OUT_AREA) {                    /* по площади: RGBA или RGBX (AM_RGBX) */
+        area_row(w->area, s, im->emit, im->eu);
+        return;
+    }
+    if (w->out == OUT_FIT) {                     /* вписывание: прозрачное — на чёрный */
+        uint8_t *o = w->fit->src;
+        for (uint32_t x = 0; x < w->cw; x++, s += 4, o += 3) {
+            uint32_t a = w->alpha ? s[3] : 255u;
+            o[0] = a == 255u ? s[0] : div255(s[0] * a);
+            o[1] = a == 255u ? s[1] : div255(s[1] * a);
+            o[2] = a == 255u ? s[2] : div255(s[2] * a);
+        }
+        fit_row(w->fit, im->emit, im->eu);
+        return;
+    }
+    uint8_t *o = w->out_row;
+    for (uint32_t x = 0; x < w->cw; x++, s += 4) {
+        uint32_t v = w->alpha ? ((uint32_t)(s[3] >> 4) << 12) | ((uint32_t)(s[0] >> 4) << 8) |
+                                ((uint32_t)(s[1] >> 4) << 4) | (s[2] >> 4u)
+                              : ((uint32_t)(s[0] >> 3) << 11) | ((uint32_t)(s[1] >> 2) << 5) | (s[2] >> 3u);
+        *o++ = (uint8_t)v;
+        *o++ = (uint8_t)(v >> 8);
+    }
+    im->emit(im->eu, w->out_row, 2u * w->cw);
+}
+
+/* Строки холста вне кадра — прозрачные (холст WebPAnimDecoder — нули) */
+static void wp_blank(img_t *im, webp_t *w, uint32_t rows)
+{
+    memset(w->canvas, 0, 4u * w->cw);
+    while (rows--)
+        wp_row(im, w, w->canvas);
+}
+
+/* Строка кадра RGBA → строка холста */
+static void wp_frame_row(img_t *im, webp_t *w, const uint8_t *s)
+{
+    if (w->fy_out >= w->fh)
+        return;
+    if (w->canvas) {
+        memset(w->canvas, 0, 4u * w->cw);
+        memcpy(w->canvas + 4u * w->fx, s, 4u * w->fw);
+        s = w->canvas;
+    }
+    wp_row(im, w, s);
+    if (++w->fy_out == w->fh && w->canvas)
+        wp_blank(im, w, w->ch - w->fy - w->fh);
+}
+
+/* VP8L: строки ARGB (слово: A — старший байт) после обратных преобразований → RGBA */
+static void wp_lrows(const VP8Io *io, const uint32_t *argb, int width, int num_rows)
+{
+    webp_t *w = WP_OF_IO(io);
+    img_t *im = IMG_OF_W(w);
+    for (int r = 0; r < num_rows; r++, argb += io->width) {
+        uint8_t *o = w->frow;
+        for (int x = 0; x < width; x++, o += 4) {
+            uint32_t v = argb[x];
+            o[0] = (uint8_t)(v >> 16);
+            o[1] = (uint8_t)(v >> 8);
+            o[2] = (uint8_t)v;
+            o[3] = (uint8_t)(v >> 24);
+        }
+        wp_frame_row(im, w, w->frow);
+    }
+}
+
+/* VP8: строка кадра RGBA + альфа из плоскости ALPH (она у libwebp — во весь кадр) → холст */
+static void wp_vrow(img_t *im, webp_t *w, uint8_t *s)
+{
+    const uint8_t *a = w->vp8->alpha_plane_;
+    if (a) {
+        a += (size_t)w->fy_out * w->fw;
+        for (uint32_t x = 0; x < w->fw; x++)
+            s[4 * x + 3] = a[x];
+    }
+    wp_frame_row(im, w, s);
+}
+
+static int wp_setup(VP8Io *io)
+{
+    WebPInitUpsamplers();
+    return WebPIoInitFromOptions(NULL, io, MODE_RGBA);   /* без обрезки и масштаба, «гладко» */
+}
+
+/* VP8: строки YUV 4:2:0 → RGBA, как EmitFancyRGB libwebp (io_dec.c): цветность — «гладко»,
+   парами строк; последняя строка куска ждёт первую строку следующего (tmp_*). Строки выходят
+   по порядку — хватает буфера на две. */
+static int wp_put(const VP8Io *io)
+{
+    webp_t *w = WP_OF_IO(io);
+    img_t *im = IMG_OF_W(w);
+    const WebPUpsampleLinePairFunc up = WebPUpsamplers[MODE_RGBA];
+    const int mb_w = io->mb_w, uv_w = (mb_w + 1) / 2, y_end = io->mb_y + io->mb_h;
+    const uint8_t *cy = io->y, *cu = io->u, *cv = io->v, *tu = w->tmp_u, *tv = w->tmp_v;
+    uint8_t *r0 = w->pair, *r1 = w->pair + 4 * mb_w;
+    int y = io->mb_y;
+    if (y == 0) {                                /* первая строка: цветность — своя же сверху */
+        up(cy, NULL, cu, cv, cu, cv, r0, NULL, mb_w);
+        wp_vrow(im, w, r0);
+    } else {                                     /* отложенная строка прошлого куска и первая */
+        up(w->tmp_y, cy, tu, tv, cu, cv, r0, r1, mb_w);
+        wp_vrow(im, w, r0);
+        wp_vrow(im, w, r1);
+    }
+    for (; y + 2 < y_end; y += 2) {
+        tu = cu;
+        tv = cv;
+        cu += io->uv_stride;
+        cv += io->uv_stride;
+        cy += 2 * io->y_stride;
+        up(cy - io->y_stride, cy, tu, tv, cu, cv, r0, r1, mb_w);
+        wp_vrow(im, w, r0);
+        wp_vrow(im, w, r1);
+    }
+    cy += io->y_stride;
+    if (io->crop_top + y_end < io->crop_bottom) {
+        memcpy(w->tmp_y, cy, (size_t)mb_w);
+        memcpy(w->tmp_u, cu, (size_t)uv_w);
+        memcpy(w->tmp_v, cv, (size_t)uv_w);
+    } else if (!(y_end & 1)) {                   /* последняя строка чётной высоты */
+        up(cy, NULL, cu, cv, cu, cv, r0, NULL, mb_w);
+        wp_vrow(im, w, r0);
+    }
+    return 1;
+}
+
+/* Файл в RAM_G: байты [off, off + n) — в dst (draft_rd — словами; до 3 байтов за концом файла —
+   ещё в room: base кратно 4, base + size ≤ room) */
+static void wp_read(img_t *im, webp_t *w, uint32_t off, uint8_t *dst, uint32_t n)
+{
+    uint8_t tmp[256];
+    while (n) {
+        uint32_t a = (w->base + off) & ~3u, skip = w->base + off - a;
+        uint32_t k = n + skip > sizeof tmp ? (uint32_t)sizeof tmp : (n + skip + 3u) & ~3u;
+        im->draft_rd(im->eu, a, tmp, k);
+        uint32_t m = k - skip < n ? k - skip : n;
+        memcpy(dst, tmp + skip, m);
+        dst += m;
+        off += m;
+        n -= m;
+    }
+}
+
+/* Байты файла [off, off + n): в пуле — на месте, в RAM_G — читаются в buf */
+static const uint8_t *wp_at(img_t *im, webp_t *w, uint32_t off, uint32_t n, uint8_t *buf)
+{
+    if (!w->far)
+        return w->file + off;
+    wp_read(im, w, off, buf, n);
+    return buf;
+}
+
+/* VP8 из RAM_G: начало раздела токенов p (место — от таблицы размеров разделов) — окном */
+static void wp_part(VP8Decoder *dec, int p, size_t off, size_t size)
+{
+    webp_t *w = wp_cur;
+    w->ppos[p] = w->parts_off + (uint32_t)off;
+    w->pend[p] = w->ppos[p] + (uint32_t)size;
+    VP8InitBitReader(dec->parts_ + p, w->win + (uint32_t)p * WP_WIN, 0);   /* пусто — сразу wp_refill */
+}
+
+/* VP8 из RAM_G: окно раздела кончилось — следующее (у раздела 0 и чужих — нет: конец данных) */
+static void wp_refill(VP8BitReader *br)
+{
+    webp_t *w = wp_cur;
+    if (!w || !w->vp8 || !w->win)
+        return;
+    VP8Decoder *dec = w->vp8;
+    for (int p = 0; p <= dec->num_parts_minus_one_; p++) {
+        if (br != dec->parts_ + p)
+            continue;
+        uint32_t pos = w->ppos[p], end = w->pend[p];
+        if (pos >= end)
+            return;
+        img_t *im = IMG_OF_W(w);
+        uint8_t *win = w->win + (uint32_t)p * WP_WIN;
+        uint32_t a = (w->base + pos) & ~3u, skip = w->base + pos - a, k = end - pos + skip;
+        if (k > WP_WIN)
+            k = WP_WIN;
+        im->draft_rd(im->eu, a, win, (k + 3u) & ~3u);
+        VP8BitReaderSetBuffer(br, win + skip, k - skip);
+        w->ppos[p] = pos + (k - skip);
+        return;
+    }
+}
+
+/* Блоки RIFF: холст (VP8X), кадр (у анимации — первый ANMF), ALPH и VP8 / VP8L — как
+   WebPDemux: у VP8 данные — ровно полезная нагрузка блока. 0 — повреждён. */
+static int wp_chunks(img_t *im, webp_t *w)
+{
+    uint8_t b[16];
+    uint32_t at = 12, end = w->size;
+    int vp8x = 0, anim = 0, found = 0;           /* anim: 1 — анимация, 2 — внутри первого кадра */
+    while (end - at >= 8) {
+        uint8_t tag[4];
+        const uint8_t *h = wp_at(im, w, at, 8, b);
+        uint32_t len = wp_le32(h + 4), d = at + 8;
+        memcpy(tag, h, 4);
+        if (len > end - d)
+            return 0;
+        uint32_t next = d + len + (len & 1u);
+        if (at == 12 && !memcmp(tag, "VP8X", 4)) {
+            if (len < 10)
+                return 0;
+            const uint8_t *x = wp_at(im, w, d, 10, b);
+            vp8x = 1;
+            anim = (x[0] & 0x02) != 0;
+            w->alpha = (x[0] & 0x10) != 0;
+            w->cw = wp_le24(x + 4) + 1;
+            w->ch = wp_le24(x + 7) + 1;
+        } else if (anim == 1 && !memcmp(tag, "ANMF", 4)) {
+            if (len < 16)
+                return 0;
+            const uint8_t *x = wp_at(im, w, d, 16, b);
+            w->fx = 2 * wp_le24(x);
+            w->fy = 2 * wp_le24(x + 3);
+            w->fw = wp_le24(x + 6) + 1;
+            w->fh = wp_le24(x + 9) + 1;
+            anim = 2;
+            end = d + len;                       /* дальше — блоки кадра */
+            next = d + 16;
+        } else if (anim != 1 && vp8x && !memcmp(tag, "ALPH", 4)) {
+            w->alph_off = d;
+            w->alph_size = len;
+        } else if (anim != 1 && (!memcmp(tag, "VP8 ", 4) || !memcmp(tag, "VP8L", 4))) {
+            w->lossless = tag[3] == 'L';
+            w->img_off = d;
+            w->img_size = len;
+            found = 1;
+            break;
+        }
+        at = next < end ? next : end;
+    }
+    if (!found)
+        return 0;
+    int iw, ih, ha = 0;
+    uint32_t hn = w->img_size < 16u ? w->img_size : 16u;
+    const uint8_t *g = wp_at(im, w, w->img_off, hn, b);
+    if (w->lossless ? !VP8LGetInfo(g, hn, &iw, &ih, &ha) : !VP8GetInfo(g, hn, w->img_size, &iw, &ih))
+        return 0;
+    if (!vp8x) {                                 /* простой: холст — картинка; альфа — подсказка VP8L */
+        w->cw = (uint32_t)iw;
+        w->ch = (uint32_t)ih;
+        w->alpha = w->lossless && ha;
+    }
+    if (anim != 2) {
+        w->fx = w->fy = 0;
+        w->fw = w->cw;
+        w->fh = w->ch;
+    }
+    if (w->lossless)
+        w->alph_size = 0;                        /* у VP8L ALPH не нужен (libwebp его не берёт) */
+    return (uint32_t)iw == w->fw && (uint32_t)ih == w->fh && w->fx + w->fw <= w->cw && w->fy + w->fh <= w->ch;
+}
+
+/* Решение о выходе и строки. 0 — ошибка. */
+static int wp_plan(img_t *im, webp_t *w)
+{
+    const uint32_t W = w->cw, H = w->ch;
+    im->info.src_w = W;
+    im->info.src_h = H;
+    if ((im->boxed || fit_on(im->opts)) ? (W > SRC_MAX || H > SRC_MAX) : (W >= IMG_WMAX || H >= IMG_WMAX)) {
+        img_err(im, FTC_IMG_E_SIZE, (W > 0xFFFFu ? 0xFFFFu : W) | (H > 0xFFFFu ? 0xFFFFu : H) << 16);
+        return 0;
+    }
+    uint32_t tw = 0, th = 0;
+    w->out = OUT_RAW;
+    if (fit_on(im->opts)) {
+        w->out = OUT_FIT;
+    } else if (im->boxed) {
+        int r = box_target(im, W, H, 2u * W * H, 2u, &tw, &th);
+        if (r < 0)
+            return 0;
+        if (r == 0)
+            w->out = OUT_AREA;
+    }
+    if (w->fw != W || w->fh != H)
+        w->canvas = pool_take(im, 4u * W);
+    if (w->lossless) {
+        w->frow = pool_take(im, 4u * w->fw);
+    } else {
+        w->pair = pool_take(im, 8u * w->fw);
+        w->tmp_y = pool_take(im, w->fw);
+        w->tmp_u = pool_take(im, (w->fw + 1u) / 2u);
+        w->tmp_v = pool_take(im, (w->fw + 1u) / 2u);
+    }
+    if (w->out == OUT_RAW)
+        w->out_row = pool_take(im, 2u * W);
+    if ((w->fw != W || w->fh != H) && !w->canvas) {
+        img_err(im, FTC_IMG_E_TOO_BIG, (uint32_t)(im->pool_at - w->pool0) + 4u * W);
+        return 0;
+    }
+    if ((w->lossless ? !w->frow : !w->pair || !w->tmp_y || !w->tmp_u || !w->tmp_v) || (w->out == OUT_RAW && !w->out_row)) {
+        img_err(im, FTC_IMG_E_TOO_BIG, (uint32_t)(im->pool_at - w->pool0) + 12u * W);
+        return 0;
+    }
+    im->info.alpha = (uint32_t)w->alpha;
+    if (w->out == OUT_FIT) {
+        im->info.alpha = 0;
+        if (fit_init_pool(im, &im->fit, W, H, W, H)) {
+            w->fit = &im->fit;
+            fit_start(w->fit, im->emit, im->eu);
+        } else {
+            uint32_t ow, oh;
+            fit_size(W, H, &ow, &oh);
+            if (!area_init(im, &im->area, W, H, ow, oh, w->alpha ? 4 : 3, FMT_RGB565, 1))
+                return 0;
+            w->area = &im->area;
+            w->out = OUT_AREA;
+            area_start(w->area, im->emit, im->eu);
+        }
+        im->info.fmt = FMT_RGB565;
+        im->info.w = FIT_W;
+        im->info.h = FIT_H;
+        im->info.stride = 2 * FIT_W;
+    } else if (w->out == OUT_AREA) {
+        uint32_t fmt = w->alpha ? FMT_ARGB4 : FMT_RGB565;
+        if (!area_init(im, &im->area, W, H, tw, th, w->alpha ? 4 : 3, fmt, 0))
+            return 0;
+        w->area = &im->area;
+        im->info.fmt = fmt;
+        im->info.w = tw;
+        im->info.h = th;
+        im->info.stride = 2u * tw;
+        im->out_bytes = im->info.stride * th;
+    } else {
+        im->info.fmt = w->alpha ? FMT_ARGB4 : FMT_RGB565;
+        im->info.w = W;
+        im->info.h = H;
+        im->info.stride = 2u * W;
+        im->out_bytes = 2u * W * H;
+    }
+    if (w->area && !w->alpha)
+        w->area->mode = AM_RGBX;                 /* строка RGBA, альфа не нужна */
+    return 1;
+}
+
+/* Данные для libwebp: в пуле — на месте; файл в RAM_G — в пул ALPH, у VP8L — весь блок, у VP8 —
+   заголовок кадра, раздел 0 и таблица размеров разделов (разделы токенов — окнами). 0 — ошибка. */
+static int wp_load(img_t *im, webp_t *w)
+{
+    if (!w->far) {
+        w->img = w->file + w->img_off;
+        w->alph = w->alph_size ? w->file + w->alph_off : NULL;
+        return 1;
+    }
+    uint32_t head = w->img_size;
+    if (!w->lossless) {
+        uint8_t h[10];
+        wp_read(im, w, w->img_off, h, 10);       /* VP8GetInfo: блок не короче 10 байтов */
+        uint32_t p0 = (h[0] | (uint32_t)h[1] << 8 | (uint32_t)h[2] << 16) >> 5;   /* длина раздела 0 */
+        w->parts_off = w->img_off + 10u + p0;
+        if (head > 10u + p0 + 3u * (MAX_NUM_PARTITIONS - 1))
+            head = 10u + p0 + 3u * (MAX_NUM_PARTITIONS - 1);
+        w->win = pool_take(im, MAX_NUM_PARTITIONS * WP_WIN);
+    }
+    uint8_t *a = w->alph_size ? pool_take(im, w->alph_size) : NULL;
+    uint8_t *g = pool_take(im, head);
+    if (!g || (w->alph_size && !a) || (!w->lossless && !w->win)) {
+        img_err(im, FTC_IMG_E_TOO_BIG, (uint32_t)(im->pool_at - w->pool0) + head + w->alph_size);
+        return 0;
+    }
+    wp_read(im, w, w->img_off, g, head);
+    if (a)
+        wp_read(im, w, w->alph_off, a, w->alph_size);
+    w->img = g;
+    w->alph = a;
+    return 1;
+}
+
+/* Файл принят: блоки, выход, декодер libwebp. 0 — ошибка. */
+static int wp_start(img_t *im, webp_t *w)
+{
+    if (!wp_chunks(im, w)) {
+        img_err(im, FTC_IMG_E_CORRUPT, 3);
+        return 0;
+    }
+    if (!wp_plan(im, w) || !wp_load(im, w))
+        return 0;
+    if (w->canvas && w->fy)
+        wp_blank(im, w, w->fy);
+    im->pool_at = (uint8_t *)(((uintptr_t)im->pool_at + 7u) & ~(uintptr_t)7);
+    w->heap = im->pool_at;                       /* дальше пул — libwebp */
+    VP8LRowsHookFn = wp_lrows;
+    VP8PartitionsHookFn = w->win ? wp_part : NULL;
+    VP8BitReaderRefillFn = w->win ? wp_refill : NULL;
+    if (!VP8InitIo(&w->io))
+        return wp_fail(im, w, VP8_STATUS_INVALID_PARAM);
+    w->io.data = w->img;
+    w->io.data_size = w->img_size;               /* у VP8 из RAM_G в пуле — только начало */
+    if (w->lossless) {
+        w->buf.colorspace = MODE_RGBA;
+        w->buf.width = (int)w->fw;
+        w->buf.height = (int)w->fh;
+        w->params.output = &w->buf;
+        w->io.opaque = &w->params;
+        w->vp8l = VP8LNew();
+        if (!w->vp8l)
+            return wp_fail(im, w, VP8_STATUS_OUT_OF_MEMORY);
+        if (!VP8LDecodeHeader(w->vp8l, &w->io))
+            return wp_fail(im, w, w->vp8l->status_);
+    } else {
+        w->vp8 = VP8New();
+        if (!w->vp8)
+            return wp_fail(im, w, VP8_STATUS_OUT_OF_MEMORY);
+        w->vp8->alpha_data_ = w->alph;
+        w->vp8->alpha_data_size_ = w->alph_size;
+        w->io.setup = wp_setup;
+        w->io.put = wp_put;
+        if (!VP8GetHeaders(w->vp8, &w->io) || VP8EnterCritical(w->vp8, &w->io) != VP8_STATUS_OK ||
+            !VP8InitFrame(w->vp8, &w->io))
+            return wp_fail(im, w, w->vp8->status_);
+        w->vp8->mb_y_ = 0;
+    }
+    if ((uint32_t)w->io.width != w->fw || (uint32_t)w->io.height != w->fh)
+        return wp_fail(im, w, VP8_STATUS_BITSTREAM_ERROR);
+    return 1;
+}
+
+/* Кусок разбора: 1 — дальше, 2 — всё, 0 — ошибка */
+static int wp_step(img_t *im, webp_t *w)
+{
+    if (w->lossless) {
+        uint32_t rows = WP_VP8L_PX / w->fw;
+        rows = rows < 16u ? 16u : rows & ~15u;
+        w->lrow = w->fh - w->lrow > rows ? w->lrow + rows : w->fh;
+        if (!VP8LDecodeImageRows(w->vp8l, (int)w->lrow))
+            return wp_fail(im, w, w->vp8l->status_);
+        if (w->lrow < w->fh)
+            return 1;
+    } else {
+        VP8Decoder *dec = w->vp8;
+        uint32_t mbs = 0;
+        /* тело ParseFrame (vp8_dec.c) — по строке макроблоков */
+        for (; dec->mb_y_ < dec->br_mb_y_ && mbs < WP_VP8_MBS; dec->mb_y_++, mbs += (uint32_t)dec->mb_w_) {
+            VP8BitReader *tbr = &dec->parts_[dec->mb_y_ & dec->num_parts_minus_one_];
+            if (!VP8ParseIntraModeRow(&dec->br_, dec))
+                return wp_fail(im, w, VP8_STATUS_NOT_ENOUGH_DATA);
+            for (; dec->mb_x_ < dec->mb_w_; ++dec->mb_x_)
+                if (!VP8DecodeMB(dec, tbr))
+                    return wp_fail(im, w, VP8_STATUS_NOT_ENOUGH_DATA);
+            VP8InitScanline(dec);
+            if (!VP8ProcessRow(dec, &w->io))
+                return wp_fail(im, w, dec->status_);
+        }
+        if (dec->mb_y_ < dec->br_mb_y_)
+            return 1;
+        if (!VP8ExitCritical(dec, &w->io))
+            return wp_fail(im, w, dec->status_);
+    }
+    if (w->y != w->ch)
+        return wp_fail(im, w, VP8_STATUS_BITSTREAM_ERROR);
+    return 2;
+}
+
+static int webp_run(img_t *im, const uint8_t *in, size_t n, size_t *used)
+{
+    webp_t *w = &im->u.w;
+    size_t i = 0;
+    wp_cur = w;
+    while (w->state == W_HDR && i < n) {
+        w->hdr[w->hdr_got++] = in[i++];
+        if (w->hdr_got < 12)
+            continue;
+        uint32_t len = wp_le32(w->hdr + 4);
+        if (memcmp(w->hdr, "RIFF", 4) || memcmp(w->hdr + 8, "WEBP", 4)) {
+            img_err(im, FTC_IMG_E_UNSUPPORTED, FTC_IMG_U_FORMAT);
+            w->state = W_ERR;
+        } else if (len < 4u + 8u || len > 0x7FFFFFF0u) {
+            w->state = W_ERR;
+        } else {
+            uint32_t room = im->room & ~3u;
+            w->size = len + 8u;
+            if (im->boxed && im->draft_wr && im->draft_rd && w->size > WP_NEAR_MAX && w->size + 4u <= room) {
+                w->far = 1;                      /* файл — в конец room, выход — до него */
+                w->base = (room - w->size) & ~3u;
+                im->room = w->base;
+                memcpy(w->stage, w->hdr, 12);
+                w->staged = 12;
+            } else if ((w->file = pool_take(im, w->size)) != NULL) {
+                memcpy(w->file, w->hdr, 12);
+            } else {
+                img_err(im, FTC_IMG_E_TOO_BIG, w->size);
+                w->state = W_ERR;
+            }
+            if (w->state != W_ERR) {
+                w->got = 12;
+                w->state = W_FILE;
+            }
+        }
+    }
+    if (w->state == W_FILE && i < n) {
+        size_t k = n - i;
+        if (k > w->size - w->got)
+            k = w->size - w->got;
+        if (w->far) {                            /* в RAM_G — кусками по 256 байтов */
+            for (size_t q = 0; q < k;) {
+                uint32_t m = (uint32_t)sizeof w->stage - w->staged;
+                if (m > k - q)
+                    m = (uint32_t)(k - q);
+                memcpy(w->stage + w->staged, in + i + q, m);
+                w->staged += m;
+                q += m;
+                if (w->staged == sizeof w->stage) {
+                    im->draft_wr(im->eu, w->base + w->flushed, w->stage, sizeof w->stage);
+                    w->flushed += (uint32_t)sizeof w->stage;
+                    w->staged = 0;
+                }
+            }
+        } else {
+            memcpy(w->file + w->got, in + i, k);
+        }
+        w->got += (uint32_t)k;
+        i += k;
+    }
+    if (w->state == W_FILE && w->got == w->size) {
+        if (w->far && w->staged) {               /* хвост — до кратного 4 (в room помещается) */
+            uint32_t m = (w->staged + 3u) & ~3u;
+            memset(w->stage + w->staged, 0, m - w->staged);
+            im->draft_wr(im->eu, w->base + w->flushed, w->stage, m);
+        }
+        w->state = wp_start(im, w) ? W_RUN : W_ERR;
+    } else if (w->state == W_RUN) {
+        int r = wp_step(im, w);
+        w->state = r == 2 ? W_DONE : r ? W_RUN : W_ERR;
+    }
+    *used = i;
+    if (w->state == W_ERR)
+        return FTC_IMG_ERROR;
+    if (w->state == W_DONE)
+        return FTC_IMG_DONE;
+    return w->state == W_RUN ? FTC_IMG_BUSY : FTC_IMG_NEED_INPUT;
+}
+
 /* --------------------------------------------------------------------------------------- */
 
 void ftc_img_begin_req(void *st, const ftc_img_req_t *rq, void *inflate_state)
@@ -3469,12 +4177,21 @@ int ftc_img_run(void *st, const uint8_t *in, size_t n, size_t *used,
             p->state = P_SIG;
             ftc_inflate_begin(p->infl);
             im->kind = 2;
+        } else if (in[0] == 'R') {               /* RIFF: WebP */
+            webp_t *w = &im->u.w;
+            memset(w, 0, sizeof *w);
+            if (im->infl == im->pool_end)        /* inflate не нужен — его место в пул, как у JPEG */
+                im->pool_end = im->infl + FTC_INFLATE_BYTES;
+            w->pool0 = im->pool_at;
+            w->state = W_HDR;
+            im->kind = 3;
         } else {
             img_err(im, FTC_IMG_E_UNSUPPORTED, FTC_IMG_U_FORMAT);
             return FTC_IMG_ERROR;
         }
     }
-    int r = im->kind == 1 ? jpeg_run(im, in, n, used, emit, u) : png_run(im, in, n, used);
+    int r = im->kind == 1 ? jpeg_run(im, in, n, used, emit, u)
+          : im->kind == 2 ? png_run(im, in, n, used) : webp_run(im, in, n, used);
     if (r == FTC_IMG_ERROR)
         img_err(im, FTC_IMG_E_CORRUPT, (uint32_t)im->kind);
     return r;

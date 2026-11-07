@@ -12,8 +12,10 @@
 (Image.open(...).convert("RGBA")): у прогрессивного JPEG — libjpeg-turbo, как у baseline в
 copro/test/image_test.c.
 """
+import io
 import math
 import pathlib
+import sys
 import struct
 import zlib
 
@@ -169,10 +171,92 @@ def make_jpeg() -> None:
     big.resize((4000, 3000)).save(OUT / "huge_base_4000x3000.jpg", quality=80, subsampling=2)
 
 
+def riff_chunks(data: bytes) -> list:
+    """Блоки WebP за «RIFF длина WEBP»: [(тег, блок с заголовком и выравниванием)]."""
+    at, out = 12, []
+    while at + 8 <= len(data):
+        n = struct.unpack("<I", data[at + 4:at + 8])[0]
+        out.append((data[at:at + 4], data[at:at + 8 + n + (n & 1)]))
+        at += 8 + n + (n & 1)
+    return out
+
+
+def riff_chunk(tag: bytes, payload: bytes) -> bytes:
+    return tag + struct.pack("<I", len(payload)) + payload + (bytes(1) if len(payload) & 1 else b"")
+
+
+def u24(v: int) -> bytes:
+    return struct.pack("<I", v)[:3]
+
+
+def webp_bytes(im: Image.Image, **kw) -> bytes:
+    b = io.BytesIO()
+    im.save(b, "WEBP", **kw)
+    return b.getvalue()
+
+
+def anim_webp(cw: int, ch: int, frames: list) -> bytes:
+    """Анимация из готовых WebP: [(x, y, файл кадра)], x и y чётные. Pillow (WebPAnimDecoder)
+    показывает первый кадр на прозрачном холсте — на своём месте."""
+    body = riff_chunk(b"VP8X", bytes([0x12, 0, 0, 0]) + u24(cw - 1) + u24(ch - 1))
+    body += riff_chunk(b"ANIM", bytes([255, 255, 255, 255, 0, 0]))
+    for x, y, data in frames:
+        w, h = Image.open(io.BytesIO(data)).size
+        sub = b"".join(c for t, c in riff_chunks(data) if t in (b"ALPH", b"VP8 ", b"VP8L"))
+        body += riff_chunk(b"ANMF", u24(x // 2) + u24(y // 2) + u24(w - 1) + u24(h - 1) + u24(100) + bytes([2]) + sub)
+    return b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WEBP" + body
+
+
+def rgba_icon(w: int, h: int) -> Image.Image:
+    """Значок с прозрачностью: круг с мягким краем на прозрачном, полупрозрачная полоса."""
+    im = Image.new("RGBA", (w, h))
+    px = im.load()
+    for y in range(h):
+        for x in range(w):
+            r = math.hypot(x - w / 2, y - h / 2) / (min(w, h) / 2)
+            a = 255 if r < 0.8 else max(0, round((1 - r) / 0.2 * 255))
+            if abs(y - h * 0.7) < h * 0.08:
+                a = 128
+            px[x, y] = (round(wave(x, y, w, h, 0) * 255), round(wave(x, y, w, h, 1) * 255), 40, a)
+    return im
+
+
+def make_webp(out: pathlib.Path) -> None:
+    """WebP (прошивка 40): с потерями, с потерями и альфой, без потерь (и палитрой), анимация
+    (первый кадр со сдвигом на холсте), большие — для рамки и предела памяти BL616."""
+    small = photo(203, 131)          # неровные размеры — неполные макроблоки, нечётная цветность
+    (out / "webp_lossy.webp").write_bytes(webp_bytes(small, quality=80))
+    (out / "webp_lossy_q30.webp").write_bytes(webp_bytes(small, quality=30))
+    icon = rgba_icon(161, 99)
+    (out / "webp_lossy_alpha.webp").write_bytes(webp_bytes(icon, quality=80))
+    (out / "webp_lossless.webp").write_bytes(webp_bytes(small, lossless=True))
+    (out / "webp_lossless_alpha.webp").write_bytes(webp_bytes(rgba_icon(96, 96), lossless=True))
+    (out / "webp_lossless_pal.webp").write_bytes(webp_bytes(small.quantize(16, dither=Image.Dither.NONE).convert("RGB"),
+                                                            lossless=True))
+    first = webp_bytes(rgba_icon(100, 80), lossless=True)
+    (out / "webp_anim.webp").write_bytes(anim_webp(200, 150, [(40, 20, first),
+                                                              (0, 0, webp_bytes(photo(200, 150), quality=70))]))
+    (out / "webp_anim_lossy.webp").write_bytes(anim_webp(160, 120, [(20, 10, webp_bytes(rgba_icon(90, 70), quality=75))]))
+    big = photo(1920, 1080)
+    (out / "webp_1280x720.webp").write_bytes(webp_bytes(big.resize((1280, 720)), quality=80))
+    (out / "webp_1920x1080.webp").write_bytes(webp_bytes(big, quality=80))
+    (out / "webp_lossless_640x480.webp").write_bytes(webp_bytes(big.resize((640, 480)), lossless=True))
+    # ошибки: длина блока VP8 больше файла (повреждён), RIFF не WebP (не поддерживается)
+    bad = bytearray((out / "webp_lossy.webp").read_bytes())
+    struct.pack_into("<I", bad, 16, len(bad))
+    (out / "webp_err_chunk.webp").write_bytes(bytes(bad))
+    (out / "webp_err_riff.webp").write_bytes(b"RIFF" + struct.pack("<I", 4 + 24) + b"AVI " + riff_chunk(b"LIST", bytes(16)))
+
+
 if __name__ == "__main__":
+    if sys.argv[1:] == ["webp"]:     # только WebP — сразу сюда, к остальным образцам задания
+        OUT = pathlib.Path(__file__).resolve().parent
+        make_webp(OUT)
+        sys.exit(0)
     OUT.mkdir(parents=True, exist_ok=True)
     make_png()
     make_jpeg()
+    make_webp(OUT)
     for f in sorted(OUT.iterdir()):
         try:
             with Image.open(f) as im:   # Pillow должен их читать — иначе образец неверен

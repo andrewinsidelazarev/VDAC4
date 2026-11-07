@@ -8,6 +8,8 @@ data/task против Pillow. Нужны clang (E:\\zx\\llvm) и Python с Pill
   выхода (как в ft_image.c box_target) и точки против уменьшения по площади (numpy, точно, в
   предумноженном виде; у JPEG — после Image.draft, как ДКП-уменьшение BL616) с допуском ±1 шаг
   формата. У ARGB4 цвет сверяется там, где альфа ≥ 64 (ниже — предумноженный цвет в 4 битах).
+- WebP (прошивка 40): CMD_LOADIMAGE — байт в байт с Pillow (режим RGBA — ARGB4, RGB — RGB565), рамка —
+  как у PNG RGBA/RGB; у анимации — первый кадр на прозрачном холсте; велика для памяти BL616 — ошибка.
 - Причины ошибок: чужой формат, обрыв, пустая рамка, CMD_LOADIMAGE с источником ≥ 2048.
 
     python test_task_images.py [--out КАТАЛОГ] [--only имя]
@@ -31,6 +33,11 @@ PROG_FULL_MAX = 150 * 1024
 PROG_COPY_EST = 12
 LOAD_TOO_BIG = {"big_prog_1600x1200.jpg"}
 PROG_DC = set()
+# WebP, которым не хватает памяти BL616: (файл, у рамки). CMD_LOADIMAGE держит файл в пуле целиком,
+# VP8L — ещё 4 байта на точку; у рамки файл больше WEBP_NEAR_MAX — в RAM_G в конце room
+WEBP_TOO_BIG = {("webp_1920x1080.webp", False), ("webp_lossless_640x480.webp", False),
+                ("webp_lossless_640x480.webp", True)}
+WEBP_NEAR_MAX = 49152
 FMT_ARGB4, FMT_RGB565, FMT_L8, FMT_PAL565, FMT_PAL4444 = 6, 7, 3, 14, 15
 E_CORRUPT, E_UNSUPPORTED, E_TOO_BIG, E_NO_ROOM, E_SIZE = 1, 2, 3, 4, 5
 
@@ -197,9 +204,11 @@ def compare(got, exp, fmt, ref_alpha=None):
 def build(out):
     exe = out / "image_test.exe"
     src = HERE / "image_test.c"
-    cmd = [CLANG, "-std=c11", "-O2", "-Wall", "-Wextra", "-Wno-unused-function", "-D_CRT_SECURE_NO_WARNINGS",
-           "-DFTC_IMG_TEST", "-I", str(HERE.parent), str(src), str(HERE.parent / "ft_image.c"),
-           str(HERE.parent / "ft_inflate.c"), "-o", str(exe)]
+    webp = HERE.parent / "third_party" / "libwebp"
+    libwebp = [str(webp / s) for s in (webp / "vdac4_sources.txt").read_text().split()]
+    cmd = [CLANG, "-std=c11", "-O2", "-Wall", "-Wno-unused-function", "-D_CRT_SECURE_NO_WARNINGS",
+           "-DFTC_IMG_TEST", "-DHAVE_CONFIG_H", "-DWEBP_REDUCE_SIZE", "-DWEBP_REDUCE_CSP", "-I", str(HERE.parent), "-I", str(webp),
+           str(src), str(HERE.parent / "ft_image.c"), str(HERE.parent / "ft_inflate.c"), *libwebp, "-o", str(exe)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
         sys.exit("сборка image_test: " + r.stdout + r.stderr)
@@ -209,7 +218,7 @@ def build(out):
 def cases(only):
     """(файл, метка, opts, max_w, max_h, room)"""
     out = []
-    names = sorted(p.name for p in DATA.iterdir() if p.suffix in (".png", ".jpg"))
+    names = sorted(p.name for p in DATA.iterdir() if p.suffix in (".png", ".jpg", ".webp"))
     for n in names:
         out.append((n, "load", 0, 0, 0, 0))
     box = {
@@ -223,9 +232,11 @@ def cases(only):
         "prog_420.jpg": [(203, 131), (64, 64)], "prog_422.jpg": [(64, 64)], "prog_444.jpg": [(64, 64)],
         "prog_gray.jpg": [(64, 64)], "prog_420_q30.jpg": [(64, 64)], "cmyk.jpg": [(64, 64)],
         "prog_640x480.jpg": [(640, 480), (320, 240)], "prog_1024x768.jpg": [(1008, 567), (300, 200)],
+        "webp_1280x720.webp": [(1008, 567), (320, 180)], "webp_1920x1080.webp": [(1008, 567)],
+        "webp_lossless_640x480.webp": [(320, 240)],
     }
     for n in names:
-        if n.endswith(".png") and n not in box:
+        if (n.endswith(".png") or n.endswith(".webp")) and n not in box:
             box[n] = [(100, 100), (30, 20)]
     for n, sizes in box.items():
         for bw, bh in sizes:
@@ -240,6 +251,36 @@ def expect(c):
     name, tag, opts, bw, bh, room = c
     path = DATA / name
     boxed = bw != 0
+    if name == "webp_err_chunk.webp":            # длина VP8 больше файла
+        return ("err", E_CORRUPT)
+    if name == "webp_err_riff.webp":             # RIFF, но AVI
+        return ("err", E_UNSUPPORTED)
+    if name.endswith(".webp"):
+        im = Image.open(path)                    # анимация — первый кадр (WebPAnimDecoder)
+        w, h = im.size
+        alpha = im.mode == "RGBA"
+        if not boxed and (w >= 2048 or h >= 2048):
+            return ("err", E_SIZE)
+        if (name, boxed) in WEBP_TOO_BIG:
+            return ("err", E_TOO_BIG)
+        rgba = np.array(im.convert("RGBA"))
+        r, g, b, a = (rgba[..., i] for i in range(4))
+        raw, fmt = (le16(argb4(a, r, g, b)), FMT_ARGB4) if alpha else (le16(rgb565(r, g, b)), FMT_RGB565)
+        size, r4 = path.stat().st_size, room & ~3
+        if boxed and size > WEBP_NEAR_MAX and size + 4 <= r4:
+            room = (r4 - size) & ~3              # файл — в конце room, выход — до него
+        tgt = box_target(w, h, 2 * w * h, 2, bw, bh, room) if boxed else None
+        if tgt is None:
+            return ("exact", raw, fmt, w, h, 2 * w, 0)
+        f = rgba.astype(np.float64)
+        if not alpha:
+            return ("area", area(f[..., :3], *tgt), FMT_RGB565, tgt[0], tgt[1], None)
+        pm = f.copy()
+        pm[..., :3] *= f[..., 3:4]
+        rr = area(pm, *tgt)
+        aa = rr[..., 3]
+        rgb = np.where(aa[..., None] > 0, rr[..., :3] / np.maximum(aa[..., None], 1e-9), 0)
+        return ("area", np.dstack([rgb, aa]), FMT_ARGB4, tgt[0], tgt[1], aa)
     if name.endswith(".png"):
         info = png_info(path.read_bytes())
         w, h = info["w"], info["h"]

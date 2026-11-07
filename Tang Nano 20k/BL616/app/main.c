@@ -83,11 +83,17 @@
    JPEG (бит в бит с libjpeg; большой — полосами с копией файла), PNG всех глубин и видов с tRNS и
    Adam7, команды VDAC4 CMD_LOADIMAGE_BOX (0xFFFFFFB0: в рамку и в room байтов RAM_G, уменьшение по
    площади) и CMD_IMAGEINFO (0xFFFFFFB1), причина ошибки картинки — в RAM_CMD; OPT_FULLSCREEN с
-   уменьшением больше 4 раз — по площади на холст */
+   уменьшением больше 4 раз — по площади на холст;
+   40 — WebP в CMD_LOADIMAGE и CMD_LOADIMAGE_BOX (ft_image.c, декодер libwebp 1.5.0 в
+   copro/third_party/libwebp): VP8, VP8 с альфой, VP8L, у анимации — первый кадр; у рамки большой
+   файл — в RAM_G в конце room, разделы VP8 читаются оттуда окнами;
+   41 — уменьшение по площади (рамка, вписывание больше 4 раз) в один проход по строке источника:
+   без массивов сумм строки и границ точек, точка выхода — сразу из последней строки источника
+   (кэш данных 16 КБ больше не выметается каждой строкой); выход бит в бит тот же */
 #ifdef FTC_BRIDGE
 #define FW_VERSION 0x0A
 #else
-#define FW_VERSION 0x27
+#define FW_VERSION 0x29
 #endif
 
 #ifndef FTC_BRIDGE

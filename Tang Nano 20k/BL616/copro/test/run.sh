@@ -9,5 +9,11 @@ PY=${PYTHON:-python}
 OUT=${OUT:-$HERE/host_test}
 [ -f "$HERE/data/fit/list.txt" ] || "$PY" "$HERE/make_image_data.py" fit
 [ -f "$HERE/data/video/list.txt" ] || "$PY" "$HERE/make_video_data.py"
-"$CC" -std=c11 -O2 -Wall -Wextra -Wno-unused-function -D_CRT_SECURE_NO_WARNINGS -I"$HERE/.."     "$HERE/host_test.c" "$HERE/../ft_copro.c" "$HERE/../ft_inflate.c" "$HERE/../ft_image.c" "$HERE/../ft_3d.c" -DFTC3D_PROBE -o "$OUT"
+# WebP (прошивка 40): libwebp — файлы из vdac4_sources.txt, как в прошивке (только C, без потоков)
+WEBP="$HERE/../third_party/libwebp"
+set --
+while read -r s; do set -- "$@" "$WEBP/$s"; done < "$WEBP/vdac4_sources.txt"
+"$CC" -std=c11 -O2 -Wall -Wno-unused-function -D_CRT_SECURE_NO_WARNINGS -DHAVE_CONFIG_H -DWEBP_REDUCE_SIZE -DWEBP_REDUCE_CSP \
+    -I"$HERE/.." -I"$WEBP" "$HERE/host_test.c" "$HERE/../ft_copro.c" "$HERE/../ft_inflate.c" "$HERE/../ft_image.c" \
+    "$HERE/../ft_3d.c" "$@" -DFTC3D_PROBE -o "$OUT"
 "$OUT" "$HERE/data" "$ROOT/ESP32 S3 Zero N8R8/Network/Weather screensaver VDAC2/build/ramg.bin"
