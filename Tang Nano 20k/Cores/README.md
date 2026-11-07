@@ -5,7 +5,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 
 | Ядро | Где хранится | Версия | Файлы |
 |---|---|---|---|
-| **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.32 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
+| **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.46 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
 | **FT812** — видеоускоритель для программ Evo, вывод 1366×768 | flash Tang, слот 1 | 1.45 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
 | **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Evo, `/WC/ESP` | 1.43, слой ESP 0.9 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`VIDEO/esp/dist/VIDEO.ELF`](VIDEO/esp/dist/VIDEO.ELF) |
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |

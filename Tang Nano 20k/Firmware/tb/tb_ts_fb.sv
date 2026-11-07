@@ -171,11 +171,12 @@ module tb_ts_fb #(
             src_hs_pos = 1'b0; src_vs_pos = 1'b0;
             case (k)
             //         полный растр                HS           VS           картинка                     режим
-            0: begin src_ht = 896; src_vt = 640; src_hs = 104; src_vs = 6; src_hoff = 132; src_voff = 45; exp_mode = 1; end
-            1: begin src_ht = 896; src_vt = 624; src_hs = 104; src_vs = 6; src_hoff = 132; src_voff = 29; exp_mode = 2; end
-            2: begin src_ht = 896; src_vt = 640; src_hs = 106; src_vs = 6; src_hoff = 140; src_voff = 45; exp_mode = 3; end
-            3: begin src_ht = 896; src_vt = 624; src_hs = 106; src_vs = 6; src_hoff = 140; src_voff = 45; exp_mode = 4; end
-            4: begin src_ht = 912; src_vt = 622; src_hs = 106; src_vs = 6; src_hoff = 140; src_voff = 45; exp_mode = 5; end
+            // (1.46: картинка там, где её нашли на плате — TS-Config 153/51, Base Conf 158/45)
+            0: begin src_ht = 896; src_vt = 640; src_hs = 104; src_vs = 6; src_hoff = 154; src_voff = 51; exp_mode = 1; end
+            1: begin src_ht = 896; src_vt = 624; src_hs = 104; src_vs = 6; src_hoff = 154; src_voff = 35; exp_mode = 2; end
+            2: begin src_ht = 896; src_vt = 640; src_hs = 106; src_vs = 6; src_hoff = 159; src_voff = 45; exp_mode = 3; end
+            3: begin src_ht = 896; src_vt = 624; src_hs = 106; src_vs = 6; src_hoff = 159; src_voff = 45; exp_mode = 4; end
+            4: begin src_ht = 912; src_vt = 622; src_hs = 106; src_vs = 6; src_hoff = 159; src_voff = 45; exp_mode = 5; end
             5: begin src_ht = 100; src_vt = 44;  src_hs = 8;   src_vs = 2; src_hoff = 20;  src_voff = 6;  exp_mode = 6; end
             6: begin src_ht = 104; src_vt = 42;  src_hs = 10;  src_vs = 2; src_hoff = 24;  src_voff = 5;  exp_mode = 7;
                      src_hs_pos = 1'b1; src_vs_pos = 1'b1; end
