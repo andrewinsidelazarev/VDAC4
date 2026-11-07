@@ -156,6 +156,7 @@ class ModuleApp : public App {
   static int coreWifiInfo(char ssid[33], char ip[16], char mac[18]);
   static int coreWifiRssi(int* dbm);
   static int coreSockOpenTls(const char* host, uint16_t port, uint32_t timeoutMs);
+  static int coreLinkMedia(uint8_t first, uint8_t last);
   static int coreUiAvailable();
   static void coreAppDone();
   static int coreSdList(const char*, const char*, uint32_t, zm_sd_entry_t*, uint32_t,

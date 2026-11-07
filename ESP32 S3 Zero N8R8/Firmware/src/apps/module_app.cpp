@@ -22,6 +22,7 @@
 #include "zifi/audio_player.hpp"
 #include "zifi/apps/core_builtin.hpp"
 #include "zifi/bringup_log.hpp"
+#include "zifi/memory_retry.hpp"
 #include "zifi/core_store.hpp"
 #include "zifi/crash_record.hpp"
 #include "zifi/elf_image.hpp"
@@ -263,6 +264,7 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.sd_create = coreSdCreate;
   core_.wifi_rssi = coreWifiRssi;
   core_.sock_open_tls = coreSockOpenTls;
+  core_.link_media = coreLinkMedia;
 }
 
 void ModuleApp::begin() {
@@ -782,29 +784,37 @@ void ModuleApp::handleCoreApp(const PacketView& packet) {
   }
   snprintf(module, sizeof(module), "%s.ELF", name);
   int result = ZM_OK;
-  if (!cache_->has(module, size, stamp)) {
-    if (const char* bad = elfImageProblem(data, size)) {
-      bringupLog(kTag, "core %s: %s is not a loadable ELF (%s)", name, module, bad);
-      heap_caps_free(data);
-      replyApp(kRespCoreApp, ZM_ERROR, "core ELF is not loadable");
-      return;
+  bool cacheFull = false;
+  const bool changed = !cache_->has(module, size, stamp);
+  if(changed) {
+    if(const char* bad=elfImageProblem(data,size)) {
+      bringupLog(kTag,"core %s: %s is not a loadable ELF (%s)",name,module,bad);
+      heap_caps_free(data);replyApp(kRespCoreApp,ZM_ERROR,"core ELF is not loadable");return;
     }
-    if (app_ != nullptr && strcmp(appName_, module) == 0) {
-      stopApp();                         // своё прежнее — заменяется
+  }
+  // A selected different core owns the machine next. Release the old app,
+  // abandoned delivery and cached resources before storage/relocation.
+  // Repeating an unchanged running core request remains idempotent.
+  if(app_==nullptr || strcmp(appName_,module)!=0 || changed || appStale_) {
+    stopApp();dropDelivery();
+    for(Resource& item : resources_) {
+      if(item.data!=nullptr)heap_caps_free(item.data);
+      item=Resource{};
     }
-    const bool stored = cache_->store(module, stamp, data, size, app_ != nullptr ? appName_ : nullptr);
-    bringupLog(kTag, "core %s: %s, %u bytes from the Tang SD %s", name, module,
-               static_cast<unsigned>(size), stored ? "stored" : "REFUSED");
-    if (!stored) {
-      result = ZM_NO_MEMORY;
-    }
-    appStale_ = appStale_ || stored;
+    player_overlay::releaseMemory();
+  }
+  if(changed) {
+    const bool stored=cache_->store(module,stamp,data,size,nullptr);
+    bringupLog(kTag,"core %s: %s, %u bytes from the Tang SD %s",name,module,
+               static_cast<unsigned>(size),stored ? "stored":"REFUSED");
+    if(!stored){result=ZM_NO_MEMORY;cacheFull=true;}
+    appStale_=appStale_ || stored;
   }
   heap_caps_free(data);
   if (result == ZM_OK) {
     result = startApp(module);
   }
-  replyApp(kRespCoreApp, result, result == ZM_NO_MEMORY ? "no room for the core ELF in the ESP cache" : nullptr);
+  replyApp(kRespCoreApp, result, result == ZM_NO_MEMORY ? (cacheFull ? "no space for the core ELF in flash cache" : "not enough working RAM to start the core app") : nullptr);
 #else
   (void)packet;
   replyApp(kRespCoreApp, ZM_ERROR, "no LINK to the Tang");
@@ -963,6 +973,8 @@ int ModuleApp::startApp(const char* name) {
   if (!host_.stopFileServers()) {
     bringupLog(kTag, "app %s: file servers did not stop", name);
   }
+  // vTaskDelete returns stack memory on the idle task, after stopApp.
+  vTaskDelay(pdMS_TO_TICKS(10));
   const zm_app_t* app = nullptr;
   void* elf = nullptr;
   int entryResult = 0;
@@ -1015,6 +1027,7 @@ void ModuleApp::stopApp() {
   const zm_app_t* app = app_;
   app_ = nullptr;
   appStarted_ = false;
+  setAppMediaRange(1, 0);                 // порции DMA без суммы — больше ни одной команде
   xSemaphoreGive(appLock_);
 #if ZIFI_HAS_SPI_LINK
   player_overlay::appGone();             // экран приложения — сразу прочь
@@ -1246,8 +1259,25 @@ int ModuleApp::coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t p
       const UBaseType_t level = priority > 20 ? 20 : priority;
       const size_t internalFree = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
       const size_t internalLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-      BaseType_t made = xTaskCreatePinnedToCore(taskTrampoline, "zm-app", depth, &slot, level,
-                                                &slot.handle, core);
+      BaseType_t made=pdFAIL;
+      uint32_t waited=0;
+      allocateAfterCleanup(
+          [&]() {
+            made=xTaskCreatePinnedToCore(taskTrampoline, "zm-app", depth, &slot, level,
+                                         &slot.handle, core);
+            return made==pdPASS;
+          },
+          [&]() {
+#if ZIFI_HAS_SPI_LINK
+            if(!instance_->appStarted_)player_overlay::releaseMemory();
+#endif
+          },
+          [&](uint32_t ms) {vTaskDelay(pdMS_TO_TICKS(ms));waited+=ms;},
+          psramAllowed ? 2U:25U,10U);
+      if(made==pdPASS && waited!=0) {
+        bringupLog(kTag,"app task: %u-byte internal stack after %u ms of cleanup",
+                   static_cast<unsigned>(depth),static_cast<unsigned>(waited));
+      }
       if (made != pdPASS && psramAllowed) {
         slot.psram = true;                // до создания: задача может кончиться сразу
         made = xTaskCreatePinnedToCoreWithCaps(taskTrampoline, "zm-app", depth, &slot, level,
@@ -1773,6 +1803,24 @@ void ModuleApp::coreSockClose(int sock) {
   } else if (fd >= 0) {
     close(fd);
   }
+}
+
+// ABI 1.13 (браузер TSafari, 07.11.2026: кэш картинок на карте Evo читался кадрами по 1 КБ с
+// ответом на каждый — ~30 КБ/с; порциями DMA по 8 КБ, как звук плееру). Разрешить можно только
+// свои команды приложения; при выгрузке (stopApp) разрешение снимается.
+int ModuleApp::coreLinkMedia(uint8_t first, uint8_t last) {
+  ModuleApp* self = instance_;
+  if (first > last) {
+    setAppMediaRange(1, 0);
+    return ZM_OK;
+  }
+  const zm_app_t* app = self != nullptr ? self->app_ : nullptr;
+  if (app == nullptr || first < app->command_first || last > app->command_last) {
+    return ZM_ERROR;
+  }
+  setAppMediaRange(first, last);
+  bringupLog(kTag, "app %s: raw media DMA for commands %02X..%02X", self->appName_, first, last);
+  return ZM_OK;
 }
 
 // ABI 1.12 (браузер TSafari, 04.11.2026: формы POST по HTTPS — net_open умеет только GET).

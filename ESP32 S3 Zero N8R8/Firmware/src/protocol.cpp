@@ -47,7 +47,7 @@ bool FrameParser::feed(uint8_t byte, uint32_t nowMs, PacketView& packet) {
       return false;
 
     case kCommand:
-      if (rawMedia_ && byte != kAudioData && byte != kModPut) {
+      if (rawMedia_ && byte != kAudioData && byte != kModPut && !appMediaCommand(byte)) {
         ++resyncCount_;
         reset();
         return false;

@@ -92,6 +92,47 @@ int main() {
     assert(!(t.request(1,0x10,{0x31,0,0x20})[2]&0x10)); // also need frame header space
   }
   {
+    // ABI 1.13: commands of the running app that it enabled (link_media), with up to 8 own
+    // control bytes put before the data; nothing else gets unchecked data.
+    TestLink t;
+    setAppMediaRange(1,0);
+    assert(!(t.request(1,0x10,{0x79,0,0x20,1,2,3,4,5,6})[2]&0x10)); // not enabled
+    setAppMediaRange(0x73,0x79);
+    for (size_t size: {1,511,512,513,4096,8191,8192}) {
+      TestLink a;
+      const std::vector<uint8_t> prefix={0x34,0x92,0x00,0x40,0x01,0x00};
+      std::vector<uint8_t> control={0x79,uint8_t(size),uint8_t(size>>8)};
+      control.insert(control.end(),prefix.begin(),prefix.end());
+      auto ready=a.request(2,SpiLinkCore::kFlagMedia,control);
+      assert(ready[2]&SpiLinkCore::kStatusPutReady);
+      const size_t padded=(size+511)&~size_t(511);
+      std::vector<uint8_t> dma(padded,0xE5),expected=prefix;
+      for(size_t i=0;i<size;++i) dma[i]=uint8_t(i*29+(i>>9));
+      expected.insert(expected.end(),dma.begin(),dma.begin()+size);
+      assert(a.request(3,SpiLinkCore::kFlagPutDone,{},dma)[2]&SpiLinkCore::kStatusPutOk);
+      auto bytes=a.read();
+      FrameParser parser;PacketView packet;unsigned packets=0;
+      for(size_t i=0;i<bytes.size();++i) {
+        if(parser.feed(bytes[i],0,packet)) {
+          ++packets;
+          assert(packet.command==0x79&&packet.length==expected.size());
+          assert(memcmp(packet.data,expected.data(),expected.size())==0);
+        }
+      }
+      assert(packets==1);
+      ++cases;
+    }
+    assert(t.request(2,0x10,{0x79,1,0})[2]&0x10);                          // no own bytes: fine
+    assert(!(t.request(3,0x10,{0x7A,0,2})[2]&0x10));                       // outside the range
+    assert(!(t.request(4,0x10,{0x79,0,2,1,2,3,4,5,6,7,8,9})[2]&0x10));     // 9 own bytes: too many
+    assert(!(t.request(5,0x10,{0x52,0,2})[2]&0x10));                       // still no file writes
+    setAppMediaRange(1,0);                                                 // app unloaded
+    assert(!(t.request(6,0x10,{0x79,0,2})[2]&0x10));
+    FrameParser p;PacketView v;
+    for(auto b:std::vector<uint8_t>{0xA6,0x79,0,2}) assert(!p.feed(b,0,v));
+    assert(p.resyncCount()==1);
+  }
+  {
     FrameParser p;PacketView v;
     for(auto b:std::vector<uint8_t>{0xA6,0x52,0,2}) assert(!p.feed(b,0,v));
     assert(p.resyncCount()==1);

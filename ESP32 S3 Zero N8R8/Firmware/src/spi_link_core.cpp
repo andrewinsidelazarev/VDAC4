@@ -158,9 +158,12 @@ bool SpiLinkCore::handleRequest(const uint8_t* request, uint8_t* response,
     room = 0;
     const uint8_t command = length != 0 ? request[kHeaderSize] : 0;
     const bool resource = command == kModPut && length == 7;
-    const bool valid = resource || (command == kAudioData && length == 3);
+    // команда приложения, которую оно разрешило (setAppMediaRange): своё управление — перед данными
+    const bool app = !resource && command != kAudioData && appMediaCommand(command) &&
+                     length >= 3 && length <= 3 + kAppMediaPrefixMax;
+    const bool valid = resource || app || (command == kAudioData && length == 3);
     const size_t size = valid ? readLe16(request + kHeaderSize + 1) : 0;
-    const size_t prefix = resource ? 4 : 0;
+    const size_t prefix = resource ? 4 : app ? length - 3 : 0;
     if (put.available && size != 0 && size <= kMediaMax &&
         ((size + 511u) & ~size_t(511u)) <= put.capacity &&
         fromZ80_.freeSpace() >= size + prefix + 4) {
@@ -168,7 +171,7 @@ bool SpiLinkCore::handleRequest(const uint8_t* request, uint8_t* response,
       putMedia_ = true;
       putCommand_ = command;
       putPrefixSize_ = prefix;
-      if (resource) memcpy(putPrefix_, request + kHeaderSize + 3, prefix);
+      if (prefix != 0) memcpy(putPrefix_, request + kHeaderSize + 3, prefix);
       putSize_ = size;
       putStatus |= kStatusPutReady;
     }

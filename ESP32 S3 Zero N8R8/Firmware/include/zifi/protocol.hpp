@@ -1,19 +1,39 @@
 #pragma once
 
+#include <atomic>
 #include <stddef.h>
 #include <stdint.h>
 
 namespace zifi {
 
 constexpr uint8_t kSync = 0x5A;
-// Internal framing of raw SPI media DMA: AUDIO_DATA and MOD_PUT, no data checksum.
+// Internal framing of raw SPI media DMA: AUDIO_DATA, MOD_PUT and commands the running ELF app
+// enabled (setAppMediaRange), no data checksum.
 constexpr uint8_t kMediaSync = 0xA6;
-constexpr size_t kMaxMediaPayload = 8192 + 4; // MOD_PUT adds a file offset
+// Сколько байт управления запроса raw media приложение может поставить перед данными (номер
+// операции, смещение — что ему нужно): прошивка кладёт их в начало тела кадра.
+constexpr size_t kAppMediaPrefixMax = 8;
+constexpr size_t kMaxMediaPayload = 8192 + kAppMediaPrefixMax; // MOD_PUT adds a file offset
 constexpr size_t kMaxPayload = 1024;
 constexpr uint32_t kFrameTimeoutMs = 500;
 // Наибольшее тело события ESP -> Z80 (kEvent*): столько вмещает очередь
 // событий между ядрами.
 constexpr size_t kMaxEventPayload = 63;
+
+// Команды работающего приложения ELF, которым можно слать порции DMA без суммы (raw media):
+// first..last задаёт само приложение (zm_core_t::link_media, ABI 1.13), first > last — ни одной;
+// при выгрузке приложения — снова ни одной. Без явного разрешения такие порции принимаются
+// только звуком и модулями: команды записи файлов данных без проверки не получают.
+// Встроены в заголовок: их зовут и канал SPI, и разбор кадров, и приложение — без лишних связей
+// между единицами сборки (тесты собирают их порознь).
+inline std::atomic<uint16_t> appMediaRangeValue{0x0100};   // first << 8 | last; 1..0 — ни одной
+inline void setAppMediaRange(uint8_t first, uint8_t last) {
+  appMediaRangeValue.store(static_cast<uint16_t>(first << 8 | last), std::memory_order_release);
+}
+inline bool appMediaCommand(uint8_t command) {
+  const uint16_t range = appMediaRangeValue.load(std::memory_order_acquire);
+  return command >= (range >> 8) && command <= (range & 0xFF);
+}
 
 enum Command : uint8_t {
   kEcho = 0x00,

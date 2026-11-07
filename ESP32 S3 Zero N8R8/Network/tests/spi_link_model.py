@@ -16,7 +16,7 @@ from __future__ import annotations
 
 REQUEST, RESPONSE = 0xC3, 0x3C
 HEADER, CHUNK, TURN_SIZE, STATE_ADDR, BUFFER_SIZE = 5, 54, 60, 60, 64
-STATE_EMPTY, STATE_PENDING, MAGIC, VERSION = 0x5A, 0xA5, 0xD7, 2
+STATE_EMPTY, STATE_PENDING, MAGIC, VERSION = 0x5A, 0xA5, 0xD7, 3
 FLAG_DROP, FLAG_SESSION, STATUS_MORE = 0x01, 0x80, 0x01
 # Блок через DMA: флаг запроса, статусы ответа, размер, предел неудач подряд;
 # состояния DMA: нет, свободен (верной обратной посылки нет), блок не прочитан,
@@ -26,6 +26,9 @@ BULK_SIZE, BULK_ATTEMPTS = 512, 3
 # Блок от Z80: флаги запроса и статусы ответа.
 FLAG_PUT, FLAG_PUT_DONE = 0x04, 0x08
 FLAG_MEDIA = 0x10
+# Команды приложения, которым оно разрешило raw media (zm_core_t::link_media, прошивка 0.1.121):
+# до APP_MEDIA_PREFIX своих байт управления — перед данными.
+APP_MEDIA_PREFIX = 8
 STATUS_PUT_READY, STATUS_PUT_OK, STATUS_PUT_BAD, STATUS_PUT_CAPABLE = 0x10, 0x20, 0x40, 0x80
 BULK_OFF, BULK_FREE, BULK_LOADED, BULK_ECHOED = 0, 1, 2, 3
 
@@ -118,9 +121,12 @@ class LinkCore:
             room = 0
             command = data[HEADER] if length else 0
             resource = command == 0x6A and length == 7
-            valid = resource or (command == 0x31 and length == 3)
+            first, last = getattr(self, "app_media", (1, 0))
+            app = (not resource and command != 0x31 and first <= command <= last
+                   and 3 <= length <= 3 + APP_MEDIA_PREFIX)
+            valid = resource or app or (command == 0x31 and length == 3)
             size = int.from_bytes(data[HEADER+1:HEADER+3],'little') if valid else 0
-            prefix = data[HEADER+3:HEADER+7] if resource else b''
+            prefix = data[HEADER+3:HEADER+7] if resource else data[HEADER+3:HEADER+length] if app else b''
             if put_available and 0 < size <= 8192 and self.from_capacity-len(self.from_z80) >= size+len(prefix)+4:
                 self.put_armed = True
                 self.put_media = True

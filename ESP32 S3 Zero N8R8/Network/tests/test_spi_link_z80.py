@@ -77,7 +77,7 @@ def take_frames(stream: bytearray) -> list[tuple[int, bytes]]:
         if stream[0] == 0xA6:
             command = stream[1]
             length = int.from_bytes(stream[2:4], 'little')
-            assert command in (0x31,0x6A) and 0 < length <= 8196
+            assert 0 < length <= 8192 + 8
             if len(stream) < 4+length: break
             frames.append((command,bytes(stream[4:4+length])))
             del stream[:4+length]

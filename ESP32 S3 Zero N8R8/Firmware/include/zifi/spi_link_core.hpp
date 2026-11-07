@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "zifi/protocol.hpp"
 #include "zifi/spsc_ring.hpp"
 
 namespace zifi {
@@ -98,7 +99,10 @@ class SpiLinkCore {
   static constexpr uint8_t kStateEmpty = 0x5A;
   static constexpr uint8_t kStatePending = 0xA5;
   static constexpr uint8_t kMagic = 0xD7;
-  static constexpr uint8_t kVersion = 2; // raw media DMA (old requests unchanged)
+  // 2 — raw media DMA (звук, модули); 3 — и команды приложения, которые оно разрешило
+  // (setAppMediaRange), с управлением до kAppMediaPrefixMax байт перед данными. Старые запросы
+  // те же.
+  static constexpr uint8_t kVersion = 3;
 
   // Флаги запроса.
   // Выбросить всё, что ESP ещё не отдала Z80 (ZiFi_ClearRx).
@@ -109,7 +113,8 @@ class SpiLinkCore {
   static constexpr uint8_t kFlagPut = 0x04;
   // Блок записан: сверить и принять.
   static constexpr uint8_t kFlagPutDone = 0x08;
-  // Raw media DMA control: command, valid length LE16, optional MOD_PUT offset LE32.
+  // Raw media DMA control: command, valid length LE16, optional MOD_PUT offset LE32 или у
+  // команды приложения — до kAppMediaPrefixMax своих байт (лягут перед данными).
   // DMA rounds up to 512 bytes; no XOR, padding never reaches the decoder.
   static constexpr uint8_t kFlagMedia = 0x10;
   static constexpr size_t kMediaMax = 8192;
@@ -223,7 +228,7 @@ class SpiLinkCore {
   bool putArmed_;        // Z80 ответили «готова», блока ещё не было
   bool putMedia_;
   uint8_t putCommand_;
-  uint8_t putPrefix_[4];
+  uint8_t putPrefix_[kAppMediaPrefixMax];
   size_t putPrefixSize_;
   size_t putSize_;
   uint8_t putXor_;       // XOR, который Z80 назвала для этого блока
