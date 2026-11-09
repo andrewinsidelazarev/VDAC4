@@ -658,13 +658,40 @@ static int rx_command(uint8_t cmd,const uint8_t *p,uint16_t n) {
     core->reply(cmd|0x80,reply,sizeof reply);
     return ZM_OK;
 }
+/* 0.27: прошивка умеет «файл следующему приложению» (ABI 1.14, ESP 0.1.123+) */
+static int rx_can_take(void) {
+    return core->size>=offsetof(zm_core_t,handoff_take)+sizeof core->handoff_take && core->handoff_take;
+}
+/* .adf, оставленный экраном ядер: блок становится памятью слоя, дальше — как после #79. 1 — взят. */
+static int rx_take(void) {
+    if (!(state==0 || state==3 || state==255) || !rx_can_take()) return 0;
+    uint32_t size=0;
+    uint8_t *data=(uint8_t *)core->handoff_take(&size);
+    if (!data) return 0;
+    if (size!=ADF_BYTES) { core->free(data); fail("Not an 880 KiB ADF image"); return 0; }
+    rx_discard();
+    rx_data=data; rx_received=ADF_BYTES; rx_ready=1; error_text[0]=0;
+    state=0;
+    core->log("amiga: ADF from the cores screen");
+    return 1;
+}
 static int command(uint8_t cmd,const uint8_t *p,uint16_t n) {
     uint8_t ok=0;
     core->mutex_lock(lock); alive_ms=core->millis(); core->mutex_unlock(lock);   // любая команда — плагин жив
     if (cmd==0x6E || cmd==0x6F) return evo_command(cmd,p,n);
     if (cmd==0x76) return ev_sd_done(p,n);
     if (cmd>=0x77 && cmd<=0x79) return rx_command(cmd,p,n);
-    if (cmd==0x7A) { const uint8_t reply[2]={1,1}; core->reply(0xFA,reply,sizeof reply); return ZM_OK; }
+    if (cmd==0x7A) {
+        /* 0.27 (сессия «VDAC4 Прошивка», плагин VDAC4 Cores 0.19+, 09.11.2026): [1] — взять .adf, который принял
+           экран ядер (COREMENU рисует полосу хода) и оставил слою через прошивку (ESP 0.1.123+, ABI 1.14,
+           handoff_take). Ответ [1][1 | 8 — умею брать][1 — взял / 0]; без данных — как прежде [1][1].
+           Прошивка старше 1.14 — бита 8 нет, слой работает как 0.26. */
+        uint8_t reply[3]={1,1,0};
+        if (rx_can_take()) reply[1]|=8;
+        if (n==1 && p[0]==1) reply[2]=(uint8_t)rx_take();
+        core->reply(0xFA,reply,n==1?3:2);
+        return ZM_OK;
+    }
     if (cmd==0x70) {
         if ((state==0 || state==3 || state==255) &&
             (n==0 || (n==6 && memcmp(p,"AMIGA",6)==0))) {
@@ -728,7 +755,7 @@ static void stop(void) {
 #ifndef AMIGA_HOST_TEST
 int main(int argc,char **argv) {
     static const zm_app_t app={sizeof(zm_app_t),ZM_APP_ABI_MAJOR,ZM_APP_ABI_MINOR,
-        "amiga","0.26",0x6E,0x7A,start,stop,command,NULL,NULL,NULL};   /* 0.24: разделы NET; 0.25: SETUP, режим совместимости; 0.26: смена режима — перезапуск сеанса */
+        "amiga","0.27",0x6E,0x7A,start,stop,command,NULL,NULL,NULL};   /* 0.24: разделы NET; 0.25: SETUP, режим совместимости; 0.26: смена режима — перезапуск сеанса; 0.27: #7A [1] — .adf у экрана ядер */
     if (argc!=3) return 0;
     *(const zm_app_t **)argv[2]=&app;
     return ZM_APP_ABI_MAJOR;

@@ -26,6 +26,20 @@ SCR_F_GONE      equ 8                   ; экрана нет
 SCR_MENU        equ 2                   ; состояния cui_state_t (cores_ui.h)
 SCR_LOADING     equ 5
 SCR_ERROR       equ 7
+SCR_RECEIVING   equ 8                   ; 0.19: образ с карты Evo идёт в экран (COREMENU 0.2), полоса хода
+CMD_FILE_BEGIN  equ #4A                 ; [длина LE32][кому, 0] -> CA [1 — принимаю][1 — порции DMA можно]
+RESP_FILE_BEGIN equ #CA                 ; #4B пакеты, #4C конец; 0.20 — #4D порции DMA (COREMENU 0.3)
+CMD_FILE_RAW    equ #4D                 ; raw media: [смещение LE32][XOR][данные] -> CD [1][принято LE32]
+RAW_BUF         equ #E000               ; 0.20: порция DMA — в странице 1 плагина (Page1_Map)
+RAW_MAX         equ 8192                ; 16 секторов: предел raw media прошивки (kMediaMax)
+LINK_F_MEDIA    equ #10                 ; запрос raw media (spi_link_core.hpp, kFlagMedia)
+SCR_DMASADDRL   equ #1AAF               ; DMA TS-Config (как в zifi_spi.asm, там — только с ZIFI_SPI_DMA):
+SCR_DMALEN      equ #26AF               ; источник — младший байт, старший, страница; слов в блоке − 1;
+SCR_DMACTR      equ #27AF               ; запуск (чтение: бит 7 — занят); блоков − 1
+SCR_DMANUM      equ #28AF
+SCR_DMA_RAM_SPI equ #82
+SCR_SPI_WRDMA   equ #03                 ; команды SPI ESP: запись DMA и её конец
+SCR_SPI_WR_DONE equ #07
 SCR_ERR_TEXT    equ 6                   ; cui_error_t: текст ошибки ESP
 SCR_INSTANT     equ #80                 ; картинка уже на экране: сразу непрозрачный
 SCR_WAIT        equ 50                  ; кадров на появление и уход
@@ -116,6 +130,261 @@ Scr_Visible:
         ei
         halt
         djnz .wait
+        scf
+        ret
+
+; STATE, пока экран не покажет его целиком (флаги «виден» и «кадр на экране»). Нужно перед LEAVE 1,
+; если экран ещё не появлялся (файл с панели WC, 0.18): COREMENU.ELF, пока экран выключен (читает
+; карточки ядер с карты Tang), на LEAVE 1 его уже не включает — картинки «Loading» не было бы вовсе.
+; Выход: CF=0 — виден; CF=1 — нет за 5 с (SCR_WAIT × 5 кадров) или ESP не ответила.
+Scr_Shown:
+        ld c,5
+.outer:
+        ld b,SCR_WAIT
+.wait:
+        push bc
+        call Scr_State
+        pop bc
+        ret c
+        and SCR_F_SHOWN|SCR_F_DRAWN
+        cp SCR_F_SHOWN|SCR_F_DRAWN
+        ret z                            ; CF=0
+        ei
+        halt
+        djnz .wait
+        dec c
+        jr nz,.outer
+        scf
+        ret
+
+; 0.19: образ с карты Evo (файл с панели WC) — экрану: COREMENU принимает его, рисуя ход полосой,
+; и оставляет слою ядра (прошивка 0.1.123+, ABI 1.14); слой берёт его (#7A [1], Nes_Take), а не
+; принимает второй раз. 0.20 — всем ядрам: MD.ELF 1.5, NES.ELF 0.10, AMIGA.ELF 0.27 умеют брать.
+; BEGIN [длина LE32][CrName, 0]. Ответ COREMENU 0.3 — [1][1 — порции DMA можно]; порции — ещё и если
+; прошивка принимает блоки от Z80 (LINK_S_PUT_CAPABLE в статусе обмена): ScrRaw = 1.
+; Выход: CF=0 — экран принимает (ScrFile = 1); CF=1 — нет: экрана нет, он старый (0.1), нет памяти —
+; образ пойдёт слою, как прежде.
+Scr_FileBegin:
+        xor a
+        ld (ScrFile),a
+        ld (ScrRaw),a
+        ld a,(ScrOn)
+        or a
+        scf
+        ret z
+        ld hl,NesSize
+        ld de,ScrBuf
+        ld bc,4
+        ldir
+        ld hl,CrName
+.name:
+        ld a,(hl)
+        ld (de),a
+        inc hl
+        inc de
+        or a
+        jr nz,.name
+        ex de,hl
+        ld de,ScrBuf
+        sbc hl,de                        ; CF=0 после OR
+        ld b,h
+        ld c,l
+        ld hl,ScrBuf
+        ld a,CMD_FILE_BEGIN
+        call Proto_Send
+        ld a,RESP_FILE_BEGIN
+        ld de,NX_WAIT
+        call Proto_WaitCmd
+        ret c
+        ld a,(ProtoRxLen)
+        cp 2
+        jr c,.packets                    ; COREMENU 0.2: байта DMA нет
+        ld a,(SpiRsp)                    ; статус последнего обмена: бит 7 — блоки от Z80 принимает
+        rlca
+        ld hl,ProtoBuf+1
+        and (hl)
+        and 1
+        ld (ScrRaw),a
+.packets:
+        ld a,(ProtoBuf)
+        cp 1
+        scf
+        ret nz
+        ld (ScrFile),a
+        or a
+        ret
+
+; 0.19: тело образа — экрану (пакеты #4B, конец #4C — те же, что у слоя; 0.20 — порции DMA #4D, если
+; ScrRaw). Выход: CF=0 — образ у экрана и оставлен слою; CF=1, HL — текст ошибки (0 — Esc).
+Scr_SendFile:
+        ld a,CMD_FILE_BEGIN
+        ld (NesCmd),a
+        call Nes_SendBody
+        ld a,#77                         ; дальше (повтор с панели) — снова слою
+        ld (NesCmd),a
+        ret
+
+; 0.20: порция файла (NesCount байт) — в RAW_BUF целыми секторами (страница 1), её XOR и управление
+; raw media ScrRawCtl: [#4D][длина LE16][смещение NesSent LE32][XOR]. Выход: CF=1 — WC не прочитал.
+Scr_RawRead:
+        ld hl,(NesCount)
+        dec hl
+        ld a,h
+        srl a
+        inc a
+        ld (ScrRawSecs),a
+        ld b,a
+        call Page1_Map
+        ld hl,RAW_BUF
+        ld a,FN_LOAD512
+        call WC_API
+        ei                               ; файловый драйвер мог вернуть DI
+        ret c
+        call Page1_Map
+        ld hl,(NesCount)
+        ld (ScrRawCtl+1),hl
+        ld hl,NesSent
+        ld de,ScrRawCtl+3
+        ld bc,4
+        ldir
+        ; XOR NesCount байтов: группами по 8 (~15 тактов на байт; побайтно с CPI — 41, а это
+        ; 24 мс на порцию), затем хвост 0..7
+        ld bc,(NesCount)
+        ld hl,RAW_BUF
+        ld a,c
+        and 7
+        ld e,a                           ; E — хвост
+        srl b
+        rr c
+        srl b
+        rr c
+        srl b
+        rr c                             ; BC — групп
+        ld a,b
+        or c
+        ld d,0                           ; D — XOR
+        jr z,.tail
+        ld a,c                           ; счёт DJNZ: B — младший, C — старший (+1, если младший ≠ 0)
+        ld c,b
+        ld b,a
+        or a
+        jr z,.groups
+        inc c
+.groups:
+        xor a
+.group:
+        xor (hl)
+        inc hl
+        xor (hl)
+        inc hl
+        xor (hl)
+        inc hl
+        xor (hl)
+        inc hl
+        xor (hl)
+        inc hl
+        xor (hl)
+        inc hl
+        xor (hl)
+        inc hl
+        xor (hl)
+        inc hl
+        djnz .group
+        dec c
+        jr nz,.group
+        ld d,a
+.tail:
+        ld a,d
+        inc e
+        jr .tail_next
+.byte:
+        xor (hl)
+        inc hl
+.tail_next:
+        dec e
+        jr nz,.byte
+        ld (ScrRawCtl+7),a
+        or a
+        ret
+
+; 0.20: порция RAW_BUF (ScrRawSecs секторов) — ESP: запрос raw media (флаг #10, управление ScrRawCtl)
+; и, когда ESP откроет приём, DMA «ОЗУ → SPI» целыми секторами (лишнее за длиной ESP отбросит), затем
+; «записано» (LINK_F_PUT_DONE) — как Fast_Send плеера VDAC4MP3. Очередь ESP занята — ждать её по кадру,
+; не дольше SCR_WAIT×2 кадров. Выход: CF=0 — ESP приняла порцию (ответ CD придёт обычным путём); CF=1 — нет.
+Scr_RawPut:
+        call Page1_Map                   ; страницу для DMA берём из тени WC_PAGE3
+        ld a,SCR_WAIT*2
+        ld (ScrRawWait),a
+.ask:
+        ld hl,ScrRawCtl
+        ld de,SpiTxBuf
+        ld bc,8
+        ldir
+        ld a,8
+        ld (SpiTxLen),a                  ; обмен уносит только управление
+        ld hl,SpiRsp+3
+        ld (SpiDest),hl                  ; данных в ответ не будет
+        xor a
+        ld (SpiRoom),a
+        ld a,LINK_F_MEDIA
+        call SpiLink_Turn
+        ret c
+        ld a,(SpiRsp)
+        and LINK_S_PUT_READY
+        jr nz,.ready
+        ld hl,ScrRawWait
+        dec (hl)
+        scf
+        ret z
+        ei
+        halt                             ; ESP разбирает очередь
+        jr .ask
+.ready:
+        ld hl,RAW_BUF
+        ld bc,SCR_DMASADDRL
+        out (c),l
+        inc b
+        ld a,h
+        and #3F
+        out (c),a
+        inc b
+        ld a,(WC_PAGE3)
+        out (c),a
+        ld b,high SCR_DMALEN
+        ld a,255                         ; блок — сектор: 256 слов
+        out (c),a
+        ld b,high SCR_DMANUM
+        ld a,(ScrRawSecs)
+        dec a
+        out (c),a
+        ld a,SPI_SELECT_ESP
+        out (ZIFI_SPI_CFG),a
+        ld a,SCR_SPI_WRDMA
+        out (ZIFI_SPI_DATA),a
+        in a,(ZIFI_SPI_DATA)             ; пошёл байт адреса
+        in a,(ZIFI_SPI_DATA)             ; пошёл пустой байт
+        ld b,high SCR_DMACTR
+        ld a,SCR_DMA_RAM_SPI
+        out (c),a
+.dma:
+        in a,(c)
+        rla
+        jr c,.dma
+        ld a,SPI_SELECT_NONE
+        out (ZIFI_SPI_CFG),a
+        ld a,SPI_SELECT_ESP              ; конец записи — отдельная транзакция из одной команды
+        out (ZIFI_SPI_CFG),a
+        ld a,SCR_SPI_WR_DONE
+        out (ZIFI_SPI_DATA),a
+        in a,(ZIFI_SPI_DATA)
+        ld a,SPI_SELECT_NONE
+        out (ZIFI_SPI_CFG),a
+        ld a,LINK_F_PUT_DONE
+        call SpiLink_Send
+        ret c
+        ld a,(SpiRsp)
+        and LINK_S_PUT_OK
+        ret nz                           ; CF=0
         scf
         ret
 
@@ -334,6 +603,12 @@ ScrErrMap:
 ScrAppName:     db "COREMENU",0
 ScrAppTag:      db "coremenu",0
 ScrOn:          db 0                    ; 1 — экран (COREMENU.ELF) запущен
+ScrFile:        db 0                    ; 1 — образ с карты Evo принимает экран (0.19)
+ScrRaw:         db 0                    ; 1 — экрану порциями DMA (0.20); иначе пакетами по 512
+ScrRawSecs:     db 0                    ; секторов в порции
+ScrRawWait:     db 0
+ScrRawCtl:      db CMD_FILE_RAW         ; управление raw media: [#4D][длина LE16][смещение LE32][XOR]
+                ds 7
 ScrKept:        db 0                    ; 1 — экран выгружен, его «Loading» оставлен на HDMI
 ScrCmd:         db 0
 ScrSt:          db 0

@@ -1,9 +1,16 @@
 // Стандартные функции, которые ядро даёт модулям ESP (ELF из /WC/ESP/) сверх
 // узкой таблицы libc загрузчика (components/elf_loader): строки, печать в
-// буфер, математика float и double, помощники libgcc для 64-битных целых и
+// буфер, математика float и double, время, помощники libgcc для 64-битных целых и
 // double (сопроцессор ESP32-S3 — только одинарной точности) и TJpgDec из ПЗУ.
 // Всё прочее модуль получает через zm_core_t (zm_app.h). Нужен модулю символ,
-// которого здесь нет, — связывание сообщит его в журнале.
+// которого здесь нет, — связывание сообщит его в журнале. Модуль, который хочет
+// работать и на прошивке без нужного имени, объявляет его слабым
+// (extern … __attribute__((weak))): загрузчик (с 0.1.122) даёт тогда адрес 0.
+//
+// 0.1.122 (08.11.2026, задание TSafari: JavaScript — QuickJS в TSAFARI.ELF): математика
+// double newlib (acos … scalbn — Math.* скриптов точнее своих приближений модуля), время
+// (localtime_r и mktime — с часовым поясом прошивки: TZ из ключа time в zifi.ini,
+// Application::applyTimezone) и libgcc для double ↔ uint64.
 
 #include "zifi/board.hpp"
 
@@ -13,6 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include <esp_heap_caps.h>
 
@@ -29,6 +38,7 @@ extern char __divdi3, __udivdi3, __moddi3, __umoddi3;
 extern char __ashldi3, __ashrdi3, __lshrdi3, __muldi3;
 extern char __fixsfdi, __fixunssfdi, __floatdisf, __floatundisf;
 extern char __divsf3, __fixunssfsi, __floatunsisf;
+extern char __fixunsdfdi, __floatundidf;
 }
 
 namespace zifi {
@@ -53,6 +63,12 @@ const struct esp_elfsym kModuleSymbols[] = {
     ZM_SYM(sin), ZM_SYM(cos), ZM_SYM(tan), ZM_SYM(atan), ZM_SYM(atan2), ZM_SYM(pow),
     ZM_SYM(exp), ZM_SYM(log), ZM_SYM(log10), ZM_SYM(sqrt), ZM_SYM(floor), ZM_SYM(ceil),
     ZM_SYM(fmod), ZM_SYM(fabs), ZM_SYM(ldexp), ZM_SYM(frexp),
+    ZM_SYM(acos), ZM_SYM(asin), ZM_SYM(acosh), ZM_SYM(asinh), ZM_SYM(atanh), ZM_SYM(cosh),
+    ZM_SYM(sinh), ZM_SYM(tanh), ZM_SYM(cbrt), ZM_SYM(expm1), ZM_SYM(log1p), ZM_SYM(hypot),
+    ZM_SYM(lrint), ZM_SYM(round), ZM_SYM(trunc), ZM_SYM(scalbn),
+    // time.h, sys/time.h: пояс — TZ прошивки (zifi.ini, ключ time)
+    ZM_SYM(gettimeofday), ZM_SYM(gmtime_r), ZM_SYM(localtime_r), ZM_SYM(mktime),
+    ZM_SYM(difftime),
     // libgcc: double и 64-битные целые
     ZM_SYM(__adddf3), ZM_SYM(__subdf3), ZM_SYM(__muldf3), ZM_SYM(__negdf2),
     ZM_SYM(__eqdf2), ZM_SYM(__nedf2), ZM_SYM(__ledf2), ZM_SYM(__gedf2), ZM_SYM(__unorddf2),
@@ -61,7 +77,7 @@ const struct esp_elfsym kModuleSymbols[] = {
     ZM_SYM(__moddi3), ZM_SYM(__umoddi3), ZM_SYM(__ashldi3), ZM_SYM(__ashrdi3),
     ZM_SYM(__lshrdi3), ZM_SYM(__muldi3), ZM_SYM(__fixsfdi), ZM_SYM(__fixunssfdi),
     ZM_SYM(__floatdisf), ZM_SYM(__floatundisf), ZM_SYM(__divsf3), ZM_SYM(__fixunssfsi),
-    ZM_SYM(__floatunsisf),
+    ZM_SYM(__floatunsisf), ZM_SYM(__fixunsdfdi), ZM_SYM(__floatundidf),
     // ESP-IDF: память нужного вида (трекер берёт PSRAM сам)
     ZM_SYM(heap_caps_malloc), ZM_SYM(heap_caps_calloc), ZM_SYM(heap_caps_free),
     // ПЗУ ESP32-S3: TJpgDec (обложки)

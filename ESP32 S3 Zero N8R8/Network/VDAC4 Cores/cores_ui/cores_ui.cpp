@@ -355,6 +355,10 @@ void state_base(const cui_model_t &m, int count, int selected) {
         title = "Starting the FPGA";
         detail = "Loading the core into the Tang...";
         break;
+    case CUI_RECEIVING:
+        title = "Loading the game";
+        detail = m.error_text[0] ? m.error_text : "Reading the file from the Evo SD...";
+        break;
     default:
         break;
     }
@@ -364,11 +368,14 @@ void state_base(const cui_model_t &m, int count, int selected) {
     }
     wrapped(294, 109, title, 1, ink, 298, 2);
     wrapped(294, 163, detail, 0, error ? red : muted, 298, 3,
-            e == CUI_ERR_ESP_TEXT && error ? 60 : 128);
+            (e == CUI_ERR_ESP_TEXT && error) || m.state == CUI_RECEIVING ? 60 : 128);
     if (!error) {
         if (m.state == CUI_COPYING_CACHE)
             wrapped(294, 238, "First load or updated core. This can take about a minute.", 0, muted,
                     298, 2);
+        else if (m.state == CUI_RECEIVING)
+            wrapped(294, 238, "Reading from the Evo SD card. The core starts when it is loaded.", 0,
+                    muted, 298, 2);
         else if (!reading)
             wrapped(294, 238, "The core will take over this screen when it starts.", 0, muted, 298,
                     2);
@@ -419,7 +426,7 @@ void dynamics(const cui_model_t &m, int count, int selected, uint32_t now) {
         int brightness = phase < 25 ? phase : 50 - phase;
         box(590, 307, 6, 6, mix(panel, sys.accent, 7 + brightness * 8 / 25));
     } else if (m.state != CUI_ERROR && !(m.state == CUI_MENU && count == 0)) {
-        if (m.state == CUI_COPYING_CACHE && m.progress_percent >= 0) {
+        if ((m.state == CUI_COPYING_CACHE || m.state == CUI_RECEIVING) && m.progress_percent >= 0) {
             int p = clamp(m.progress_percent, 0, 100);
             box(294, 225, 242, 4, faint);
             box(294, 225, 242 * p / 100, 4, mint);

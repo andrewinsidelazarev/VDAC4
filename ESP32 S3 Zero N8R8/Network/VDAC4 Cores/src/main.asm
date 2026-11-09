@@ -8,7 +8,8 @@
 ; VDAC4 (zifi_link.asm → zifi_spi.asm, сборка с -DZIFI_SPI).
 ;
 ; Файл задаёт физическую компоновку WMF: заголовок #0A (512 байтов), код — с логическим
-; адресом #8000, одна страница.
+; адресом #8000 (страница 0); с 0.20 за ним — страница 1 с логическим адресом #C000: таблицы CRC16
+; и (не в файле) буфер порции DMA. Страницу 1 к окну #C000 подключает Page1_Map.
 
         DEVICE ZXSPECTRUM128
         INCLUDE "wc_api.inc"
@@ -70,9 +71,30 @@ WC_MNGV_PL:
         ld a,FN_MNGV_PL
         jp WC_API
 
+; 0.20: подключить страницу 1 плагина к окну #C000 (API 0, A' = 1): таблицы CRC16 (Nes_Crc16) и
+; буфер порции DMA (Scr_SendRaw). Окно WC переключает сам (TXTPR, файловые функции) и обратно не
+; ставит — подключать перед каждым обращением. Все регистры, кроме AF' и BC', — как были.
+Page1_Map:
+        push af
+        ld a,1
+        ex af,af'
+        xor a                            ; FN_MNGC_PL
+        call WC_API
+        pop af
+        ret
+
 mainEnd:
         ASSERT mainEnd <= #C000, "plugin code exceeds the #8000 page"
         ENT
         ALIGN 512                         ; WC читает страницу целыми секторами
+
+        ; Страница 1 (0.20): таблицы CRC16 с #C000 (выровнены на 256), буфер порции DMA — RAW_BUF
+        DISP #C000
+page1Start:
+        INCLUDE "crc16_tab.inc"
+page1End:
+        ASSERT page1End <= RAW_BUF, "page 1 tables overlap the DMA portion buffer"
+        ENT
+        ALIGN 512
 endCode:
         SAVEBIN "../build/vdac4/VDAC4COR.WMF",startCode,endCode-startCode

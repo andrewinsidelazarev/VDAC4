@@ -48,6 +48,30 @@ class ElfRelocateHostTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.split(), ['ok', 'relative_section_end'])
 
+    def test_weak_undefined(self) -> None:
+        """0.1.122: слабый неопределённый символ без адреса в прошивке — 0, а не ошибка
+        (tests/elf_weak_host.cpp, настоящая elf_weak_undefined и .dynsym пробного модуля)."""
+        build = ROOT / '.test-build' / 'elf_weak_host'
+        build.mkdir(parents=True, exist_ok=True)
+        text = (LOADER / 'src' / 'esp_elf.c').read_text(encoding='utf-8').replace('\r\n', '\n')
+        match = re.search(r'^static bool elf_weak_undefined\(.*?^\}\n', text, re.S | re.M)
+        self.assertIsNotNone(match, 'elf_weak_undefined не найдена в esp_elf.c')
+        extracted = build / 'extracted.c'
+        extracted.write_text(
+            '#include <stdbool.h>\n#include "esp_elf.h"\n#include "private/elf_types.h"\n'
+            + match.group(0)
+            + 'bool vdac4_test_weak_undefined(const elf32_sym_t *sym) { return elf_weak_undefined(sym); }\n',
+            encoding='utf-8')
+        exe = build_exe(build, 'elf_weak_host.exe',
+                        [ROOT / 'tests' / 'stubs_elf_loader', LOADER / 'include'],
+                        [(extracted, 'extracted.obj'), (ROOT / 'tests' / 'elf_weak_host.cpp', 'host.obj')])
+        if exe is None:
+            self.skipTest('нет MSVC (vcvars64.bat): стенд загрузчика ELF пропущен')
+        hello = ROOT / 'modules' / 'hello' / 'hello.app.elf'
+        result = subprocess.run([str(exe), str(hello)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.split(), ['ok', 'weak_rules', 'ok', 'hello_dynsym'])
+
 
 if __name__ == '__main__':
     unittest.main()

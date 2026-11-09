@@ -19,7 +19,7 @@
 #include "ps2_hid.h"
 #include "zm_app.h"
 
-#define APP_VERSION "1.4"
+#define APP_VERSION "1.5"
 #define MD_PERSONALITY 0x06u
 #define SILENCE_MS 1500u          /* плагин молчит дольше — Evo сбросилась: назад в слот 0 */
 
@@ -217,6 +217,45 @@ static void worker(void *arg)
     worker_done = 1;
 }
 
+/* 1.5: прошивка умеет «файл следующему приложению» (ABI 1.14) */
+static int handoff_ok(void)
+{
+    return core->size >= offsetof(zm_core_t, handoff_take) + sizeof core->handoff_take && core->handoff_take;
+}
+
+/* Образ, оставленный экраном ядер: блок становится памятью слоя (rom_discard освободит его core->free).
+   Дальше — как после #79: проверка заголовка, сохранения, образ готов. 1 — взят. */
+static int rom_take_handoff(void)
+{
+    const int idle = state == 0 || state == 3 || state == 255;
+    if (!idle || !handoff_ok())
+        return 0;
+    uint32_t size = 0;
+    uint8_t *data = (uint8_t *)core->handoff_take(&size);
+    if (!data)
+        return 0;
+    rom_discard();
+    rom_data = data;
+    rom_size = rom_received = size;
+    rom_head_done = 1;
+    rom_from_sd = 0;
+    error_text[0] = 0;
+    state = 0;
+    const char *error = size >= 16 && size <= NES_ROM_MAX ? rom_check(rom_data, rom_size) : "Invalid cartridge file size";
+    if (error) {
+        fail(error);
+        rom_discard();
+        return 0;
+    }
+    if (!save_prepare(rom_data, rom_size, 0)) {
+        rom_discard();
+        return 0;
+    }
+    rom_ready = 1;
+    core->log("md: ROM %u bytes from the cores screen", (unsigned)size);
+    return 1;
+}
+
 static int command(uint8_t cmd, const uint8_t *p, uint16_t n)
 {
     uint8_t ok = 0;
@@ -231,8 +270,12 @@ static int command(uint8_t cmd, const uint8_t *p, uint16_t n)
         return r;
     }
     if (cmd == 0x7a) {
-        const uint8_t caps[] = {1, (uint8_t)(5 | (sd_available() ? 2 : 0))};
-        return core->reply(0xfa, caps, sizeof caps);
+        /* 1.5: [1] — взять образ, который оставил экран ядер (COREMENU 0.2 принял его с карты Evo,
+           рисуя ход; прошивка 0.1.123+, ABI 1.14). Ответ [1][возможности][1 — взят / 0]; бит 8 —
+           «умею брать». Старый слой на данные не смотрит и отвечает двумя байтами без бита 8. */
+        const uint8_t took = n == 1 && p[0] == 1 ? (uint8_t)rom_take_handoff() : 0;
+        const uint8_t caps[] = {1, (uint8_t)(5 | (sd_available() ? 2 : 0) | (handoff_ok() ? 8 : 0)), took};
+        return core->reply(0xfa, caps, n == 1 ? 3 : 2);
     }
     if (cmd == 0x70) {
         const int idle = state == 0 || state == 3 || state == 255;

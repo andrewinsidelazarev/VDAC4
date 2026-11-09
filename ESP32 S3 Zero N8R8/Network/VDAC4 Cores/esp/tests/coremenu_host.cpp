@@ -75,6 +75,37 @@ int hReply(uint8_t response, const void *data, uint16_t length)
 int hUiAvailable() { return uiOk ? 1 : 0; }
 void hAppDone() { appDone = true; }
 
+// ABI 1.14: что экран оставил слою ядра
+std::string handoffTo;
+void *handoffBlock = nullptr;
+uint32_t handoffSize = 0;
+int hHandoffPut(const char *to, void *block, uint32_t size)
+{
+    handoffTo = to;
+    handoffBlock = block;
+    handoffSize = size;
+    return ZM_OK;
+}
+void *hHandoffTake(uint32_t *) { return nullptr; }
+int mediaFirst = 1, mediaLast = 0;      // link_media (ABI 1.13): порции DMA каким командам
+int hLinkMedia(uint8_t first, uint8_t last)
+{
+    mediaFirst = first;
+    mediaLast = last;
+    return ZM_OK;
+}
+
+// Порция RAW, как её отдаёт прошивка: свои байты запроса [смещение LE32][XOR], за ними данные
+std::vector<uint8_t> rawPortion(uint32_t at, const uint8_t *data, size_t n)
+{
+    uint8_t x = 0;
+    for (size_t i = 0; i < n; i++)
+        x ^= data[i];
+    std::vector<uint8_t> p{(uint8_t)at, (uint8_t)(at >> 8), (uint8_t)(at >> 16), (uint8_t)(at >> 24), x};
+    p.insert(p.end(), data, data + n);
+    return p;
+}
+
 int hLinkWrite(uint32_t address, const uint32_t *words, uint32_t count)
 {
     if (!uiOk || count == 0 || count > 16 || address % 4)
@@ -178,7 +209,32 @@ zm_core_t makeCore()
     c.sd_read = hSdRead;
     c.sd_pread = hSdPread;
     c.sd_close = hSdClose;
+    c.handoff_put = hHandoffPut;
+    c.handoff_take = hHandoffTake;
+    c.link_media = hLinkMedia;
     return c;
+}
+
+uint16_t crc16(const uint8_t *p, size_t n)
+{
+    uint16_t crc = 0xFFFF;
+    while (n--) {
+        crc ^= (uint16_t)*p++ << 8;
+        for (int b = 0; b < 8; b++)
+            crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
+    }
+    return crc;
+}
+
+// Пакет DATA, как у плагина: [смещение LE32][данные][CRC16 смещения и данных LE]
+std::vector<uint8_t> packet(uint32_t at, const uint8_t *data, size_t n)
+{
+    std::vector<uint8_t> p{(uint8_t)at, (uint8_t)(at >> 8), (uint8_t)(at >> 16), (uint8_t)(at >> 24)};
+    p.insert(p.end(), data, data + n);
+    const uint16_t crc = crc16(p.data(), p.size());
+    p.push_back((uint8_t)crc);
+    p.push_back((uint8_t)(crc >> 8));
+    return p;
 }
 
 zm_core_t core;
@@ -319,7 +375,8 @@ int main(int argc, char **argv)
     args[2] = reinterpret_cast<char *>(&table);
     check(coremenu_main(3, args) == ZM_APP_ABI_MAJOR && table != nullptr, "main отдаёт таблицу");
     app = table;
-    check(app->command_first == 0x47 && app->command_last == 0x49, "команды 47…49");
+    check(app->command_first == 0x47 && app->command_last == 0x4D,
+          "команды 47…4D (0.2: 4A…4C — приём файла; 0.3: 4D — порции DMA)");
 
     // 1. Меню: список, STATE, карточки из ELF, появление по ступени
     startApp();
@@ -426,6 +483,89 @@ int main(int argc, char **argv)
     // 6. Выгрузка без LEAVE 1 (чужой APP_STOP) — экран гаснет сразу
     app->stop();
     check(!(regs[0] & 1), "APP_STOP посреди меню — экран погашен");
+
+    // 7. (0.2) Образ с карты Evo: экран принимает его сам, рисует ход и оставляет слою ядра
+    startApp();
+    command(0x47, listBody());
+    std::vector<uint8_t> rom(3000);
+    for (size_t i = 0; i < rom.size(); i++)
+        rom[i] = (uint8_t)(i * 37 + (i >> 9));
+    std::vector<uint8_t> begin{(uint8_t)rom.size(), (uint8_t)(rom.size() >> 8), 0, 0, 'M', 'D', 0};
+    check(command(0x4A, begin) == 1, "BEGIN: память есть");
+    check(replyData.size() == 2 && replyData[1] == 1 && mediaFirst == 0x4D && mediaLast == 0x4D,
+          "0.3: BEGIN — [1][1]: порции DMA разрешены (link_media 4D)");
+    command(0x48, state(8, 1, 0, "Aladdin (Europe).gen"));
+    run(600);
+    check(alpha() == 15, "приём — экраном");
+    uint32_t at = 0;
+    for (int k = 0; k < 3; k++) {                    // 1536 из 3000 — около половины
+        check(command(0x4B, packet(at, rom.data() + at, 512)) == 1, "DATA принят");
+        at += 512;
+        check(replyData.size() == 5 && replyData[1] == (uint8_t)at && replyData[2] == (uint8_t)(at >> 8),
+              "ответ DATA — сколько принято");
+    }
+    command(0x48, state(8, 1, 0, "Aladdin (Europe).gen"));
+    run(200);
+    savePpm("07_receiving.ppm");
+    check(command(0x4B, packet(0, rom.data(), 512)) == 1, "повтор принятого пакета — снова 1");
+    std::vector<uint8_t> bad = packet(at, rom.data() + at, 512);
+    bad[10] ^= 1;
+    check(command(0x4B, bad) == 0, "испорченный пакет (CRC16) — 0");
+    check(command(0x4C, {}) == 0, "END до конца файла — 0");
+    while (at < rom.size()) {
+        const size_t n = rom.size() - at < 512 ? rom.size() - at : 512;
+        check(command(0x4B, packet(at, rom.data() + at, n)) == 1, "DATA принят");
+        at += (uint32_t)n;
+    }
+    check(command(0x4C, {}) == 1, "END: файл оставлен слою");
+    check(handoffTo == "MD" && handoffSize == rom.size() && handoffBlock != nullptr &&
+              !memcmp(handoffBlock, rom.data(), rom.size()),
+          "handoff_put: кому MD, весь образ байт в байт");
+    command(0x48, state(8, 1, 0, "Aladdin (Europe).gen"));
+    run(200);
+    savePpm("08_received.ppm");
+    app->stop();
+    free(handoffBlock);
+    handoffBlock = nullptr;
+
+    // 7a. (0.3) Порции DMA до 8 КБ: смещение и XOR — свои байты запроса, повтор, испорченная
+    startApp();
+    command(0x47, listBody());
+    std::vector<uint8_t> big(20000);
+    for (size_t i = 0; i < big.size(); i++)
+        big[i] = (uint8_t)(i * 13 + (i >> 8));
+    std::vector<uint8_t> begin2{(uint8_t)big.size(), (uint8_t)(big.size() >> 8), 0, 0, 'A', 'M', 'I', 'G', 'A', 0};
+    check(command(0x4A, begin2) == 1, "BEGIN 20000 для AMIGA");
+    command(0x48, state(8, 2, 0, "Workbench.adf"));
+    run(600);
+    uint32_t got = 0;
+    check(command(0x4D, rawPortion(0, big.data(), 8192)) == 1, "RAW 8 КБ принят");
+    got = 8192;
+    check(replyData.size() == 5 && replyData[1] == 0x00 && replyData[2] == 0x20, "ответ RAW — сколько принято");
+    check(command(0x4D, rawPortion(0, big.data(), 8192)) == 1, "повтор порции — снова 1");
+    std::vector<uint8_t> badRaw = rawPortion(got, big.data() + got, 8192);
+    badRaw[100] ^= 0x10;
+    check(command(0x4D, badRaw) == 0, "испорченная порция (XOR) — 0");
+    check(command(0x4D, rawPortion(got + 8192, big.data() + got + 8192, 100)) == 0, "порция не по порядку — 0");
+    check(command(0x4D, rawPortion(got, big.data() + got, 8192)) == 1, "та же порция снова — принята");
+    got += 8192;
+    command(0x48, state(8, 2, 0, "Workbench.adf"));
+    run(200);
+    savePpm("09_receiving_raw.ppm");
+    check(command(0x4D, rawPortion(got, big.data() + got, big.size() - got)) == 1, "хвост порцией");
+    check(command(0x4C, {}) == 1, "END после порций");
+    check(handoffTo == "AMIGA" && handoffSize == big.size() && !memcmp(handoffBlock, big.data(), big.size()),
+          "handoff_put: AMIGA, образ из порций байт в байт");
+    app->stop();
+    free(handoffBlock);
+    handoffBlock = nullptr;
+
+    // 8. Прошивка без ABI 1.14 — BEGIN отказывает: плагин шлёт образ слою, как прежде
+    core.handoff_put = nullptr;
+    startApp();
+    check(command(0x4A, begin) == 0, "без handoff_put — BEGIN 0");
+    app->stop();
+    core.handoff_put = hHandoffPut;
 
     printf(failures ? "FAILED: %d\n" : "PASS\n", failures);
     return failures ? 1 : 0;

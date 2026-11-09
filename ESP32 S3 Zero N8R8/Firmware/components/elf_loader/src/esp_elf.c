@@ -521,6 +521,16 @@ int esp_elf_init(esp_elf_t *elf)
  *
  * @return ESP_OK if success or other if failed.
  */
+/* VDAC4 (08.11.2026, задание TSafari): слабый неопределённый символ (модуль объявил
+   extern … __attribute__((weak)) и сам его не определяет), которого нет в таблицах прошивки, —
+   адрес 0, а не ошибка: так делает и обычный компоновщик. Модуль проверяет адрес (if (cbrt) …)
+   и на прошивке без имени берёт своё. Обычная (сильная) ссылка на несуществующее имя — как и
+   прежде, ошибка: модуль не загружается. */
+static bool elf_weak_undefined(const elf32_sym_t *sym)
+{
+    return ELF_ST_BIND(sym->info) == STB_WEAK && sym->shndx == SHN_UNDEF;
+}
+
 int esp_elf_relocate(esp_elf_t *elf, const uint8_t *pbuf)
 {
     int ret;
@@ -593,8 +603,11 @@ int esp_elf_relocate(esp_elf_t *elf, const uint8_t *pbuf)
                         }
 #endif
                         if (!addr) {
-                            ESP_LOGE(TAG, "Can't find common %s", strtab + sym->name);
-                            return -ENOSYS;
+                            if (!elf_weak_undefined(sym)) {
+                                ESP_LOGE(TAG, "Can't find common %s", strtab + sym->name);
+                                return -ENOSYS;
+                            }
+                            ESP_LOGD(TAG, "Weak %s: not in the firmware, 0", comm_name);
                         }
 
                         ESP_LOGD(TAG, "Find common %s addr=%x", comm_name, addr);
@@ -618,8 +631,11 @@ int esp_elf_relocate(esp_elf_t *elf, const uint8_t *pbuf)
                     }
 #endif
                     if (!addr) {
-                        ESP_LOGE(TAG, "Can't find symbol %s", func_name);
-                        return -ENOSYS;
+                        if (!elf_weak_undefined(sym)) {
+                            ESP_LOGE(TAG, "Can't find symbol %s", func_name);
+                            return -ENOSYS;
+                        }
+                        ESP_LOGD(TAG, "Weak %s: not in the firmware, 0", func_name);
                     }
 
                     ESP_LOGD(TAG, "Find function %s addr=%x", func_name, addr);

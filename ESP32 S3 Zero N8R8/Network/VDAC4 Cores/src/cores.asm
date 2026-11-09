@@ -100,6 +100,9 @@ PLUGIN:
         ld (AdfCall),a
         ld (ScrOn),a
         ld (ScrKept),a
+        ld (ScrFile),a
+        ld a,#77
+        ld (NesCmd),a
         call Proto_ResetRx
         ld a,1
         call WC_INT_PL                   ; WC не перерисовывает своё под окном
@@ -137,16 +140,18 @@ PLUGIN:
         call Scr_Menu                    ; Tang без оверлеев — экран прочь, окно WC
         call Cr_Menu
         jp c,.done                       ; Esc — назад в WC
-        jr .start_app
+        jp .start_app
 .nes_file:
-        call Ui_Open
-        call Adf_IsFile                  ; расширение .adf — ядро AMIGA, иначе NES
+        call Adf_IsFile                  ; расширение .adf — ядро AMIGA, образ Mega Drive — MD, иначе NES
         jr nc,.adf_file
+        call Md_IsFile
+        jr nc,.md_file
         ld hl,NesName
         ld de,CrName
         ld bc,4
         ldir
-        jr .start_app
+        ld hl,NesEvoTitle
+        jr .file_screen
 .adf_file:
         ld a,1
         ld (AdfCall),a
@@ -154,6 +159,59 @@ PLUGIN:
         ld de,CrName
         ld bc,6
         ldir
+        ld hl,AdfEvoTitle
+        jr .file_screen
+.md_file:
+        ld a,1
+        ld (AdfCall),a                   ; у MD.ELF шага .sav (#7B) нет
+        ld hl,MdName
+        ld de,CrName
+        ld bc,3
+        ldir
+        ld hl,MdEvoTitle
+.file_screen:
+        ld (EvoTitle),hl                 ; заголовок окна WC — по ядру файла (до 0.18 — всегда «NES»)
+        ; 0.18: и файл с панели — экраном на HDMI Tang (COREMENU.ELF), как меню F10: «Loading» с
+        ; карточкой ядра файла. Экрана нет (нет COREMENU.ELF, Tang без оверлеев, CORE_LIST не
+        ; ответил) — окно WC, как прежде.
+        call Scr_Start
+        jr c,.file_window
+        call Cr_List                     ; карточка ядра — из списка
+        jr c,.file_no_screen
+        call Cr_Find                     ; MenuSel — ядро файла
+        call Scr_List
+        jr c,.file_no_screen
+        ; 0.19: образ — экрану (COREMENU 0.2): «Loading the game», имя файла и полоса хода; экран
+        ; оставит образ слою. 0.20 — всем ядрам и порциями DMA (COREMENU 0.3). Не принимает (старый
+        ; экран, нет памяти) — «Loading», как в 0.18.
+        call Scr_FileBegin
+        ld a,SCR_LOADING
+        ld hl,0
+        jr c,.file_state
+        ld a,SCR_RECEIVING
+        ld hl,(NesNamePtr)               ; имя файла — текстом STATE (экран берёт до 60 знаков)
+.file_state:
+        ld c,0
+        call Scr_Set
+        call Scr_Visible
+        jr c,.file_no_screen
+        call Scr_Shown                   ; экран целиком — только тогда LEAVE 1 (Scr_Keep)
+        jr c,.file_no_screen
+        ld a,(ScrFile)
+        or a
+        jr z,.start_app
+        call Scr_SendFile                ; ход рисует экран сам: процент — по принятому
+        jr nc,.start_app
+        ld a,h                           ; Esc — назад в WC; ошибка — экраном
+        or l
+        jp nz,.fatal
+        jp .done
+.file_no_screen:
+        call Scr_Close                   ; принятое экраном пропало с ним: образ — слою, как прежде
+        xor a
+        ld (ScrFile),a
+.file_window:
+        call Ui_Open
 .start_app:
         call Cr_LoadText
         ld hl,UiStStart
@@ -285,6 +343,43 @@ Cr_List:
         ld de,CrList
         ldir
         or a
+        ret
+
+; MenuSel — номер ядра CrName в списке CrList (экрану — карточка ядра файла с панели WC, 0.18).
+; Нет такого — 0: CORE_APP всё равно скажет, что ядра нет.
+Cr_Find:
+        xor a
+        ld (MenuSel),a
+        ld a,(CrCount)
+        or a
+        ret z
+        ld b,a
+        ld c,0
+.entry:
+        push bc
+        ld a,c
+        call Cr_Entry                    ; HL — запись: имя 16 байтов
+        ld de,CrName
+        ld b,16
+.cmp:
+        ld a,(de)
+        cp (hl)
+        jr nz,.next
+        or a
+        jr z,.found                      ; оба имени кончились
+        inc hl
+        inc de
+        djnz .cmp
+        jr .found                        ; 16 знаков совпали
+.next:
+        pop bc
+        inc c
+        djnz .entry
+        ret
+.found:
+        pop bc
+        ld a,c
+        ld (MenuSel),a
         ret
 
 ; Запись A списка: HL — её начало.

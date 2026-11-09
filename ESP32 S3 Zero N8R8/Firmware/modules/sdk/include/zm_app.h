@@ -29,13 +29,14 @@ extern "C" {
 #endif
 
 #define ZM_APP_ABI_MAJOR 1
-#define ZM_APP_ABI_MINOR 13   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
+#define ZM_APP_ABI_MINOR 14   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
                                 4: core_* (ядра ПЛИС из кэша BL616), link_*, sock_* (TCP/UDP);
                                 5: ui_* — экран приложения оверлеем Tang поверх картинки Evo;
                                 6: app_done — приложение кончило работу: выгрузить;
                                 11: wifi_rssi — уровень сигнала Wi-Fi;
                                 12: sock_open_tls — сокет TCP с шифрованием TLS;
-                                13: link_media — порции DMA до 8 КБ в команды приложения */
+                                13: link_media — порции DMA до 8 КБ в команды приложения;
+                                14: handoff_put, handoff_take — файл следующему приложению */
 
 /* core->temperature: датчика нет (или ещё не прочитан). */
 #define ZM_TEMPERATURE_UNKNOWN (-32768)
@@ -355,6 +356,18 @@ struct zm_core {
    * приложения. Z80 узнаёт, что прошивка это умеет, по версии канала SPI (3). Звать, только если
    * size таблицы вмещает поле. */
   int (*link_media)(uint8_t first, uint8_t last);
+
+  /* ABI 1.14: файл следующему приложению. Экран ядер (COREMENU.ELF) принимает образ с карты Evo,
+   * рисуя ход, и оставляет его слою ядра (MD.ELF) — тот не принимает его второй раз.
+   * handoff_put: блок, выделенный этим приложением через alloc, отдаётся приложению to (имя без
+   * «.ELF», как в CORE_APP: «MD»); при выгрузке этого приложения блок не освобождается, прежний
+   * оставленный — освобождается. ZM_OK; ZM_ERROR — блок не из alloc или имени нет.
+   * handoff_take: приложение берёт блок, оставленный ему; блок становится его памятью (free или
+   * выгрузка освободят), *size — длина. NULL — ему ничего не оставляли. Запустилось другое
+   * приложение или получатель выгружен, не взяв, — блок освобождается. Звать, только если size
+   * таблицы вмещает поле. */
+  int (*handoff_put)(const char* to, void* block, uint32_t size);
+  void* (*handoff_take)(uint32_t* size);
 };
 
 /* Таблица приложения: заполняет приложение в main. */

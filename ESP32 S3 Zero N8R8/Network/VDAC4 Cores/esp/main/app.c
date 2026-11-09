@@ -25,6 +25,21 @@
  *            после 2 ядро ESP выгружает приложение (app_done)
  * Флаги: 1 — Tang с оверлеями есть и холст выделен; 2 — экран виден целиком; 4 — последнее STATE
  *        на экране; 8 — экрана нет (ушёл или не появлялся); 16 — карточки ядер прочитаны.
+ *
+ * 0.2 (плагин 0.19, прошивка ESP 0.1.123+ — ABI 1.14): образ с карты Evo (файл с панели WC) экран
+ * принимает сам и рисует ход полосой (состояние CUI_RECEIVING, имя файла — текст STATE), а потом
+ * оставляет его слою ядра (handoff_put) — слой берёт его, не принимая второй раз (MD.ELF 1.5: #7A [1]).
+ * Пакеты — те же, что у слоёв ядер (#77…#79 NES.ELF/MD.ELF):
+ *   4A BEGIN [длина LE32][кому: имя слоя, 0] → CA [1 — память есть / 0 — нет или прошивка без ABI 1.14]
+ *   4B DATA  [смещение LE32][данные до 512][CRC16-CCITT-FALSE смещения и данных LE] → CB [1 / 0][принято LE32];
+ *            повтор уже принятого пакета — снова 1
+ *   4C END   → CC [1 — весь файл принят и оставлен слою / 0]
+ * 0.3 (плагин 0.20): пакеты по 512 байт с ответом на каждый шли ~16 мс — ROM 2 МБ больше минуты
+ * (пользователь: «грузит как с магнитофона»). Теперь — порции DMA до 8 КБ (raw media, link_media,
+ * прошивка 0.1.121+): BEGIN отвечает [1][1 — порции DMA можно]; порция:
+ *   4D RAW   (запрос raw media [4D][длина LE16][смещение LE32][XOR данных], данные — одной передачей
+ *            DMA) → CD [1 / 0][принято LE32]. Суммы канала у порции нет — XOR байтов считает плагин;
+ *            не сошлось — 0, плагин шлёт ту же порцию снова (она у него ещё в буфере).
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -34,13 +49,18 @@
 #include "cores_ui.h"
 #include "cui_card.h"
 
-#define APP_VERSION "0.1"
+#define APP_VERSION "0.3"
 
 enum {
     CMD_LIST = 0x47,
     CMD_STATE = 0x48,
     CMD_LEAVE = 0x49,
+    CMD_FILE_BEGIN = 0x4A,
+    CMD_FILE_DATA = 0x4B,
+    CMD_FILE_END = 0x4C,
+    CMD_FILE_RAW = 0x4D,
 };
+#define FILE_MAX (0x5D0000u + 512u)  /* больше самого большого образа слоёв (SMD MD.ELF) */
 
 enum {
     F_TANG = 1,
@@ -81,6 +101,13 @@ static int leave_mode = -1;          /* −1 — нет, 0 — уйти плав
 static uint32_t last_cmd_ms;
 static int cards_pending;
 static volatile uint8_t flags;
+
+/* Образ с карты Evo для слоя ядра (0.2): только команды (ядро обмена) — без lock; проценты для
+   экрана — в shared под lock */
+static uint8_t *file_buf;
+static uint32_t file_size, file_got;
+static char file_to[13];
+static int file_pct = -1;            /* −1 — файла нет: проценты, как прислал плагин */
 
 /* Только задача экрана */
 static cui_model_t view;
@@ -383,10 +410,13 @@ static void cmd_state(const uint8_t *data, uint16_t length)
     if (length >= 4) {
         core->mutex_lock(lock);
         const uint8_t st = data[0] & 0x7F;
-        shared.state = st <= CUI_ERROR ? (cui_state_t)st : CUI_ERROR;
+        shared.state = st <= CUI_RECEIVING ? (cui_state_t)st : CUI_ERROR;
         shared.selected = shared.count != 0 && data[1] < shared.count ? data[1] : 0;
         const int8_t pct = (int8_t)data[2];
-        shared.progress_percent = pct >= 0 && pct <= 100 ? pct : -1;
+        /* Приём образа: проценты считает сам экран (плагин их не знает) */
+        shared.progress_percent = st == CUI_RECEIVING && file_pct >= 0 ? file_pct
+                                : pct >= 0 && pct <= 100           ? pct
+                                                                   : -1;
         shared.error = data[3] <= CUI_ERR_NO_ANSWER ? (cui_error_t)data[3] : CUI_ERR_CORE;
         char text[sizeof shared.error_text] = {0};
         unsigned n = 0;
@@ -410,9 +440,140 @@ static void cmd_state(const uint8_t *data, uint16_t length)
     reply_flags(0x80 | CMD_STATE);
 }
 
+/* --- образ с карты Evo для слоя ядра (0.2) --- */
+
+static uint16_t crc16(const uint8_t *p, size_t n)
+{
+    uint16_t crc = 0xFFFF;
+    while (n--) {
+        crc ^= (uint16_t)*p++ << 8;
+        for (unsigned b = 0; b < 8; ++b)
+            crc = (uint16_t)((crc << 1) ^ ((crc & 0x8000) ? 0x1021 : 0));
+    }
+    return crc;
+}
+
+static int raw_ok;                   /* порции DMA разрешены (link_media, прошивка 0.1.121+) */
+
+static void file_reply(uint8_t code, uint8_t ok)
+{
+    const uint8_t r[5] = {ok, (uint8_t)file_got, (uint8_t)(file_got >> 8), (uint8_t)(file_got >> 16),
+                          (uint8_t)(file_got >> 24)};
+    if (code == (0x80 | CMD_FILE_BEGIN)) {
+        const uint8_t b[2] = {ok, (uint8_t)(ok && raw_ok)};   /* 0.3: [1][1 — порции DMA можно] */
+        core->reply(code, b, 2);
+        return;
+    }
+    core->reply(code, r, code == (0x80 | CMD_FILE_END) ? 1 : 5);
+}
+
+/* Процент — экрану: только когда он сменился (полоса перерисовывается сама, без revision) */
+static void file_progress(void)
+{
+    const int pct = file_size ? (int)((uint64_t)file_got * 100u / file_size) : 0;
+    core->mutex_lock(lock);
+    file_pct = pct;
+    if (shared.state == CUI_RECEIVING)
+        shared.progress_percent = (int16_t)pct;
+    last_cmd_ms = core->millis();        /* пакеты — тоже знак жизни плагина */
+    core->mutex_unlock(lock);
+}
+
+static void cmd_file(uint8_t cmd, const uint8_t *data, uint16_t length)
+{
+    const uint8_t code = (uint8_t)(0x80 | cmd);
+    if (cmd == CMD_FILE_BEGIN) {
+        /* Оставить файл слою может только прошивка с ABI 1.14 (0.1.123+) */
+        const int can = core->size >= offsetof(zm_core_t, handoff_take) + sizeof core->handoff_take &&
+                        core->handoff_put && core->handoff_take;
+        if (file_buf) {
+            core->free(file_buf);
+            file_buf = NULL;
+        }
+        file_size = file_got = 0;
+        const uint32_t size = length >= 6 ? le32(data) : 0;
+        unsigned n = 0;
+        for (; 4 + n < length && n < sizeof file_to - 1 && data[4 + n]; n++)
+            file_to[n] = (char)data[4 + n];
+        file_to[n] = 0;
+        /* 0.3: порции DMA до 8 КБ в RAW (ABI 1.13, прошивка 0.1.121+); разрешение — из команды:
+           приложение уже работает (при выгрузке прошивка снимет его сама) */
+        if (!raw_ok)
+            raw_ok = core->size >= offsetof(zm_core_t, link_media) + sizeof core->link_media &&
+                     core->link_media && core->link_media(CMD_FILE_RAW, CMD_FILE_RAW) == ZM_OK;
+        if (can && size >= 16 && size <= FILE_MAX && n) {
+            file_buf = (uint8_t *)core->alloc(size, ZM_MEM_PSRAM);
+            if (file_buf) {
+                file_size = size;
+                file_progress();
+                core->log("coremenu: receiving %u bytes for %s", (unsigned)size, file_to);
+            } else {
+                core->log("coremenu: no PSRAM for %u bytes", (unsigned)size);
+            }
+        }
+        file_reply(code, file_buf != NULL);
+        return;
+    }
+    if (cmd == CMD_FILE_RAW) {
+        /* Порция DMA: [смещение LE32][XOR данных][данные до 8 КБ] — свои байты запроса впереди */
+        uint8_t ok = 0;
+        if (file_buf && length > 5) {
+            const uint32_t at = le32(data), count = length - 5u;
+            uint8_t x = 0;
+            for (uint32_t i = 0; i < count; i++)
+                x ^= data[5 + i];
+            if (x == data[4] && at <= file_got && count <= file_size - at) {
+                if (at == file_got) {
+                    memcpy(file_buf + at, data + 5, count);
+                    file_got += count;
+                    ok = 1;
+                    file_progress();
+                } else if (count <= file_got - at && !memcmp(file_buf + at, data + 5, count)) {
+                    ok = 1;
+                }
+            }
+        }
+        file_reply(code, ok);
+        return;
+    }
+    if (cmd == CMD_FILE_DATA) {
+        uint8_t ok = 0;
+        if (file_buf && length > 6 && length <= 518) {
+            const uint32_t at = le32(data), count = length - 6u;
+            const uint16_t expected = (uint16_t)(data[length - 2] | data[length - 1] << 8);
+            if (crc16(data, length - 2u) == expected && at <= file_got && count <= file_size - at) {
+                if (at == file_got) {
+                    memcpy(file_buf + at, data + 4, count);
+                    file_got += count;
+                    ok = 1;
+                    file_progress();
+                } else if (count <= file_got - at && !memcmp(file_buf + at, data + 4, count)) {
+                    ok = 1;                  /* повтор: ответ потерялся, данные те же */
+                }
+            }
+        }
+        file_reply(code, ok);
+        return;
+    }
+    /* END: весь файл — слою ядра; блок уходит из памяти экрана (выгрузка его не освободит) */
+    uint8_t ok = 0;
+    if (file_buf && file_got == file_size && core->handoff_put(file_to, file_buf, file_size) == ZM_OK) {
+        core->log("coremenu: %u bytes left for %s", (unsigned)file_size, file_to);
+        file_buf = NULL;
+        ok = 1;
+    }
+    file_reply(code, ok);
+}
+
 static int command(uint8_t cmd, const uint8_t *data, uint16_t length)
 {
     switch (cmd) {
+    case CMD_FILE_BEGIN:
+    case CMD_FILE_DATA:
+    case CMD_FILE_END:
+    case CMD_FILE_RAW:
+        cmd_file(cmd, data, length);
+        return ZM_OK;
     case CMD_LIST:
         cmd_list(data, length);
         return ZM_OK;
@@ -452,6 +613,11 @@ static int start(const zm_core_t *c)
     have_list = have_state = instant = 0;
     leave_mode = -1;
     cards_pending = 0;
+    file_buf = NULL;
+    file_size = file_got = 0;
+    file_to[0] = 0;
+    file_pct = -1;
+    raw_ok = 0;
     screen = SCR_OFF;
     alpha = 0;
     tick_no = 0;
@@ -460,6 +626,15 @@ static int start(const zm_core_t *c)
     flags = F_GONE;
     last_cmd_ms = c->millis();
 
+    /* К старту экрана ядер в PSRAM не должно быть ничего постороннего (пользователь, 03.11.2026): ресурсы плеера
+     * (банк MIDI.SF2 до 6 МБ, YRW801.ROM 2 МБ, наборы MWM) ESP держит до перезапуска — с ними экрану не хватило
+     * памяти и плагин показал текстовое окно. NULL — «все» (прошивка 0.1.112+); имена — для прошивок старше.
+     * Плеер это переживёт: при следующей музыке плагин пришлёт банк заново. */
+    if (c->resource_release) {
+        c->resource_release(NULL);
+        c->resource_release("MIDI.SF2");
+        c->resource_release("YRW801.ROM");
+    }
     canvas_px = (uint16_t *)c->alloc((size_t)CUI_WIDTH * CUI_HEIGHT * 2, ZM_MEM_PSRAM);
     card_arena = (uint8_t *)c->alloc(CARD_ARENA, ZM_MEM_PSRAM);
     canvas.px = canvas_px;
@@ -518,7 +693,7 @@ const uint16_t *coremenu_host_canvas(void)
 int main(int argc, char **argv)
 {
     static const zm_app_t app = {sizeof(zm_app_t), ZM_APP_ABI_MAJOR, ZM_APP_ABI_MINOR, "coremenu", APP_VERSION,
-                                 CMD_LIST, CMD_LEAVE, start, stop, command, NULL, NULL, NULL};
+                                 CMD_LIST, CMD_FILE_RAW, start, stop, command, NULL, NULL, NULL};
     if (argc != 3)
         return 0;
     *(const zm_app_t **)argv[2] = &app;

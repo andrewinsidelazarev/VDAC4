@@ -157,6 +157,10 @@ class ModuleApp : public App {
   static int coreWifiRssi(int* dbm);
   static int coreSockOpenTls(const char* host, uint16_t port, uint32_t timeoutMs);
   static int coreLinkMedia(uint8_t first, uint8_t last);
+  static int coreHandoffPut(const char* to, void* block, uint32_t size);
+  static void* coreHandoffTake(uint32_t* size);
+  bool handoffFor(const char* app) const;
+  void dropHandoff(const char* why);
   static int coreUiAvailable();
   static void coreAppDone();
   static int coreSdList(const char*, const char*, uint32_t, zm_sd_entry_t*, uint32_t,
@@ -230,6 +234,12 @@ class ModuleApp : public App {
   // Что приложение завело: освобождается при выгрузке.
   portMUX_TYPE allocLock_ = portMUX_INITIALIZER_UNLOCKED;
   void* allocations_ = nullptr;           // голова списка заголовков
+  // ABI 1.14: блок, оставленный приложением следующему (handoff_put) — вне allocations_, пока
+  // получатель его не возьмёт (handoff_take) или не запустится другое приложение.
+  void* handoff_ = nullptr;               // заголовок блока
+  uint32_t handoffSize_ = 0;
+  char handoffTo_[13] = {};               // получатель — имя без «.ELF»
+  char handoffFrom_[13] = {};
   TaskSlot tasks_[kMaxTasks] = {};
   SemaphoreHandle_t sync_[kMaxSync] = {};
   LoadedModule modules_[kMaxModules] = {};

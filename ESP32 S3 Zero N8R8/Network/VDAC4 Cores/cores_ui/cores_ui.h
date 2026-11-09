@@ -34,7 +34,10 @@ typedef enum {
     CUI_COPYING_CACHE,
     CUI_LOADING,
     CUI_PROGRAMMING,
-    CUI_ERROR
+    CUI_ERROR,
+    /* VDAC4 Cores 0.19: образ с карты Evo идёт в ESP (файл с панели WC). error_text — имя файла,
+       progress_percent — сколько принято. Номер 8 — плагин шлёт его в STATE как есть. */
+    CUI_RECEIVING
 } cui_state_t;
 
 typedef enum {

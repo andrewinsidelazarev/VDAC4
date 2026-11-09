@@ -27,6 +27,11 @@ VP8GetCPUInfo) на плате 04.11 — «relocate failed (-88)», хотя в�
 памяти до ошибки кэша (ESP сбрасывалась при загрузке банка). Такой указатель — ошибка
 проверки: модуль должен работать и с прошивками, где загрузчик это ещё не прощает.
 
+Слабый неопределённый символ (extern … __attribute__((weak))), которого в таблицах нет, —
+не ошибка: загрузчик прошивки с 0.1.122 даёт ему адрес 0, модуль проверяет адрес и берёт
+своё. Такие имена проверка перечисляет отдельно. На прошивке старше 0.1.122 модуль с ними не
+загрузится («relocate failed (-88)»).
+
     python tools/check_module_symbols.py modules/out/MP3.ELF ...
 Выход 0 — всё есть; 1 — список недостающих.
 """
@@ -56,14 +61,16 @@ def allowed() -> set[str]:
     return names
 
 
-def undefined(path: str, tool: str) -> list[str]:
+def undefined(path: str, tool: str) -> list[tuple[str, bool]]:
+    """Неопределённые символы модуля: (имя, слабый ли)."""
     output = subprocess.run([tool, "-W", "--dyn-syms", path], capture_output=True,
                             text=True).stdout
     result = []
     for line in output.splitlines():
+        # Num: Value Size Type Bind Vis Ndx Name
         parts = line.split()
         if len(parts) >= 8 and parts[6] == "UND" and parts[7]:
-            result.append(parts[7])
+            result.append((parts[7], parts[4] == "WEAK"))
     return result
 
 
@@ -139,12 +146,15 @@ def main() -> int:
     status = 0
     for path in sys.argv[1:]:
         needed = undefined(path, tool)
-        missing = [name for name in needed if name not in known]
+        missing = [name for name, weak in needed if not weak and name not in known]
+        weak_missing = [name for name, weak in needed if weak and name not in known]
         if missing:
             status = 1
             print(f"{path}: the core does not give {', '.join(sorted(missing))}")
         else:
-            print(f"{path}: {len(needed)} external symbols, all given by the core")
+            print(f"{path}: {len(needed)} external symbols, all given by the core"
+                  + (f" except weak ones (address 0, loader 0.1.122+): {', '.join(sorted(weak_missing))}"
+                     if weak_missing else ""))
         named = named_in_module(path, tool, known)
         if named:
             status = 1

@@ -13,6 +13,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <dirent.h>
 
@@ -265,6 +266,8 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.wifi_rssi = coreWifiRssi;
   core_.sock_open_tls = coreSockOpenTls;
   core_.link_media = coreLinkMedia;
+  core_.handoff_put = coreHandoffPut;
+  core_.handoff_take = coreHandoffTake;
 }
 
 void ModuleApp::begin() {
@@ -827,6 +830,9 @@ int ModuleApp::startBuiltin(const zm_app_t* app, const char* name) {
   }
   stopApp();
   appStale_ = false;
+  if (handoff_ != nullptr && !handoffFor(name)) {
+    dropHandoff(name);
+  }
   xSemaphoreTake(appLock_, portMAX_DELAY);
   appElf_ = nullptr;
   app_ = app;
@@ -967,6 +973,9 @@ int ModuleApp::startApp(const char* name) {
   }
   stopApp();
   appStale_ = false;
+  if (handoff_ != nullptr && !handoffFor(name)) {
+    dropHandoff(name);                    // оставлено не этому приложению — память ему
+  }
   // Система однозадачная (пользователь, 03.11.2026): новому приложению — вся память. Файловые
   // серверы (SMB, FTP) прочь: сервер SMB после выхода из своего плагина на Evo работал дальше и
   // держал 582 КБ PSRAM, и с ним MIDI в 23 тыс. событий не открывался (0.1.115).
@@ -1102,7 +1111,97 @@ void ModuleApp::stopApp() {
   ftDetach_.reset();
   appElf_ = nullptr;
   bringupLog(kTag, "app %s stopped", appName_);
+  if (handoff_ != nullptr && handoffFor(appName_)) {
+    dropHandoff("its app stopped without taking it");   // получатель (старый слой) не взял
+  }
   appName_[0] = 0;
+}
+
+// --- ABI 1.14: файл следующему приложению -------------------------------------------------------
+//
+// Экран ядер (COREMENU.ELF) принимает образ с карты Evo, рисуя ход, и оставляет его слою ядра (MD.ELF):
+// блок из alloc экрана уходит из списка его памяти (выгрузка экрана его не освободит) и ждёт
+// получателя. Получатель берёт его в свой список. Запустилось другое приложение или получатель
+// выгружен, не взяв, — блок освобождается: несколько мегабайт PSRAM не висят.
+
+// Блок оставлен приложению app («MD.ELF» или «MD»)?
+bool ModuleApp::handoffFor(const char* app) const {
+  if (handoff_ == nullptr || app == nullptr) {
+    return false;
+  }
+  size_t n = strlen(handoffTo_);
+  return strncasecmp(app, handoffTo_, n) == 0 && (app[n] == 0 || app[n] == '.');
+}
+
+void ModuleApp::dropHandoff(const char* why) {
+  portENTER_CRITICAL(&allocLock_);
+  AllocHeader* header = static_cast<AllocHeader*>(handoff_);
+  handoff_ = nullptr;
+  portEXIT_CRITICAL(&allocLock_);
+  if (header == nullptr) {
+    return;
+  }
+  bringupLog(kTag, "handoff: %u bytes from %s for %s freed (%s)", static_cast<unsigned>(handoffSize_),
+             handoffFrom_, handoffTo_, why);
+  header->magic = 0;
+  heap_caps_free(header);
+}
+
+int ModuleApp::coreHandoffPut(const char* to, void* block, uint32_t size) {
+  ModuleApp* self = instance_;
+  if (self == nullptr || to == nullptr || *to == 0 || block == nullptr) {
+    return ZM_ERROR;
+  }
+  AllocHeader* header = static_cast<AllocHeader*>(block) - 1;
+  if (header->magic != kAllocMagic) {
+    return ZM_ERROR;
+  }
+  if (self->handoff_ != nullptr) {
+    self->dropHandoff("replaced");
+  }
+  portENTER_CRITICAL(&self->allocLock_);
+  if (header->prev != nullptr) {
+    header->prev->next = header->next;
+  } else {
+    self->allocations_ = header->next;
+  }
+  if (header->next != nullptr) {
+    header->next->prev = header->prev;
+  }
+  header->next = header->prev = nullptr;
+  self->handoff_ = header;
+  self->handoffSize_ = size;
+  portEXIT_CRITICAL(&self->allocLock_);
+  strncpy(self->handoffTo_, to, sizeof(self->handoffTo_) - 1);
+  self->handoffTo_[sizeof(self->handoffTo_) - 1] = 0;
+  strncpy(self->handoffFrom_, self->appName_, sizeof(self->handoffFrom_) - 1);
+  self->handoffFrom_[sizeof(self->handoffFrom_) - 1] = 0;
+  bringupLog(kTag, "handoff: %s leaves %u bytes for %s", self->appName_, static_cast<unsigned>(size),
+             self->handoffTo_);
+  return ZM_OK;
+}
+
+void* ModuleApp::coreHandoffTake(uint32_t* size) {
+  ModuleApp* self = instance_;
+  if (self == nullptr || self->handoff_ == nullptr || !self->handoffFor(self->appName_)) {
+    return nullptr;
+  }
+  portENTER_CRITICAL(&self->allocLock_);
+  AllocHeader* header = static_cast<AllocHeader*>(self->handoff_);
+  self->handoff_ = nullptr;
+  header->prev = nullptr;
+  header->next = static_cast<AllocHeader*>(self->allocations_);
+  if (header->next != nullptr) {
+    header->next->prev = header;
+  }
+  self->allocations_ = header;
+  portEXIT_CRITICAL(&self->allocLock_);
+  if (size != nullptr) {
+    *size = self->handoffSize_;
+  }
+  bringupLog(kTag, "handoff: %s took %u bytes from %s", self->appName_,
+             static_cast<unsigned>(self->handoffSize_), self->handoffFrom_);
+  return header + 1;
 }
 
 void ModuleApp::freeAllocations() {

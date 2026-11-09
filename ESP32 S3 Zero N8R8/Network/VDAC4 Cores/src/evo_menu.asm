@@ -242,6 +242,15 @@ Ev_Next:
         jr nz,.len
         jr Ev_Next                      ; имя длиннее 255 — не наше
 .ext:
+        ld a,(NxVersion+3)
+        cp 6
+        jr nz,.not_md
+        call Ext_IsMd                   ; ядро Mega Drive (0.17): .md .bin .gen .smd
+        jp c,Ev_Next
+        ld a,1
+        or a                            ; NZ
+        ret
+.not_md:
         ld a,b
         cp 5
         jp c,Ev_Next                    ; короче "x.nes"
@@ -265,7 +274,7 @@ Ev_Next:
         dec hl
         ld a,(hl)
         cp '.'
-        jr nz,Ev_Next
+        jp nz,Ev_Next
         or a                            ; NZ ('.')
         ret
 

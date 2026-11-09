@@ -18,6 +18,9 @@ Esc после START — не выход (0.4): загрузка идёт дал
 самой очереди PS/2.
 С 0.16 — экран на HDMI Tang (COREMENU.ELF, команды #47…#49): окна WC нет, меню, «Loading» и ошибки
 рисует экран; нет COREMENU.ELF или Tang без оверлеев — окно WC, как прежде.
+С 0.20 — страница 1 плагина (таблицы CRC16, буфер порции DMA) в окне #C000: окно переключается
+по-настоящему, и любая функция WC, кроме самой MNGC_PL и LOAD512, ставит туда свою страницу (WC
+переключает окно сам); файл с панели уходит экрану порциями DMA до 8 КБ (raw media #4D).
 Нужна сборка: "VDAC4 Cores\\build.bat".
 """
 import struct
@@ -25,6 +28,7 @@ import unittest
 
 import test_ftp_plugin_z80 as base
 import test_spi_link_z80 as spi
+from spi_link_model import LinkCore
 
 ROOT = base.ROOT
 CORES_WMF = ROOT / "VDAC4 Cores" / "build" / "vdac4" / "VDAC4COR.WMF"
@@ -37,6 +41,7 @@ CMD_SD_ON, CMD_SD_DONE, CMD_SD_PART = 0x75, 0x76, 0x77
 CMD_SCR_LIST, CMD_SCR_STATE, CMD_SCR_LEAVE = 0x47, 0x48, 0x49      # экран COREMENU.ELF
 SCR_F_TANG, SCR_F_SHOWN, SCR_F_DRAWN, SCR_F_GONE = 1, 2, 4, 8
 SCR_MENU, SCR_LOADING, SCR_ERROR, SCR_ERR_TEXT, SCR_ERR_CORE = 2, 5, 7, 6, 4
+SCR_RECEIVING = 8                        # 0.19: образ с карты Evo идёт в экран
 SD_READ, SD_WRITE = 7, 8
 NEXT_SD = 0x03010027                     # VERSION ядра Next 0.39: часы и SD1
 RDD, SDD = 0x400C, 0x400F                # внутренние входы ядра WildDOS: абсолютные сектора
@@ -49,6 +54,12 @@ def sector(lba: int) -> bytes:
     return bytes((lba * 31 + (lba >> 8) + i * 7 + (i >> 8)) & 0xFF for i in range(512))
 FN_UP, FN_DOWN, FN_ENTER, FN_WAITUP = 0x11, 0x12, 0x16, 0x2E
 FN_MNGV_PL, FN_GVMOD = 0x40, 0x42      # текст WC (A' = 0); видеорежим плагина (A')
+FN_TURBOPL, FN_LOAD512 = 0x0E, 0x30     # частота Z80; сектор открытого файла панели
+FN_MNGC_PL = 0x00                        # страница плагина (A') — в окно #C000
+WC_C000_PAGE = 0x05                      # своя страница WC в окне #C000
+WC_PAGE3 = 0x6003                        # тень страницы окна #C000
+RAW_MAX = 8192                           # порция DMA экрану (0.20)
+FN_TXTPR = base.FN_TXTPR
 frame = base.frame
 
 
@@ -70,6 +81,24 @@ class CoresEsp:
         self.scr_shown = False
         self.scr_gone = True
         self.scr_polls = 0
+        # как COREMENU.ELF: экран включается не сразу (сперва карточки ядер с карты Tang) — через
+        # scr_on_after STATE; LEAVE, пришедший до включения, его уже не включит (до нового STATE)
+        self.scr_on_after = 2
+        self.scr_ticks = 0
+        self.scr_leave = None
+        self.scr_kept_shown = False          # LEAVE 1 ответил «виден и кадр на экране»
+        # COREMENU 0.2 (плагин 0.19): приём образа #4A…#4C и handoff слою (прошивка 0.1.123)
+        self.scr_file = True
+        self.scr_file_to = None
+        self.scr_file_size = 0
+        self.scr_file_data = bytearray()
+        self.scr_file_packets = 0
+        # COREMENU 0.3 (плагин 0.20): порции DMA #4D [смещение LE32][XOR][данные] — raw media
+        self.scr_raw = True
+        self.scr_file_raws = 0
+        self.scr_file_raw_sizes: list[int] = []
+        self.scr_file_raw_bad = 0
+        self.handoff = None                  # (кому, образ): прошивка держит его до слоя
         # запросы SD1 ядра: (операция, номер, LBA, сектор записи) — по одному в ответе INPUT
         self.sd_queue = [list(r) for r in sd_requests]
         self.sd_on: list[bytes] = []          # SD_ON
@@ -114,6 +143,7 @@ class CoresEsp:
                     return frame(0xAD, b"\0core\0" + b"0.1\0")
                 self.app = "COREMENU"
                 self.scr_shown, self.scr_gone, self.scr_polls = False, True, 0
+                self.scr_ticks, self.scr_leave = 0, None
                 return frame(0xAD, b"\0coremenu\0" + b"0.1\0")
             if self.app_error:
                 return frame(0xAD, b"\xff\0" + self.app_error.encode() + b"\0")
@@ -191,28 +221,80 @@ class CoresEsp:
 
     def screen_command(self, command: int, payload: bytes) -> bytes:
         """COREMENU.ELF: экран проявляется за три STATE и уходит за три LEAVE 0."""
+        if command in (0x4A, 0x4B, 0x4C, 0x4D):
+            if not self.scr_file:             # COREMENU 0.1: команд нет
+                return frame(0xEE, b"unsupported")
+            if command == 0x4A:
+                self.scr_file_size = struct.unpack("<I", payload[:4])[0]
+                self.scr_file_to = payload[4:payload.index(0, 4)].decode()
+                self.scr_file_data = bytearray()
+                if not self.scr_raw:          # COREMENU 0.2: [1], порций нет
+                    return frame(0xCA, b"\1")
+                if self.harness is not None:  # link_media(#4D, #4D): прошивка 0.1.121+
+                    self.harness.link.core.app_media = (0x4D, 0x4D)
+                return frame(0xCA, b"\1\1")
+            if command == 0x4D:
+                offset = struct.unpack("<I", payload[:4])[0]
+                data = payload[5:]
+                xor = 0
+                for value in data:
+                    xor ^= value
+                got = len(self.scr_file_data)
+                ok = (self.scr_raw and data and xor == payload[4] and offset <= got
+                      and offset + len(data) <= self.scr_file_size)
+                if ok and offset == got:
+                    self.scr_file_data += data
+                    self.scr_file_raws += 1
+                    self.scr_file_raw_sizes.append(len(data))
+                elif ok:
+                    ok = bytes(self.scr_file_data[offset:offset + len(data)]) == data   # повтор
+                if not ok:
+                    self.scr_file_raw_bad += 1
+                return frame(0xCD, bytes([bool(ok)]) + struct.pack("<I", len(self.scr_file_data)))
+            if command == 0x4B:
+                offset = struct.unpack("<I", payload[:4])[0]
+                crc = struct.unpack("<H", payload[-2:])[0]
+                ok = offset == len(self.scr_file_data) and crc == crc16_ccitt_false(payload[:-2])
+                if ok:
+                    self.scr_file_data += payload[4:-2]
+                    self.scr_file_packets += 1
+                return frame(0xCB, bytes([ok]) + struct.pack("<I", len(self.scr_file_data)))
+            done = len(self.scr_file_data) == self.scr_file_size
+            if done:
+                self.handoff = (self.scr_file_to, bytes(self.scr_file_data))
+            return frame(0xCC, bytes([done]))
         if command == CMD_SCR_LIST:
             self.scr_lists.append(payload)
             return frame(0xC7, b"\1")
         if command == CMD_SCR_STATE:
             self.scr_states.append(payload)
+            self.scr_leave = None             # новое STATE снимает LEAVE (cmd_state: leave_mode = −1)
             if self.tang and self.scr_lists:
-                if self.scr_gone:
+                self.scr_ticks += 1
+                if self.scr_gone and self.scr_ticks >= self.scr_on_after:
                     self.scr_gone, self.scr_polls = False, 0
-                self.scr_polls += 1
-                self.scr_shown = self.scr_shown or self.scr_polls >= 3 or bool(payload[0] & 0x80)
+                if not self.scr_gone:
+                    self.scr_polls += 1
+                    self.scr_shown = self.scr_shown or self.scr_polls >= 3 or bool(payload[0] & 0x80)
             return frame(0xC8, bytes([self.screen_flags()]))
         if command == CMD_SCR_LEAVE:
             self.scr_leaves.append(payload[0])
+            self.scr_leave = payload[0]
             if payload[0] == 2:
                 flags = self.screen_flags()
                 self.app = None               # app_done: ядро ESP выгружает экран
                 return frame(0xC9, bytes([flags]))
+            if payload[0] == 1 and not self.scr_gone and not self.scr_shown:
+                self.scr_polls += 1           # проявление идёт и с LEAVE 1, только включиться не может
+                self.scr_shown = self.scr_polls >= 3
             if payload[0] == 0 and not self.scr_gone:
                 self.scr_polls -= 1
                 if self.scr_polls <= 0:
                     self.scr_gone, self.scr_shown = True, False
-            return frame(0xC9, bytes([self.screen_flags()]))
+            flags = self.screen_flags()
+            if payload[0] == 1 and flags & (SCR_F_SHOWN | SCR_F_DRAWN) == SCR_F_SHOWN | SCR_F_DRAWN:
+                self.scr_kept_shown = True
+            return frame(0xC9, bytes([flags]))
         return frame(0xEE, b"unsupported")
 
 
@@ -298,11 +380,89 @@ class AmigaEsp(CoresEsp):
         return super().__call__(command, payload)
 
 
+MD_CORE = 0x06010008                     # VERSION ядра Mega Drive 0.8 (личность 06)
+
+
+def crc16_ccitt_false(data: bytes) -> int:
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = (crc << 1 ^ 0x1021 if crc & 0x8000 else crc << 1) & 0xFFFF
+    return crc
+
+
+class FileLayerEsp(CoresEsp):
+    """Слой ядра, которому плагин отдаёт файл с панели WC (MD.ELF, AMIGA.ELF, NES.ELF): #7A — готов ли
+    [1][флаги, бит 0 — образ берёт], #77 [длина LE32], #78 [смещение LE32][данные][CRC16 LE] — ответ
+    [1][следующее смещение LE32], #79 — конец. Смещение и CRC16-CCITT-FALSE сверяются."""
+
+    def __init__(self, core="MD", cores=None, version=MD_CORE, take=True, **kwargs) -> None:
+        super().__init__(cores=cores or ((core, 907418, True), ("NEXT", 907418, True)), version=version, **kwargs)
+        self.core_name = core
+        self.layer = f"{core}.ELF"
+        self.take = take                     # MD.ELF 1.5: #7A [1] — взять образ, оставленный экраном
+        self.taken = None
+        self.file_size = None
+        self.received = bytearray()
+        self.packets = 0
+
+    def __call__(self, command: int, payload: bytes) -> bytes:
+        if command == CMD_CORE_APP and self.handoff and payload[:payload.index(0)].decode() != self.handoff[0] \
+                and payload[:payload.index(0)].decode() != "COREMENU":
+            self.handoff = None              # прошивка: запустилось другое приложение — блок прочь
+        if self.app != self.layer or command not in (0x77, 0x78, 0x79, 0x7A, 0x7B):
+            return super().__call__(command, payload)
+        self.commands.append(command)
+        if command == 0x7B:                  # NES.ELF: сохранения — размер .sav 0, шага нет
+            return frame(0xFB, b"\1" + bytes(9)) if self.core_name == "NES" else frame(0xEE, b"unsupported")
+        if command == 0x7A:
+            if not self.take:
+                return frame(0xFA, b"\1\1")   # старый слой: данных не смотрит, бита 8 нет
+            took = 0
+            if payload[:1] == b"\1" and self.handoff and self.handoff[0] == self.core_name:
+                self.taken, self.handoff, took = self.handoff[1], None, 1
+            return frame(0xFA, bytes([1, 1 | 8, took])[:3 if payload else 2])
+        if command == 0x77:
+            self.file_size = struct.unpack("<I", payload[:4])[0]
+            return frame(0xF7, b"\1")
+        if command == 0x78:
+            offset = struct.unpack("<I", payload[:4])[0]
+            data, crc = payload[4:-2], struct.unpack("<H", payload[-2:])[0]
+            if offset != len(self.received) or crc != crc16_ccitt_false(payload[:-2]):
+                return frame(0xF8, b"\0")
+            self.received += data
+            self.packets += 1
+            return frame(0xF8, b"\1" + struct.pack("<I", len(self.received)))
+        return frame(0xF9, b"\1" if len(self.received) == self.file_size else b"\0")
+
+
+PANEL_NAME = 0x6100                      # имя файла панели WC в памяти модели (BC при вызове плагина)
+
+
 class CoresHarness(spi.SpiHarness):
     """Плагин целиком: клавиши WC — по кадрам, очередь PS/2 Gluk и порты Kempston."""
 
     def __init__(self) -> None:
-        super().__init__(CORES_WMF, CORES_SYM)
+        # Очередь от Z80 — как у прошивки (spi_link.hpp, kInputRingBytes): порция DMA 8 КБ с заголовком
+        super().__init__(CORES_WMF, CORES_SYM, LinkCore(from_capacity=16384))
+        # 0.20: страницы окна #C000 — своя у WC и страницы плагина по парам заголовка WMF
+        data = CORES_WMF.read_bytes()
+        self.c000_pages: dict[int, bytes] = {WC_C000_PAGE: bytes([0xE5]) * 0x4000}
+        offset = 512
+        for index in range(6):
+            page, sectors = data[36 + 2 * index], data[37 + 2 * index]
+            if not sectors:
+                break
+            if page:
+                self.c000_pages[self.PLUGIN_PAGE + page] = data[offset:offset + sectors * 512].ljust(0x4000, b"\0")
+            offset += sectors * 512
+        self.c000: int | None = None
+        self.page1_maps = 0
+        self.map_c000(WC_C000_PAGE)
+        self.file = b""                      # файл панели WC: его читает FN_LOAD512
+        self.file_pos = 0
+        self.text_history: list[str] = []    # окно WC после каждого TXTPR
         self.keys: dict[int, int] = {}       # кадр -> клавиша WC (FN_UP/FN_DOWN/FN_ENTER)
         self.ps2: dict[int, bytes] = {}      # кадр -> байты, что встанут в очередь AVR
         self.queue = bytearray()
@@ -352,8 +512,26 @@ class CoresHarness(spi.SpiHarness):
         m.a = 0 if good else 1
         self.flags(zero=good)
 
+    def map_c000(self, page: int) -> None:
+        """Страница page — в окно #C000: уходящая сохраняется, тень #6003 и окна DMA — за ней."""
+        if self.c000 is not None:
+            self.c000_pages[self.c000] = bytes(self.memory[0xC000:0x10000])
+        self.memory[0xC000:0x10000] = self.c000_pages.get(page, bytes(0x4000))
+        self.c000 = page
+        self.memory[WC_PAGE3] = page
+        self.ports.windows = {p: b for p, b in self.ports.windows.items() if b != 0xC000}
+        self.ports.windows[page] = 0xC000
+
     def handle_api(self) -> None:
         m = self.machine
+        if m.a == FN_MNGC_PL:
+            self.calls.append(m.a)
+            self.page1_maps += 1
+            self.map_c000(self.PLUGIN_PAGE + m.alt_a)
+            self.ret()
+            return
+        if m.a != FN_LOAD512 and self.c000 != WC_C000_PAGE:
+            self.map_c000(WC_C000_PAGE)      # WC ставит окно #C000 себе сам и обратно не возвращает
         if m.a in (FN_UP, FN_DOWN, FN_ENTER):
             self.calls.append(m.a)
             self.flags(zero=self.keys.get(self.interrupts) != m.a)
@@ -386,6 +564,22 @@ class CoresHarness(spi.SpiHarness):
                 self.wc_ps2 = False
             self.flags(zero=True)
             self.ret()
+        elif m.a == FN_TURBOPL:
+            self.calls.append(m.a)
+            self.ret()
+        elif m.a == FN_LOAD512:
+            # B секторов файла панели в HL (хвост — нулями), HL — за ними; CF=0 — прочитано
+            self.calls.append(m.a)
+            count = m.bc >> 8
+            chunk = self.file[self.file_pos:self.file_pos + 512 * count].ljust(512 * count, b"\0")
+            self.memory[m.hl:m.hl + len(chunk)] = chunk
+            self.file_pos += 512 * count
+            m.hl = (m.hl + len(chunk)) & 0xFFFF
+            self.flags()
+            self.ret()
+        elif m.a == FN_TXTPR:
+            super().handle_api()
+            self.text_history.append(self.text())
         else:
             super().handle_api()
 
@@ -443,13 +637,21 @@ class CoresHarness(spi.SpiHarness):
         return "\n".join(self.screen.get(line, bytearray(b" " * 80)).decode("latin-1").rstrip()
                          for line in range(1, 20))
 
-    def start(self, esp: CoresEsp, keys=None, ps2=None, esc: int | None = None) -> None:
+    def start(self, esp: CoresEsp, keys=None, ps2=None, esc: int | None = None,
+              file_name: bytes | None = None, file: bytes = b"") -> None:
+        """file_name — плагин вызван файлом панели WC (A=0, DE:HL — длина, BC — имя), иначе — меню (A=3)."""
         esp.harness = self
         self.app = esp
         self.keys = dict(keys or {})
         self.ps2 = dict(ps2 or {})
         self.esc_after = esc
-        self.run(base.CODE, a=3)
+        if file_name is None:
+            self.run(base.CODE, a=3)
+            return
+        self.file, self.file_pos = file, 0
+        self.memory[PANEL_NAME:PANEL_NAME + len(file_name) + 1] = file_name + b"\0"
+        self.machine.de = len(file) >> 16
+        self.run(base.CODE, a=0, hl=len(file) & 0xFFFF, bc=PANEL_NAME)
 
 
 F12 = b"\x07"
@@ -462,9 +664,14 @@ class CoresPluginTest(unittest.TestCase):
 
     def test_header_names_the_plugin(self) -> None:
         data = CORES_WMF.read_bytes()
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.16")
-        self.assertEqual(data[34], 1, "одна страница")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.20")
+        self.assertEqual(data[34], 2, "две страницы: код и (0.20) таблицы с буфером порции")
+        self.assertEqual((data[36], data[38], data[39]), (0, 1, 1), "страница 1 — сектор таблиц CRC16")
         self.assertEqual(len(data) % 512, 0, "файл — целыми секторами")
+        h = CoresHarness()
+        self.assertEqual(h.symbol("Crc16Hi"), 0xC000, "таблицы — с начала страницы 1")
+        self.assertLessEqual(h.symbol("page1End"), h.symbol("RAW_BUF"))
+        self.assertEqual(h.symbol("RAW_BUF") + RAW_MAX, 0x10000, "порция — до конца окна #C000")
 
     def test_next_session(self) -> None:
         h = CoresHarness()
@@ -844,6 +1051,193 @@ class CoresPluginTest(unittest.TestCase):
         self.assertEqual(h.prwow_windows, [])
         error = esp.scr_states[-1]
         self.assertEqual((error[0], error[3], error[4:]), (SCR_ERROR, 0, b"\0"), "код «нет ядер», текст у экрана свой")
+
+    # --- файл с панели WC (0.18): экраном на HDMI Tang, как меню F10 ---
+
+    ROM = bytes((i * 37 + (i >> 9)) & 0xFF for i in range(20000))
+
+    def test_panel_md_file_uses_screen(self) -> None:
+        h = CoresHarness()
+        esp = FileLayerEsp(screen=True, cores=(("NEXT", 907418, True), ("MD", 907418, True)))
+        esp.scr_on_after = 8                  # экран включается после карточек — как на плате
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM, ps2={600: F12})
+        self.assertEqual(h.prwow_windows, [], "окна WC нет: всё — экраном")
+        self.assertTrue(esp.scr_kept_shown, "«Loading» был на экране целиком до LEAVE 1 (09.11: экрана не было вовсе)")
+        self.assertEqual(esp.app_cores, ["COREMENU", "MD"])
+        self.assertEqual(len(esp.scr_lists), 1, "экрану — список ядер (карточка MD)")
+        # 0.19: образ принимает экран (полоса хода), слой его берёт
+        self.assertEqual(esp.scr_file_to, "MD")
+        # 0.20: порциями DMA по 8 КБ (raw media), не пакетами по 512 — «как с магнитофона»
+        self.assertEqual(esp.scr_file_packets, 0)
+        self.assertEqual(esp.scr_file_raw_sizes, [RAW_MAX, RAW_MAX, len(self.ROM) - 2 * RAW_MAX])
+        self.assertEqual(esp.scr_file_raw_bad, 0)
+        self.assertIn((0x82, RAW_MAX), h.ports.dma_runs, "порция — одним DMA «ОЗУ → SPI»")
+        self.assertIn((0x82, 8 * 512), h.ports.dma_runs, "хвост 3616 байтов — 8 секторов")
+        self.assertEqual(h.ports.dma.get(0x1C), h.PLUGIN_PAGE + 1, "DMA — со страницы 1 плагина")
+        receiving = [p for p in esp.scr_states if p[0] == SCR_RECEIVING]
+        self.assertTrue(receiving and receiving[0][1] == 1 and receiving[0][4:].startswith(b"Aladdin (Europe).gen\0"),
+                        "STATE «приём» — с MD и именем файла")
+        self.assertEqual(esp.scr_states[-1][:2], bytes([SCR_LOADING, 1]), "перед запуском — «Loading»")
+        self.assertLess(last(esp.commands, 0x4C), esp.commands.index(CMD_SCR_LEAVE), "сначала образ, потом LEAVE 1")
+        self.assertEqual(set(esp.scr_leaves), {1}, "картинка остаётся на HDMI")
+        self.assertLess(last(esp.commands, CMD_SCR_LEAVE), last(esp.commands, CMD_CORE_APP))
+        self.assertEqual(esp.taken, self.ROM, "слой взял образ у экрана байт в байт")
+        self.assertFalse({0x77, 0x78, 0x79} & set(esp.commands), "второй раз образ не передаётся")
+        self.assertNotIn(0x7B, esp.commands, "у MD шага .sav нет")
+        self.assertEqual(esp.core, "MD")
+        self.assertTrue(esp.inputs, "ядро работало")
+
+    def test_panel_md_old_screen_sends_to_layer(self) -> None:
+        """COREMENU 0.1 (нет #4A) — образ слою, как в 0.18, под «Loading»."""
+        h = CoresHarness()
+        esp = FileLayerEsp(screen=True)
+        esp.scr_file = False
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM, ps2={600: F12})
+        self.assertEqual(h.prwow_windows, [])
+        self.assertNotIn(SCR_RECEIVING, [p[0] for p in esp.scr_states])
+        self.assertEqual(bytes(esp.received), self.ROM, "образ — слою пакетами #78")
+        self.assertIsNone(esp.taken)
+        self.assertEqual(esp.core, "MD")
+
+    def test_panel_md_old_layer_asks_for_update(self) -> None:
+        """MD.ELF до 1.5 не берёт образ у экрана — ошибка экраном с подсказкой (файл WC уже дочитан)."""
+        h = CoresHarness()
+        esp = FileLayerEsp(screen=True, take=False)
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM[:4096], esc=200)
+        self.assertEqual(h.prwow_windows, [], "ошибка — экраном")
+        error = esp.scr_states[-1]
+        self.assertEqual(error[0] & 0x7F, SCR_ERROR)
+        self.assertTrue(error[4:].startswith(b"ERROR: update the core's ELF in CORES"), error)
+        self.assertIsNone(esp.core, "ядро не запускали")
+
+    def test_panel_nes_file_uses_screen_and_keeps_saves(self) -> None:
+        """0.20: .nes — тоже экраном (NES.ELF 0.10 берёт картридж) и шаг сохранений #7B после взятия.
+        8195 байт: вторая порция — 3 байта (хвост XOR без групп по 8)."""
+        rom = self.ROM[:RAW_MAX + 3]
+        h = CoresHarness()
+        esp = FileLayerEsp(core="NES", version=NES_CORE, screen=True)
+        esp.scr_on_after = 8
+        h.start(esp, file_name=b"Contra.nes", file=rom, ps2={600: F12})
+        self.assertEqual(h.prwow_windows, [], "окна WC нет")
+        self.assertEqual(esp.scr_file_to, "NES")
+        self.assertEqual(esp.scr_file_raw_sizes, [RAW_MAX, 3])
+        self.assertEqual(esp.taken, rom, "слой взял картридж у экрана")
+        self.assertFalse({0x77, 0x78, 0x79} & set(esp.commands), "второй раз картридж не передаётся")
+        self.assertLess(last(esp.commands, 0x7A), esp.commands.index(0x7B), "сохранения — после взятия")
+        self.assertEqual(esp.core, "NES")
+        self.assertTrue(esp.inputs, "ядро работало")
+
+    def test_panel_adf_uses_screen(self) -> None:
+        """0.20: .adf — экраном (AMIGA.ELF 0.27 берёт дискету); у дискеты шага .sav нет."""
+        adf = bytes((i * 13 + (i >> 11)) & 0xFF for i in range(901120))
+        h = CoresHarness()
+        esp = FileLayerEsp(core="AMIGA", version=AMIGA_CORE, screen=True)
+        esp.scr_on_after = 8
+        h.start(esp, file_name=b"Workbench.adf", file=adf, ps2={600: F12})
+        self.assertEqual(esp.scr_file_to, "AMIGA")
+        self.assertEqual(esp.scr_file_raws, 110, "880 КБ — 110 порций по 8 КБ")
+        self.assertEqual(esp.taken, adf)
+        self.assertNotIn(0x7B, esp.commands)
+        self.assertEqual(esp.core, "AMIGA")
+
+    def test_panel_file_old_screen_without_raw_uses_packets(self) -> None:
+        """COREMENU 0.2 (ответ BEGIN без байта DMA) — экрану пакетами по 512, как в 0.19."""
+        h = CoresHarness()
+        esp = FileLayerEsp(screen=True)
+        esp.scr_raw = False
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM, ps2={600: F12})
+        self.assertEqual(esp.scr_file_raws, 0)
+        self.assertEqual(esp.scr_file_packets, (len(self.ROM) + 511) // 512)
+        self.assertEqual(esp.taken, self.ROM)
+        self.assertEqual(esp.core, "MD")
+
+    def test_panel_file_firmware_without_put_uses_packets(self) -> None:
+        """Прошивка не принимает блоки от Z80 (нет LINK_S_PUT_CAPABLE) — пакетами."""
+        h = CoresHarness()
+        h.link.put = False
+        esp = FileLayerEsp(screen=True)
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM, ps2={600: F12})
+        self.assertEqual(esp.scr_file_raws, 0)
+        self.assertEqual(esp.scr_file_packets, (len(self.ROM) + 511) // 512)
+        self.assertEqual(esp.taken, self.ROM)
+
+    def test_panel_file_damaged_portion_is_sent_again(self) -> None:
+        """Порция пришла с ошибкой (XOR не сошёлся) — та же порция ещё раз, образ байт в байт."""
+        h = CoresHarness()
+        h.link.corrupt_puts = 1
+        esp = FileLayerEsp(screen=True)
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM, ps2={600: F12})
+        self.assertEqual(esp.scr_file_raw_bad, 1)
+        self.assertEqual(esp.scr_file_raw_sizes, [RAW_MAX, RAW_MAX, len(self.ROM) - 2 * RAW_MAX])
+        self.assertEqual(esp.taken, self.ROM)
+        self.assertEqual(esp.core, "MD")
+
+    def test_panel_file_screen_never_on_falls_back_to_window(self) -> None:
+        """Экран так и не включился за 5 с (карточки не прочитались) — окно WC, а не пустой HDMI."""
+        h = CoresHarness()
+        esp = FileLayerEsp(screen=True)
+        esp.scr_on_after = 10 ** 6
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM[:2048], ps2={900: F12})
+        self.assertEqual(len(h.prwow_windows), 1, "окно WC")
+        self.assertEqual(esp.scr_leaves[-1:], [2], "экран выгружен до окна")
+        self.assertNotIn(1, esp.scr_leaves, "LEAVE 1 не слали: картинки нет")
+        self.assertEqual(bytes(esp.received), self.ROM[:2048])
+        self.assertIn("Mega Drive ROM from the Evo SD", "\n".join(h.text_history))
+
+    def test_panel_file_without_screen_uses_window_with_core_title(self) -> None:
+        h = CoresHarness()
+        esp = FileLayerEsp(screen=False)
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM, ps2={600: F12})
+        self.assertEqual(len(h.prwow_windows), 1, "COREMENU.ELF нет — окно WC")
+        self.assertEqual(esp.app_cores, ["COREMENU", "MD"])
+        self.assertEqual(bytes(esp.received), self.ROM)
+        texts = "\n".join(h.text_history)
+        self.assertIn("Mega Drive ROM from the Evo SD", texts)
+        self.assertNotIn("NES cartridge", texts)
+        self.assertIn("Reading from the Evo SD...", texts)
+
+    def test_panel_adf_title_in_window(self) -> None:
+        h = CoresHarness()
+        esp = FileLayerEsp(core="AMIGA", version=AMIGA_CORE, screen=False)
+        h.start(esp, file_name=b"Workbench.adf", file=self.ROM[:4096], ps2={400: F12})
+        self.assertEqual(bytes(esp.received), self.ROM[:4096])
+        texts = "\n".join(h.text_history)
+        self.assertIn("Amiga disk from the Evo SD", texts)
+        self.assertNotIn("NES cartridge", texts)
+
+    def test_crc16_table_matches_ccitt_false(self) -> None:
+        """0.17: Nes_Crc16 таблицей — тот же CRC16-CCITT-FALSE, что считает ESP; быстрее побитного."""
+        import random
+        rnd = random.Random(3)
+        h = CoresHarness()
+        buffer = h.symbol("NesPacket")       # 0.20: данные — в странице 0, таблицы — в странице 1
+        for size in (1, 2, 7, 516):
+            data = bytes(rnd.randrange(256) for _ in range(size))
+            h.memory[buffer:buffer + size] = data
+            h.map_c000(WC_C000_PAGE)         # окно #C000 занял WC: Nes_Crc16 подключает страницу 1 сам
+            crc = 0xFFFF
+            for byte in data:
+                crc ^= byte << 8
+                for _ in range(8):
+                    crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+            before = h.ticks
+            h.call("Nes_Crc16", hl=buffer, bc=size)
+            self.assertEqual(h.machine.de, crc, f"{size} байт")
+            self.assertEqual(h.c000, h.PLUGIN_PAGE + 1)
+            if size == 516:
+                self.assertLess((h.ticks - before) / size, 120, "тактов на байт")
+
+    def test_md_extensions(self) -> None:
+        """0.17: образ Mega Drive — .md (от 4 знаков), .bin .gen .smd (от 5), без учёта регистра."""
+        h = CoresHarness()
+        cases = {b"x.md": True, b"SONIC.MD": True, b"a.bin": True, b"Game.Gen": True, b"z.SMD": True,
+                 b".md": False, b"x.mdx": False, b"x.nes": False, b"x.adf": False, b"xmd": False,
+                 b"a.bi": False, b"ab.gem": False, b"sonic.smd.zip": False, b"x_md": False}
+        for name, ok in cases.items():
+            h.memory[0xC000:0xC000 + len(name) + 1] = name + b"\0"
+            h.machine.b = len(name)
+            h.call("Ext_IsMd", hl=0xC000 + len(name), bc=len(name) << 8)
+            self.assertEqual(not h.carry, ok, name)
 
     def test_no_esp(self) -> None:
         h = CoresHarness()
