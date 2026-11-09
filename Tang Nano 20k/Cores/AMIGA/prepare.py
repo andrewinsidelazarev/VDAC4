@@ -3,7 +3,9 @@
 Run inside AMIGA, with upstream/ present. Never modifies upstream or another core.
 """
 from pathlib import Path
-import hashlib, json, re, shutil, subprocess
+import hashlib, json, os, re, shutil, subprocess
+from integration.constraints import tmds_drive4
+from integration.sdram_startup import winbond_startup
 
 ROOT = Path(__file__).resolve().parent
 UP = ROOT / 'upstream'
@@ -15,7 +17,8 @@ if (ROOT / 'upstream.git').is_dir():
     if actual != PIN:
         raise SystemExit(f'Expected NanoMig {PIN}, found {actual}')
 FP.mkdir(exist_ok=True)
-nes = ROOT.parent / 'NES'
+VDAC4=Path(os.environ.get('VDAC4_ROOT',str(ROOT.parents[2])))
+nes=VDAC4/'Tang Nano 20k/Cores/NES'
 for name in ('next_qspi.sv', 'cp_spi.sv', 'next_cp.sv', 'next_evo_reset.sv', 'fb_sdspi.sv', 'nes_osd_font.sv'):
     shutil.copyfile(nes / 'fpga' / name, FP / name)
 # Окно меню: шрифт и текстовая память как у NES, но своя сетка под кадр AGA.
@@ -23,6 +26,7 @@ shutil.copyfile(ROOT/'integration/amiga_osd.sv', FP/'nes_osd.sv')
 shutil.copyfile(nes / 'fpga/nesVdac4.cst', FP / 'amigaVdac4.cst')
 # Match NanoMig's Tang Nano 20K button wiring: S1=88, S2=87, active high.
 cst=(FP/'amigaVdac4.cst').read_text(encoding='utf-8')
+cst=tmds_drive4(cst)
 for pin in ('btn[0]','btn[1]'):
     old=f'IO_PORT "{pin}" IO_TYPE=LVCMOS33 PULL_MODE=NONE;'
     assert cst.count(old)==1
@@ -94,8 +98,8 @@ wire [31:0] cpu_trace [0:3];
 wire [8:0] trace_index; wire [31:0] trace_start;
 wire osd_wr, osd_show, floppy_wrprot; wire [8:0] osd_addr; wire [31:0] osd_data, osd_bar;
 wire [5:0] osd_sel; wire [29:0] osd_band, osd_rule; wire [11:0] rtc;
-assign debug_words[0]=32'h414d4406;
-assign debug_words[1]={14'b0,warm_reset,btn[1:0],kbd_reset,soft_reset,nanomig_reset,
+assign debug_words[0]=32'h414d4407;
+assign debug_words[1]={1'b0,cpu_debug[0][12:0],warm_reset,btn[1:0],kbd_reset,soft_reset,nanomig_reset,
                       rom_done,sdram_ready,pll_lock,rst_28m,1'b0};
 `ifdef AMIGA_DEBUG
 reg [15:0] debug_hs_count, debug_vs_count;
@@ -123,7 +127,8 @@ assign debug_words[31]={8'b0,red,green,blue};
 for (genvar t=0;t<4;t=t+1) assign debug_words[32+t]=cpu_trace[t];
 `else
 // Обычная сборка: счётчики и трасса занимают логику и блочную память, включаются define AMIGA_DEBUG.
-for (genvar d=2;d<36;d=d+1) assign debug_words[d]=0;
+assign debug_words[2]=cpu_debug[2]; // live CPU address, no trace RAM
+for (genvar d=3;d<36;d=d+1) assign debug_words[d]=0;
 `endif
 amiga_link link(.clk(clk_28m),.rst_n(rst_28m_n),.sck(link_sck),.cs_n(link_cs_n),
     .io_in(link_io),.io_out(link_out),.io_oe(link_oe),.clk7_en(clk7_en),.clk7n_en(clk7n_en),
@@ -428,7 +433,7 @@ sdram=sdram.replace(old,'''    always @(negedge clk) begin
         STATE_CAS: begin
           case (sdram_port)
             PORT_1: if (ram_we) sd_dqm <= ram_ds;''')
-(FP/'sdram.sv').write_text('// VDAC4 debug5: контроллер по спаду clk, DQ по фронту; такт SDRAM на 90 градусов после рабочего фронта.\n'+sdram,encoding='utf-8')
+(FP/'sdram.sv').write_text('// VDAC4 debug5: контроллер по спаду clk, DQ по фронту; такт SDRAM на 90 градусов после рабочего фронта.\n'+winbond_startup(sdram),encoding='utf-8')
 
 # Часы RTC: счётчик секунды рассчитан на 28,375 МГц, здесь такт 28,5 МГц (иначе +6 минут в сутки).
 minimig=(UP/'src/minimig-aga/minimig.v').read_text(encoding='utf-8')
@@ -569,6 +574,30 @@ assert n==1
 old="sdc_addr_toggle <= !last_sdc_addr &&  sdc_byte_addr[0];"
 assert nanomig.count(old)==1
 nanomig=nanomig.replace(old,"sdc_addr_toggle <= sdc_busy_ide && !last_sdc_addr &&  sdc_byte_addr[0];")
+# Второй диск IDE (карта Evo, ядро 0.11). При чтении нескольких секторов upstream переходит к следующему по геометрии диска 0,
+# запись — по геометрии своего диска. У диска 1 геометрия своя: после последнего сектора дорожки чтение ушло бы не в тот сектор.
+for old,new in (("if ( ide_sector < sectors[0] )","if ( ide_sector < sectors[ide_drv] )"),
+                ("if( ide_head < heads[0]-1 )","if( ide_head < heads[ide_drv]-1 )")):
+    assert nanomig.count(old)==1
+    nanomig=nanomig.replace(old,new)
+# READ SECTORS (2x) на несколько секторов: ide.v после каждого сектора просит продолжения, а upstream продолжает чтением только
+# READ MULTIPLE (c4), всё остальное — как запись: ядро брало из буфера IDE «сектор» и писало его в образ. Kickstart читает
+# через c4, но любой драйвер с 2x и счётом больше 1 портил бы диск (tests/run_ide_slave.py). Теперь 2x — чтение, сектор на DRQ.
+old="""\t      if ( ide_cmd == 8'hc4 ) begin
+\t\t // read multiple command: jump right to next read
+\t\t ide_exec <= IDE_EXEC_READ_SECTOR;
+\t\t ide_exec_cnt <= 9'd0;
+
+\t\t ide_busy <= 1'b1;\t\x20\x20\x20\x20\x20\x20
+
+\t\t // check how many sectors can be sent in this
+\t\t // transfer
+\t\t if ( ide_sector_cnt < ide_spb ) begin"""
+assert nanomig.count(old)==1
+nanomig=nanomig.replace(old,old.replace("if ( ide_cmd == 8'hc4 ) begin","if ( ide_cmd == 8'hc4 || ide_cmd[7:4] == 4'h2 ) begin")
+    .replace("\t\t if ( ide_sector_cnt < ide_spb ) begin",
+             "\t\t if ( ide_cmd[7:4] == 4'h2 ) begin\n\t\t    ide_sdc_cnt <= 8'd1;\n\t\t    ide_io_size <= 8'd1;\n"
+             "\t\t end else if ( ide_sector_cnt < ide_spb ) begin"))
 (FP/'nanomig.v').write_text('// VDAC4: RGB888 outputs and blanking; generated by prepare.py.\n'+nanomig,encoding='utf-8')
 
 cpu=(UP/'src/minimig-aga/cpu_wrapper.v').read_text(encoding='utf-8')
@@ -649,6 +678,8 @@ tcl += ['set_option -synthesis_tool gowinsynthesis','set_option -top_module amig
         'set_option -multi_boot 1','set_option -timing_driven 1',
         'set_option -place_option 0','set_option -route_option 2',
         'set_option -gen_text_timing_rpt 1','run all']
+assert tcl[-1]=='run all'
+tcl[-1:-1]=(ROOT/'integration/verify_tmds.tcl').read_text(encoding='utf-8').splitlines()
 (ROOT/'build.tcl').write_text('\n'.join(tcl)+'\n')
 (ROOT/'upstream.lock.json').write_text(json.dumps({'url':'https://github.com/MiSTle-Dev/NanoMig',
     'commit':PIN,'board':'Tang Nano 20K / VDAC4','target':'68020, AGA, 2 MiB chip + 4 MiB fast',
@@ -658,7 +689,8 @@ esp=ROOT/'esp'
 (esp/'tools').mkdir(exist_ok=True)
 for name in ('ps2_hid.c','ps2_hid.h'):
     shutil.copyfile(nes/'esp/main'/name,esp/'main'/name)
-shutil.copyfile(ROOT.parents[2]/'ESP32 S3 Zero N8R8/Firmware/modules/sdk/include/zm_app.h',esp/'main/zm_app.h')
+shutil.copyfile(VDAC4/'ESP32 S3 Zero N8R8/Firmware/modules/sdk/include/zm_app.h',esp/'main/zm_app.h')
+shutil.copyfile(VDAC4/'ESP32 S3 Zero N8R8/Firmware/modules/sdk/include/zm_level.h',esp/'main/zm_level.h')
 for name in ('CMakeLists.txt','sdkconfig.defaults','tools/build.ps1','main/CMakeLists.txt'):
     text=(nes/'esp'/name).read_text(encoding='utf-8')
     text=text.replace('nes_vdac4','amiga_vdac4').replace('NES.ELF','AMIGA.ELF').replace('NES.','AMIGA.')
@@ -669,3 +701,6 @@ for name in ('CMakeLists.txt','sdkconfig.defaults','tools/build.ps1','main/CMake
         text='# Без ivopts: литерал «адрес минус смещение» загрузчик ESP переводит неверно (см. tests/check_elf_pointers.py).\n'+text.replace('-O2)','-O2 -fno-ivopts)')
     (esp/name).write_text(text,encoding='utf-8')
 print('Prepared VDAC4 A1200 wrapper; no device access.')
+
+# RGB888 framebuffer and standard video output (local VDAC4 integration).
+exec((ROOT/'integration/prepare_video.py').read_text(encoding='utf-8'), {'ROOT':ROOT})

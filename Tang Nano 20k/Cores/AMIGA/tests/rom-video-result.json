@@ -1,0 +1,37 @@
+{
+  "passed": true,
+  "result": "Loaded 0 KiB, video writes 0 reads 0 fields 0\nLoaded 64 KiB, video writes 107019 reads 18204 fields 2\nLoaded 128 KiB, video writes 213072 reads 84747 fields 5\nLoaded 192 KiB, video writes 319125 reads 151290 fields 8\nLoaded 256 KiB, video writes 428628 reads 218571 fields 10\nLoaded 320 KiB, video writes 534681 reads 285114 fields 13\nLoaded 384 KiB, video writes 640734 reads 351657 fields 16\nLoaded 448 KiB, video writes 750237 reads 418938 fields 18\nStored ROM: 0/131072 wrong words, 262144 halfwords; video 855825 write 485235 read bursts, 21 fields; QSPI period 1140 phase 0\nPASS full 512 KiB QSPI ROM load under concurrent real RGB888 DMA with representative IO delays\n",
+  "hardware": false,
+  "electrical_timing": false,
+  "io_paths": {
+    "clock_ps": 4971,
+    "write_ps": 5043,
+    "command_ps": 5043,
+    "read_input_ps": 1853,
+    "read_access_ps": 6000,
+    "sdf_sha256": "bec4173bce49a237197c5684f18562f220b1af0d868f403271d9641691ab7265",
+    "scope": "Representative typ pad paths; SDRAM tAC=6 ns assumption; full write corners checked separately from SDF"
+  },
+  "qspi_period_ticks": 1140,
+  "qspi_phase_ticks": 0,
+  "source_sha256": {
+    "fpga/amiga_link.sv": "9e3c00620f47dca3dd4ee88a550643dba9bd2ae84a0452c61de7823e2deaa65f",
+    "fpga/amiga_disk.sv": "17341af72d0ed295eefb52232532f0dab42502b204f545eed435eb87657d27bd",
+    "fpga/next_qspi.sv": "b35652a1d94791cf4bab893e4b2c32b06d71a28f46ff555d7805355992c938fd",
+    "fpga/fb_sdspi.sv": "0e88acadae5293981c81a84518f0a95d0c6be50e65652d75d1589687b1c7cc73",
+    "fpga/sdram.sv": "4467e0b794af020bd49d6a4db0d1849b76e76b6678eb82a307ecacfa6969334a",
+    "fpga/amiga_video.sv": "9c4a4f63ab2dffec719c474a4e2b6d91b7435872901d5d98e26e58c3e3448dac",
+    "fpga/amiga_video_capture.sv": "aceaa979af037f3b6c1897d592bc244cb9b0dcaa19d1cb8650bf578dfdd39e6d",
+    "fpga/amiga_video_geometry.sv": "be6aba46f7e55041521636a700a3fbf6d300f32d51dc0f3bb67a71a3015efb86",
+    "fpga/amiga_video_cache.sv": "a1eb15b1242918fc6662243b84a2b643bea3551e2687b5313e69a443959b9851",
+    "fpga/amiga_video_dma.sv": "51f8364ec674fc432286cb07112aa5d0652d57605f086c79127d611e1e181999",
+    "fpga/nes_osd.sv": "572bf257d776f9d07213e302122f20f9a94274669e1ebd0557eab652e54edc7e",
+    "fpga/nes_osd_font.sv": "2e916d1c12b144e7310a2f9fe6e3fb39890b359bfcff1cd24fcc8ae1f2e5e4dd",
+    "fpga/hdmi_tx.sv": "6faf1b85a99991f6f5ce37137fc941ba292dd5319f06f679f6f7e8516b115577",
+    "fpga/tmds_encoder.sv": "191544375f36f0f217411e4af22bb6b0a4a21b53efe928ac97c4444b97264748",
+    "fpga/amiga_vdac4.sv": "6017dd50fe31959647e9f6a14d9c756ce9432d01dfcb16bf14c5fb85373976c9",
+    "tests/link_test.cpp": "0a621e80e9e2291a00a6312d9cc52b566af2e7995e50a3d19882e5997fcdb099",
+    "tests/run_rom_video.py": "489d629d24833af6865e93cee0d6748989c06a65da5fd9570384dba0219c3cee"
+  },
+  "rom_sha256": "8c8a0cf04f91b88eaf0c4f1126041987067e2286a8ee590bdbae447a8000c5ee"
+}

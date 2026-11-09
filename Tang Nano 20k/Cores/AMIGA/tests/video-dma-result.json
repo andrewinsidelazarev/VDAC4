@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "result": "phase 270\nPASS 1024 simultaneous CPU/video transactions with active chipset DMA\nPASS phase 270: CPU 2048 writes/2048 burst reads, concurrent chipset 10239 writes/6825 burst reads, 525 refresh requests; no mismatches\nVIDEO 2048 writes/2048 reads of 128-bit bursts, masks and non-video neighbours preserved\n",
+  "hardware": false,
+  "electrical_timing": false,
+  "source_sha256": {
+    "fpga/sdram.sv": "58a4b1c2db9b8f55c90cb90e23d1bf69af255fffba557880798285c4bb6f94fa",
+    "tests/sdram_burst_model.v": "220e01743ffd930c1c9e32457d258160ec7560807afe41acbd4bebfc358e8fb1",
+    "tests/run_video_dma.py": "eea1aef965b19398344595d6096499a8cdf57dfaaeb92dee1e09e125d247ba32",
+    "tests/video_dma_test.cpp": "37b3f42a5af6dda3b9d9e05ac97fb3c4f85744b3035b99499fdb0535be1b8868"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "passed": false,
+  "cases": [],
+  "failures": [
+    {
+      "case": [
+        200,
+        0,
+        0,
+        1
+      ],
+      "error": "pixel 160,0 got 6C2913 expected 28136E info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 161,0 got 6C2913 expected 28136E info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 162,0 got 000013 expected 29136F info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 163,0 got 6A0000 expected 2A136C info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 164,0 got 6A0000 expected 2A136C info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 165,0 got 6B2C13 expected 2B136D info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 166,0 got 682D13 expected 2C136A info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 167,0 got 682D13 expected 2C136A info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 168,0 got 692E13 expected 2D136B info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 169,0 got 762F13 expected 2E1368 info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 170,0 got 762F13 expected 2E1368 info 20A026A0190 geom 40,38 640,400 diag 00090000\npixel 171,0 got 773013 expected 2F1369 info 20A026A0190 geom 40,38 640,400 diag 00090000\nsource 200 lace 0 mode 0: 1401600 pixels, 1 frames, 1051200 bad, diagnostic 00090000 info A026A0190 geometry 40,38 640x400\ntraffic 0, misses in checked interval 0, chip data errors 0, CPU chip cycles held 0\nSDRAM bursts in checked interval: video read 19278 write 39669 refresh 3886\nTMDS 1401600 pixels, 0 bad; CPU 0 chipset 0 reads, 1 fields published in checked interval\n"
+    }
+  ],
+  "hardware": false,
+  "electrical_timing": false,
+  "scope": "Actual capture/DMA/cache/RGB pixel path; behavioural SDRAM; parallel RGB and decoded TMDS; synthetic CPU/chipset traffic on marked cases",
+  "source_sha256": {
+    "fpga/sdram.sv": "7938d8a8f87772ad58bc5e8a76476c3413de129cfdfd77b2d657f599c0843018",
+    "fpga/amiga_video.sv": "e62080aa05e203b1ed9fd9ec7a2cb16153a85026472380445ace1d15348eed43",
+    "fpga/amiga_video_capture.sv": "f9539ce5ab1c02562f0d684b12cb58862f01725905c21533b47d31b58dd694c0",
+    "fpga/amiga_video_geometry.sv": "be6aba46f7e55041521636a700a3fbf6d300f32d51dc0f3bb67a71a3015efb86",
+    "fpga/amiga_video_cache.sv": "080c486517872fed67a6fb17cdac6d44dadebfb945f278793c3a791b8164774b",
+    "fpga/amiga_video_dma.sv": "b10c27923a980efebdf6de42bc8c39cb2f7e9da767773859fc6a8ce085e81fc1",
+    "fpga/nes_osd.sv": "572bf257d776f9d07213e302122f20f9a94274669e1ebd0557eab652e54edc7e",
+    "fpga/nes_osd_font.sv": "2e916d1c12b144e7310a2f9fe6e3fb39890b359bfcff1cd24fcc8ae1f2e5e4dd",
+    "fpga/hdmi_tx.sv": "6faf1b85a99991f6f5ce37137fc941ba292dd5319f06f679f6f7e8516b115577",
+    "fpga/tmds_encoder.sv": "191544375f36f0f217411e4af22bb6b0a4a21b53efe928ac97c4444b97264748",
+    "tests/sdram_burst_model.v": "220e01743ffd930c1c9e32457d258160ec7560807afe41acbd4bebfc358e8fb1",
+    "tests/video_system_top.sv": "d2be1ed41ac519edeaf74f7030c4bbcfbca580ce27828d527ad40014745c9129",
+    "tests/video_system_test.cpp": "3659531906ea18bdca96242fbdcfd247eedd135160f6e0e8e517d9fb169639ba",
+    "tests/run_video_system.py": "84b7187128e88e24853812b30b711b397626b9d5ca2b2fefec61d09b3925a253"
+  }
+}

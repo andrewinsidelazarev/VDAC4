@@ -290,7 +290,9 @@ always @* begin
 		fastchip_lw  = 0;
 `endif
 `else
-		cpu_addr     = cpu_addr_p;
+		// 8 ноября 2026 (0.13.3): в режиме совместимости (cpucfg 00, 68000) — адрес 24 бита, как у A500: старший
+		// байт не подключён, старый код хранит в нём флаги указателей.
+		cpu_addr     = cpucfg[1] ? cpu_addr_p : { 8'h00, cpu_addr_p[23:0] };
 `ifdef FASTCHIP_DEPRECATED
 		fastchip_sel = cpu_req & !cpu_addr_p[31:24];
 		fastchip_lw  = longword;
@@ -413,13 +415,23 @@ TG68KdotC_Kernel
 `ifndef VERILATOR
 // verilator runs the verilog translated variant which doesn't support configuration but
 // is hard coded for full configurability (all configs set to 2)
+// 8 ноября 2026 (VDAC4): процессор всегда 68020 (cpu_config = 2'b11, меню выбора CPU оригинала нет).
+// Режимы «2 = переключаемо по CPU» заменены на «1 = включено» — поведение 68020 то же,
+// без логики выбора 68000/68010: ПЛИС заполнена, место нужно видео.
+// 8 ноября 2026 (0.13.3): SR_Read и VBR_Stackframe снова переключаемые по CPU(0) — режим совместимости
+// (cpu_config 2'b00, amiga_vdac4.sv): кадры исключений 68000, MOVE SR в режиме пользователя, MOVEC — неверная
+// инструкция (по ней Exec и определяет 68000 и строит кадры 68000). Именно 00, а не 10: при CPU(1)=1 MOVEC
+// разрешён — Exec решил бы, что процессор 68010+, и ждал бы слова формата в кадрах, которых процессор не даёт;
+// у TRAPV/CHK/деления на ноль при CPU(1)=1 ещё и кадр 68020 (trap00). Генерики extAddr/MUL/DIV/BitField = 1:
+// расширения 68020 декодируются и в 68000 — старый код их не использует.
 #(
 	.SR_Read(2),        // 0=>user,   1=>privileged,    2=>switchable with CPU(0)
 	.VBR_Stackframe(2), // 0=>no,     1=>yes/extended,  2=>switchable with CPU(0)
-	.extAddr_Mode(2),   // 0=>no,     1=>yes,           2=>switchable with CPU(1)
-	.MUL_Mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
-	.DIV_Mode(2),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
-	.BitField(2),       // 0=>no,     1=>yes,           2=>switchable with CPU(1)
+	.extAddr_Mode(1),   // 0=>no,     1=>yes,           2=>switchable with CPU(1)
+	.MUL_Mode(1),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no MUL,
+	.DIV_Mode(1),       // 0=>16Bit,  1=>32Bit,         2=>switchable with CPU(1),  3=>no DIV,
+	.BitField(1),       // 0=>no,     1=>yes,           2=>switchable with CPU(1)
+	.BarrelShifter(0), // 8.11.2026: сдвиги по такту на бит (как 68000) — ПЛИС заполнена
 	.MUL_Hardware(1)    // 0=>no,  	  1=>yes,
 )
 `endif

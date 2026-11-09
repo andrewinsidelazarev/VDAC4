@@ -162,7 +162,7 @@ for name in ('README.md','NOTICE.txt','COPYING','upstream.lock.json'):
 for source,target in copies:
     target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
     if sha(source)!=sha(target): raise SystemExit('Staging copy verification failed')
-manifest={'version':args.version,'link_version':'0x0501000A','video_format':'RGB888','upstream':pin,
+manifest={'version':args.version,'link_version':'0x0501000B','video_format':'RGB888','upstream':pin,
     'created_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
     'hardware_tested':False,'uploaded':False,'builds':records,
     'tests':test,'video_tests':video,'rom':{'bytes':len(data),'md5':hashlib.md5(data).hexdigest(),

@@ -18,7 +18,7 @@ def run(cmd):
     (root/'tests/debug.log').write_text('\n'.join(logs),encoding='utf-8')
     if p.returncode: raise RuntimeError(output[-6000:])
     return output
-run([tool/'bin/verilator_bin.exe','--cc','--Wno-fatal','--top-module','amiga_debug','--Mdir','obj',root/'fpga/amiga_debug.sv'])
+run([tool/'bin/verilator_bin.exe','--cc','-DAMIGA_DEBUG','--Wno-fatal','--top-module','amiga_debug','--Mdir','obj',root/'fpga/amiga_debug.sv'])
 inc=tool/'share/verilator/include'
 run([vc/'bin/Hostx64/x64/cl.exe','/nologo','/EHsc','/std:c++20','/utf-8','/O2','/MD','/DVL_TIME_CONTEXT',
      '/I'+str(inc),'/I'+str(inc/'vltstd'),'/Iobj',root/'tests/debug_test.cpp',*list((stage/'obj').glob('*.cpp')),

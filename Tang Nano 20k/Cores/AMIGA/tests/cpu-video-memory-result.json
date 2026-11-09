@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "hardware": false,
+  "electrical_timing": false,
+  "result": "Maximum CPU wait: 19 SDRAM clocks\nConcurrent video bursts: 10923\nPASS phase 270: 8192 CPU writes and 8192 burst reads: four banks, both DQ halves, all byte masks, walking bits and random data\n",
+  "saturated_video": false,
+  "clock_phase_degrees": 270,
+  "io_paths_ps": {
+    "clock": 4971,
+    "write": 5043,
+    "read": 1853,
+    "tAC": 6000
+  },
+  "sdf_sha256": "bec4173bce49a237197c5684f18562f220b1af0d868f403271d9641691ab7265",
+  "source_sha256": {
+    "fpga/sdram.sv": "58a4b1c2db9b8f55c90cb90e23d1bf69af255fffba557880798285c4bb6f94fa",
+    "tests/run_cpu_video_memory.py": "00581056cd8a890a7e1f574ea34813c8cad1f76bf1106a84f0d87507537d8295",
+    "tests/run_fast_sdram.py": "c4811d0cedeac19ab749f9fa1034dc0580127d08ad6f56025a67ca71a1c650c6",
+    "tests/sdram_burst_model.v": "220e01743ffd930c1c9e32457d258160ec7560807afe41acbd4bebfc358e8fb1"
+  }
+}

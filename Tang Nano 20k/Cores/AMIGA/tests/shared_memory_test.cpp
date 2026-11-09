@@ -61,7 +61,7 @@ int main() {
    q.clk=1;q.sd_clk=phase==0;q.eval();cycles++;
   };
   q.reset_n=0;q.p1_cs=0;q.p2_cs=0;q.refresh=0;tick();q.reset_n=1;
-  for(unsigned n=0;n<12000&&!q.ready;n++)tick();CHECK(q.ready);
+  for(unsigned n=0;n<30000&&!q.ready;n++)tick();CHECK(q.ready); // запуск SDRAM: пауза 200 мкс
   active=true;
   auto transfer=[&](unsigned a,bool write,unsigned data,unsigned mask){
    unsigned ack=q.p2_ack;q.p2_addr=a;q.p2_we=write;q.p2_din=data;q.p2_ds=mask;q.p2_cs=1;

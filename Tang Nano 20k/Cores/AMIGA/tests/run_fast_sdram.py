@@ -43,7 +43,8 @@ int main(){
  auto random=[&](){seed^=seed<<13;seed^=seed>>17;seed^=seed<<5;return seed;};
  auto word=[&](unsigned a){return (mem[a>>1]>>((a&1)?0:16))&65535;};
  q.reset_n=0;q.p2_cs=0;tick();q.reset_n=1;
- for(unsigned n=0;n<12000&&!q.ready;n++)tick();CHECK(q.ready);idle();
+ // W9864G2GH requires 200 us before PRECHARGE; keep a bounded 350 us timeout.
+ for(unsigned n=0;n<30000&&!q.ready;n++)tick();CHECK(q.ready);idle();
  auto transfer=[&](unsigned a,bool write,unsigned data,unsigned mask){
   unsigned ack=q.p2_ack;q.p2_addr=a;q.p2_we=write;q.p2_din=data;q.p2_ds=mask;q.p2_cs=1;
   unsigned wait=0;do {tick();CHECK(++wait<100);}while(q.p2_ack==ack);

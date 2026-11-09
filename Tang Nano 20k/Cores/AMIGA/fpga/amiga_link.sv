@@ -12,6 +12,11 @@ module amiga_link (
     input wire [31:0] debug_words [0:35],
     output reg [8:0] trace_index,
     output reg [31:0] trace_start,
+    output reg [3:0] picture, input wire [31:0] video_diagnostic,
+    // 8 ноября 2026 (0.13.3): режим совместимости для старых демок и игр (F11 -> SETUP -> COMPATIBILITY):
+    // 1 — 68000 (кадры исключений без слова формата, MOVE SR в режиме пользователя), без fast RAM, без турбо.
+    // Ядро берёт его только во время сброса Amiga (amiga_vdac4.sv), ESP пишет его до загрузки ROM или перед сбросом.
+    output reg compat,
     output wire osd_wr, output wire [8:0] osd_addr, output wire [31:0] osd_data,
     output reg osd_show, output reg [5:0] osd_sel,
     output reg [29:0] osd_band, osd_rule, output reg [31:0] osd_bar,
@@ -61,7 +66,11 @@ module amiga_link (
 
     reg [31:0] packet[0:63];
     reg [31:0] packet_q;
-    reg [63:0] filled;
+    // ESP sends the 64 payload words in order, in four consecutive
+    // LINK writes. Count that sequence instead of a 64-bit bitmap. A
+    // complete replay may restart at word zero; retrying the last word
+    // is also idempotent. Gaps/out-of-order payloads cannot commit.
+    reg [6:0] filled_words;
     reg [7:0] pos, first_byte;
     reg [3:0] pace;
     reg loading, busy, error, pending, have_first, expected_set;
@@ -86,11 +95,11 @@ module amiga_link (
     end
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            filled<=0; pos<=0; pace<=0; first_byte<=0; have_first<=0;
+            filled_words<=0; pos<=0; pace<=0; first_byte<=0; have_first<=0;
             loading<=0; busy<=0; error<=0; pending<=0; sequence_no<=0;
             received<=0; crc<=32'hffffffff; expected_crc<=0; expected_set<=0;
             rom_ready<=0; rom_we<=0; rom_addr<=0; rom_word<=0;
-            boot_req<=0; scratch<=0; reset_count<=0; trace_index<=0; trace_start<=0;
+            boot_req<=0; scratch<=0; reset_count<=0; trace_index<=0; trace_start<=0;picture<=0;compat<=0;
             osd_show<=0; osd_sel<=6'd63; osd_band<=0; osd_rule<=0; osd_bar<=0; rtc<=0;
             hid_strobe<=0; hid_start<=0; hid_data<=0; hid_reset<=0;
         end else begin
@@ -110,13 +119,18 @@ module amiga_link (
                     have_first<=!have_first;
                 end
                 if (pace==15) begin
-                    if (pos==255) begin busy<=0; filled<=0; end
+                    if (pos==255) begin busy<=0; filled_words<=0; end
                     else pos<=pos+1'b1;
                 end
             end
             if (wr_stb) begin
                 if (wr_addr>=18'h1000 && wr_addr<18'h1040) begin
-                    if (loading && !busy) filled[wr_addr[5:0]]<=1;
+                    if (loading && !busy) begin
+                        if(wr_addr[5:0]==0)filled_words<=1;
+                        else if(!filled_words[6] && wr_addr[5:0]==filled_words[5:0])
+                            filled_words<=filled_words+1'b1;
+                        else if({1'b0,wr_addr[5:0]}+7'd1!=filled_words)begin error<=1;rom_ready<=0;end
+                    end
                     else begin error<=1; rom_ready<=0; end
                 end
                 case (wr_addr)
@@ -127,7 +141,7 @@ module amiga_link (
                         if (wr_data==1 && !busy && !pending && !rom_we) begin
                             loading<=1; rom_ready<=0; sequence_no<=0; received<=0;
                             crc<=32'hffffffff; error<=0; expected_set<=0;
-                            rom_addr<=0; filled<=0; have_first<=0;
+                            rom_addr<=0; filled_words<=0; have_first<=0;
                         end else if (wr_data==2) begin
                             if (loading && !busy && !pending && !rom_we && !error &&
                                 received==524288 && expected_set && ~crc==expected_crc) begin
@@ -140,7 +154,7 @@ module amiga_link (
                         if (wr_data[31:16]!=sequence_no) begin
                             if (loading && !busy && !pending && !rom_we && !error &&
                                 wr_data[31:16]==sequence_no+16'd1 && wr_data[15:0]==256 &&
-                                received<524288 && &filled) begin
+                                received<524288 && filled_words==64) begin
                                 sequence_no<=wr_data[31:16]; pos<=0; pace<=0; busy<=1;
                             end else begin error<=1; rom_ready<=0; end
                         end
@@ -153,6 +167,8 @@ module amiga_link (
                     18'h34: osd_band<=wr_data[29:0];
                     18'h35: osd_rule<=wr_data[29:0];
                     18'h36: osd_bar<=wr_data;
+                    18'h68: picture<=wr_data[3:0];
+                    18'h6b: compat<=wr_data[0];
                     18'h37: rtc<={~rtc[11],wr_data[10:0]};
                     default: ;
                 endcase
@@ -190,7 +206,7 @@ module amiga_link (
         else if (rd_addr>=13'h1400 && rd_addr<13'h1480) rd_data=disk_tx_q;   // сектор записи гостя
         else case (rd_addr)
             13'h00: rd_data=32'h56444334;
-            13'h01: rd_data=32'h0501000A;
+            13'h01: rd_data=32'h0501000C;
             13'h02: rd_data={29'd0,rom_ready,boot_req,error};
             13'h03: rd_data={24'd0,key_free};
             13'h08: rd_data={22'd0,audio_gray};
@@ -205,6 +221,11 @@ module amiga_link (
             13'h16: rd_data=expected_crc;
             13'h3d: rd_data={23'b0,trace_index};
             13'h3e: rd_data=trace_start;
+            13'h68: rd_data={28'd0,picture};
+            13'h69: rd_data=32'h41565331; // AVS1
+            13'h6a: rd_data=video_diagnostic;
+            13'h6b: rd_data={31'd0,compat};
+            13'h6c: rd_data=32'h414D4331; // AMC1: есть режим совместимости (0x6B)
             13'h40: rd_data=sd_ctrl_rd;
             13'h41: rd_data=sd_ptr_rd;
             13'h42: rd_data=sd_stat;

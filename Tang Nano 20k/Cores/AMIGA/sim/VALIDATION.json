@@ -1,0 +1,72 @@
+{
+  "stable_Kickstart_boot_prefix_passed": true,
+  "current_CPU_RAM_RGB_TMDS_passed": true,
+  "current_TMDS_symbols": 11292196,
+  "current_TMDS_mismatches": 0,
+  "host_controls": {
+    "passed": true,
+    "batched_commands": true,
+    "pause": true,
+    "stop_without_extra_input": true,
+    "VCD_window_ps": 9999455,
+    "LINK_ID": "0x56444334"
+  },
+  "relinked_RTL_identical_to_validated_model": {
+    "stable": true,
+    "current": true
+  },
+  "constraints": {
+    "passed": true,
+    "file": "E:\\zx\\Tang Nano 20k VDAC\\VDAC4\\Tang Nano 20k\\Cores\\AMIGA\\fpga\\amigaVdac4.cst",
+    "sha256": "db656c060c563d83f8028e6c398e49daea2d84c424a4a833a8bb499b2c294c44",
+    "TMDS_DRIVE": {
+      "O_tmds_clk_p": 4,
+      "O_tmds_data_p[0]": 4,
+      "O_tmds_data_p[1]": 4,
+      "O_tmds_data_p[2]": 4
+    }
+  },
+  "wav_format": {
+    "channels": 2,
+    "sample_width": 2,
+    "rate": 48000,
+    "frames": 7297
+  },
+  "coverage_limits": [
+    "Boot prefix and diagnostic guest checked; full Workbench/Test Kit disk boot not completed in this simulator yet.",
+    "Fast ROM mode used for CPU/video tests; QSPI transfer of the complete ROM was checked separately in an earlier transport-only run.",
+    "ESP/BL firmware, routed timing and analog HDMI/SDRAM not simulated."
+  ],
+  "artifacts": {
+    "stable": "runs/verified-stable-kickstart/result.json",
+    "current": "runs/20261106-005410/result.json",
+    "control": "runs/controls-1793924125270070100/result.json"
+  },
+  "sdram_startup": {
+    "passed": true,
+    "before_rejected": true,
+    "stable_reference_rejected": true,
+    "evidence": "../diagnostics/simulator-20261106/sdram-startup",
+    "hardware_tested": false
+  },
+  "cpu_video_arbitration": {
+    "passed": true,
+    "negative_control_failed": true,
+    "maximum_cpu_wait_clocks": 401,
+    "CPU_writes": 8192,
+    "CPU_burst_reads": 8192,
+    "video_bursts": 539738,
+    "artifact": "../diagnostics/simulator-20261106/cpu-starvation/after-shared.json",
+    "hardware_tested": false
+  },
+  "latest_source": {
+    "sdram_sha256": "c0c4254399ff85034ef659ba87462b1e7b21130170105d99332c69f480c131d6",
+    "full_diagnostic_run": "runs/regression-shared-20261106 (pending)",
+    "full_Kickstart_TestKit": "pending",
+    "736x512_interlace_90_loaded": "FAIL: bandwidth/cache misses",
+    "640x512_interlace_90_loaded": "PASS: new fields and CPU/chipset progress",
+    "full_ROM_QSPI_under_video": "PASS: ../diagnostics/simulator-20261106/cpu-starvation/full-rom-transfer.json",
+    "routed_FPGA": "PASS: ../build-results/20261106-015817Z/fpga/result.json",
+    "SDRAM_SDF": "PASS: ../diagnostics/simulator-20261106/cpu-starvation/routed-sdram-margins.json"
+  }
+}

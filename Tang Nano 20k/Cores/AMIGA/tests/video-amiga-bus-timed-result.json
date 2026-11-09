@@ -1,0 +1,135 @@
+{
+  "passed": false,
+  "cases": [
+    {
+      "case": [
+        200,
+        0,
+        4,
+        0,
+        40,
+        2
+      ],
+      "result": "source 200 lace 0 mode 4: 1035701 pixels, 3 frames, 0 bad, diagnostic 00110000 info A02CA0190 geometry 40,44 640x400\ntraffic 2, misses in checked interval 0, chip data errors 0, CPU chip cycles held 236220\nSDRAM bursts in checked interval: video read 38115 write 75276 refresh 6187\nTMDS 1035689 pixels, 0 bad; CPU 26784 chipset 202265 reads, 3 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        0,
+        0,
+        1,
+        40,
+        2
+      ],
+      "result": "source 256 lace 0 mode 0: 1054391 pixels, 2 frames, 0 bad, diagnostic 00090000 info 20A016A0200 geometry 40,22 640x512\ntraffic 2, misses in checked interval 0, chip data errors 0, CPU chip cycles held 249837\nSDRAM bursts in checked interval: video read 41202 write 79623 refresh 6209\nTMDS 1054379 pixels, 0 bad; CPU 25794 chipset 195850 reads, 2 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        1,
+        0,
+        1,
+        40,
+        3
+      ],
+      "result": "source 256 lace 1 mode 0: 1054391 pixels, 2 frames, 0 bad, diagnostic 000D0000 info 30A018A0200 geometry 40,24 640x512\ntraffic 3, misses in checked interval 0, chip data errors 0, CPU chip cycles held 32878\nSDRAM bursts in checked interval: video read 82215 write 79624 refresh 6259\nTMDS 1054379 pixels, 0 bad; CPU 50545 chipset 109622 reads, 2 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        1,
+        2,
+        1,
+        40,
+        3
+      ],
+      "result": "source 256 lace 1 mode 2: 1054391 pixels, 2 frames, 0 bad, diagnostic 000D0000 info 30A018A0200 geometry 40,24 640x512\ntraffic 3, misses in checked interval 0, chip data errors 0, CPU chip cycles held 34337\nSDRAM bursts in checked interval: video read 82341 write 79626 refresh 6274\nTMDS 1054379 pixels, 0 bad; CPU 50030 chipset 108843 reads, 2 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        1,
+        0,
+        1,
+        0,
+        3,
+        736
+      ],
+      "result": "source 256 lace 1 mode 0: 1054391 pixels, 2 frames, 0 bad, diagnostic 000D0000 info 300018B8200 geometry 8,24 720x512\ntraffic 3, misses in checked interval 0, chip data errors 0, CPU chip cycles held 44065\nSDRAM bursts in checked interval: video read 91350 write 89326 refresh 6299\nTMDS 1054379 pixels, 0 bad; CPU 44260 chipset 103946 reads, 2 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        0,
+        0,
+        1,
+        40,
+        3
+      ],
+      "result": "source 256 lace 0 mode 0: 1054391 pixels, 2 frames, 0 bad, diagnostic 00090000 info 20A016A0200 geometry 40,22 640x512\ntraffic 3, misses in checked interval 0, chip data errors 0, CPU chip cycles held 15197\nSDRAM bursts in checked interval: video read 41202 write 79637 refresh 6110\nTMDS 1054379 pixels, 0 bad; CPU 61788 chipset 117730 reads, 2 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        1,
+        0,
+        1,
+        40,
+        2
+      ],
+      "result": "source 256 lace 1 mode 0: 1054391 pixels, 2 frames, 0 bad, diagnostic 000D0000 info 30A018A0200 geometry 40,24 640x512\ntraffic 2, misses in checked interval 0, chip data errors 0, CPU chip cycles held 310025\nSDRAM bursts in checked interval: video read 82213 write 79615 refresh 6221\nTMDS 1054379 pixels, 0 bad; CPU 16730 chipset 168182 reads, 2 fields published in checked interval\n"
+    }
+  ],
+  "failures": [
+    {
+      "case": [
+        256,
+        0,
+        0,
+        1,
+        0,
+        2,
+        736
+      ],
+      "error": "source 256 lace 0 mode 0: 1054391 pixels, 2 frames, 0 bad, diagnostic 8E090000 info 200016B8200 geometry 8,22 720x512\ntraffic 2, misses in checked interval 0, chip data errors 0, CPU chip cycles held 262196\nSDRAM bursts in checked interval: video read 45780 write 84705 refresh 6226\nTMDS 1054379 pixels, 0 bad; CPU 23987 chipset 190681 reads, 2 fields published in checked interval\n"
+    }
+  ],
+  "hardware": false,
+  "electrical_timing": false,
+  "scope": "Actual framebuffer path with representative SDF IO delays and assumed SDRAM tAC; no board validation",
+  "source_sha256": {
+    "fpga/sdram.sv": "6df343880e3db9e3e19244f108f7ef3e9b02e60e70b1029bf67f652c2f89644c",
+    "fpga/amiga_video.sv": "7fb327da0e35b99e1d913a032e0988a8e492eeccc4065438578d0f12bd820bce",
+    "fpga/amiga_video_capture.sv": "4fc67a0ea228f1c7cab92edb2225063cef9ab50837ebb9756f31c83916823f80",
+    "fpga/amiga_video_geometry.sv": "9bcfa2ac80802f94b6b23bbd725a8203895ac37ec0cf41c435a1df7eae5c71c5",
+    "fpga/amiga_video_cache.sv": "570419c452ed0dc67bd97af9f8217be76e7e5efffdcb0789ea106a9dcc39fe7b",
+    "fpga/amiga_video_dma.sv": "655e98ec1084ea9c708c8648ebdfbec8ea184f7f6bab249cf20a9e0ac99e4ce3",
+    "fpga/nes_osd.sv": "572bf257d776f9d07213e302122f20f9a94274669e1ebd0557eab652e54edc7e",
+    "fpga/nes_osd_font.sv": "2e916d1c12b144e7310a2f9fe6e3fb39890b359bfcff1cd24fcc8ae1f2e5e4dd",
+    "fpga/hdmi_tx.sv": "c7bc4bae2880a40de671c59e6a694068f25fadd81929e62babcaeb579ff0e00a",
+    "fpga/tmds_encoder.sv": "191544375f36f0f217411e4af22bb6b0a4a21b53efe928ac97c4444b97264748",
+    "tests/sdram_burst_model.v": "220e01743ffd930c1c9e32457d258160ec7560807afe41acbd4bebfc358e8fb1",
+    "tests/video_system_top.sv": "d2be1ed41ac519edeaf74f7030c4bbcfbca580ce27828d527ad40014745c9129",
+    "tests/video_system_test.cpp": "b2f952671555b755966ca894a6df0ee930a416413d573657d3b65300771e179b",
+    "tests/run_video_system.py": "4bf21d44c903f08f39cbf6f00ec13cf992c36c94f83af673ba124e4e3e37e91b",
+    "io_paths": {
+      "clock_ps": 4971,
+      "write_ps": 5043,
+      "command_ps": 5043,
+      "read_input_ps": 1853,
+      "read_access_ps": 6000,
+      "sdf_sha256": "bec4173bce49a237197c5684f18562f220b1af0d868f403271d9641691ab7265",
+      "scope": "Representative typ pad paths; SDRAM tAC=6 ns assumption; full write corners checked separately from SDF"
+    }
+  },
+  "io_paths": {
+    "clock_ps": 4971,
+    "write_ps": 5043,
+    "command_ps": 5043,
+    "read_input_ps": 1853,
+    "read_access_ps": 6000,
+    "sdf_sha256": "bec4173bce49a237197c5684f18562f220b1af0d868f403271d9641691ab7265",
+    "scope": "Representative typ pad paths; SDRAM tAC=6 ns assumption; full write corners checked separately from SDF"
+  },
+  "clock_phase_degrees": 270
+}

@@ -67,7 +67,12 @@ module amiga_debug(
     for (genvar j=0;j<16;j=j+1) assign words[8+j]=trace_words[j];
 `else
     // Обычная сборка: трасса CPU занимает блочную память и логику, включается define AMIGA_DEBUG.
-    for (genvar j=0;j<24;j=j+1) assign words[j]=0;
+    // Compact live diagnostics, no storage and no effect on bus grants.
+    // [12] clkena, [11] skip, [10] RAM request, [9] RAM ready,
+    // [8:7] CPU state, [6:0] sync/overlay/dtack/as/rw/reset_out/reset_n.
+    assign words[0]={19'b0,cpu_clkena,status[20:18],cpu_state,status[6:0]};
+    assign words[2]=cpu_address;
+    for (genvar j=1;j<24;j=j+1) if(j!=2)assign words[j]=0;
     for (genvar j=0;j<4;j=j+1) assign trace_out[j]=0;
 `endif
 endmodule

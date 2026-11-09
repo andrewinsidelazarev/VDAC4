@@ -53,6 +53,8 @@ module sdram #(
   parameter SYNC_CLOCK_SPEED =  7_080_000,
   parameter CHIP48_BURST = 0,
   parameter SYNC_DELAY = 3,  // delay higher than 4 breaks FX68K build
+  parameter VIDEO_PORT = 0,
+  parameter VIDEO_STREAM = 0,
   parameter ACK_DELAY = 1
 ) (
   input  wire clk,
@@ -92,7 +94,17 @@ module sdram #(
   input  wire  [1:0] p2_ds,    // upper/lower data strobe
   input  wire        p2_cs,    // cpu requests read/wrie
   input  wire        p2_we,    // cpu requests write
-  output wire        p2_ack    // cpu ack
+  output wire        p2_ack,   // cpu ack
+  input wire video_cs, video_we,
+  input wire video_double, // чтение 32 байт: два пакета BL4 одной строки SDRAM
+  input wire video_urgent, // видео отстаёт от графика: важнее CPU (порт 2)
+  input wire [20:0] video_addr, // 32-bit word address, 16-byte aligned
+  input wire [127:0] video_din,
+  output reg [127:0] video_dout,
+  output reg video_read_valid,
+  output reg [1:0] video_fetch_index,
+  output reg video_ack,
+  output reg video_single // 8.11.2026: вместе с video_ack — обслужен один блок 16 байт (обращение B)
 );
 
 localparam WIDTH32 = (DATA_WIDTH == 32);
@@ -102,6 +114,9 @@ localparam BURST_LENGTH   = CHIP48_BURST ? 3'b010 : 3'b000;
 localparam ACCESS_TYPE    = 1'b0;    // 0 = sequential, 1 = interleaved
 localparam CAS_LATENCY    = 3'd2;    // 2/3 allowed
 localparam OP_MODE        = 2'b00;   // only 00 (standard operation) allowed
+// 7 ноября 2026: одиночная запись, как в рабочей 0.11. Пакетная запись BL4 с маской DQM
+// (0.12–0.12.4) ломала Amiga на плате: каждая запись CPU/чипсета/ROM шла пакетом.
+// Видео пишет четырьмя командами WRITE подряд по соседним столбцам.
 localparam NO_WRITE_BURST = 1'b1;    // 0 = write burst enabled, 1 = only single access write
 
 localparam MODE = {3'b0, NO_WRITE_BURST, OP_MODE, CAS_LATENCY, ACCESS_TYPE, BURST_LENGTH};
@@ -119,7 +134,8 @@ reg addr_0;
 localparam real CLOCK_PERIOD_NANO_SEC = 1.0e9 / `ITOR(RAM_CLOCK_SPEED);
 localparam real SYNC_PERIOD_NANO_SEC  = 1.0e9 / `ITOR(SYNC_CLOCK_SPEED);
 
-localparam real SETTING_INHIBIT_DELAY_MICRO_SEC = 100;
+// W9864G2GH: 200 us, DQM high, eight AUTO REFRESH; compact sequencer.
+localparam real SETTING_INHIBIT_DELAY_MICRO_SEC = 200;
 
 // tRFC - Min autorefresh period
 localparam real SETTING_T_RFC_MIN_AUTOREFRESH_PERIOD_NANO_SEC = 60;
@@ -145,15 +161,16 @@ localparam CLOCK_CYCLES_UNTIL_INIT_PRECHARGE_END = 10 + CLOCK_CYCLES_UNTIL_INIT_
     `CEIL(SETTING_T_RP_MIN_PRECHARGE_CMD_PERIOD_NANO_SEC / CLOCK_PERIOD_NANO_SEC);
 
 localparam CLOCK_CYCLES_UNTIL_REFRESH1_END = CLOCK_CYCLES_UNTIL_INIT_PRECHARGE_END + CLOCK_CYCLES_FOR_AUTOREFRESH;
-localparam CLOCK_CYCLES_UNTIL_REFRESH2_END = CLOCK_CYCLES_UNTIL_REFRESH1_END + CLOCK_CYCLES_FOR_AUTOREFRESH;
+
 
 // tMRD = 2 - Min number of clock cycles between mode set and normal usage
-localparam CLOCK_CYCLES_UNTIL_INIT_DONE = CLOCK_CYCLES_UNTIL_REFRESH2_END + 2;
+localparam CLOCK_CYCLES_UNTIL_INIT_DONE = CLOCK_CYCLES_UNTIL_REFRESH1_END + 2;
 
 localparam INIT_COUNTER_MAX   = CLOCK_CYCLES_UNTIL_INIT_DONE;
 localparam INIT_COUNTER_WIDTH = $clog2(INIT_COUNTER_MAX + 1);
 
 reg [INIT_COUNTER_WIDTH-1:0] init_counter = 0;
+reg [4:0] init_refresh_count = 0;
 
 // Number of sync cycles between each autorefresh command
 localparam SYNC_CYCLES_PER_REFRESH =
@@ -201,12 +218,18 @@ assign ready  = (state != STATE_INIT);
 always @(negedge clk, negedge reset_n) begin
   if (!reset_n) begin
     init_counter <= 0;
+    init_refresh_count <= 0;
     state        <= STATE_INIT;
 
   end else begin
     case (state)
       STATE_INIT: begin
         init_counter <= init_counter + 1;
+        // Повторяем один интервал tRFC: не нужны семь широких декодеров таймера.
+        if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH1_END[INIT_COUNTER_WIDTH-1:0] && init_refresh_count != 7) begin
+          init_counter <= CLOCK_CYCLES_UNTIL_INIT_PRECHARGE_END[INIT_COUNTER_WIDTH-1:0] + 1'b1;
+          init_refresh_count <= init_refresh_count + 1'b1;
+        end
 
         if (init_counter == CLOCK_CYCLES_UNTIL_INIT_DONE[INIT_COUNTER_WIDTH-1:0])
           state <= STATE_RAS;
@@ -230,6 +253,13 @@ always @(negedge clk, negedge reset_n) begin
       STATE_READ_3:
         state <= STATE_RAS;
     endcase
+    if (state != STATE_INIT) begin
+      if (!p2_cs) init_refresh_count <= 0;
+      else if (state == STATE_RAS && sync_i && !cs && refreshcnt != 0) begin
+        if (VIDEO_PORT && video_cs) init_refresh_count <= init_refresh_count + 1'b1;
+        else init_refresh_count <= 0;
+      end
+    end
   end
 end
 
@@ -277,7 +307,8 @@ generate
     assign ram_dout    = (addr_0 ? ram_dout_lo : ram_dout_hi);
     reg [31:0] dq_out;
     always @(posedge clk)
-      dq_out <= addr_0 ? {16'b0, ram_din} : {ram_din, 16'b0};
+      dq_out <= VIDEO_PORT && output_video ? video_word :
+                addr_0 ? {16'b0, ram_din} : {ram_din, 16'b0};
     assign sd_data = sd_dq ? dq_out : {DATA_WIDTH{1'bz}};
 
   end else begin
@@ -291,9 +322,115 @@ endgenerate
 localparam PORT_1       = 2'd0;
 localparam PORT_2       = 2'd1;
 localparam PORT_REFRESH = 2'd2;
-localparam PORT_IDLE    = 2'd3;
+localparam PORT_IDLE    = 3'd4;
 
-reg [1:0] sdram_port;
+localparam PORT_VIDEO = 3'd3;
+reg [2:0] sdram_port;
+
+reg [1:0] video_word_index;
+// 7 ноября 2026: CPU (порт 2) важнее видео, пока видео успевает: при прежнем
+// постоянном приоритете видео CPU получал 1 слот из 32, выборка команд из
+// ROM/fast RAM почти стояла. Видео обгоняет CPU, только когда отстаёт
+// (video_urgent из DMA), и тогда не больше 31 слота подряд.
+// Чипсет и Refresh сохраняют свой приоритет. Счётчик считает только
+// видеопередачи, которые действительно отложили ожидающий запрос CPU.
+// Счётчик начальных Refresh свободен после STATE_INIT.
+wire [4:0] video_streak = init_refresh_count;
+// 8 ноября 2026: в слоте, который хотят и видео, и CPU, они идут по очереди (video_turn).
+// Прежде CPU всегда шёл первым, а видео — только когда уже отстало: на плате в Workbench
+// (блиттер занимает нечётные слоты, CPU — чётные) захват пропускал половины строк (призраки
+// старого изображения), а чтение опаздывало (чёрные строки). Отстающее видео по-прежнему
+// идёт впереди CPU до 31 слота подряд.
+// 8 ноября 2026: второе обращение в слоте (B) — чтение видео в его банк (кадровый буфер — банк 3),
+// внахлёст с обращением A чипсета или CPU в другой банк. Слот 7 МГц = 12 тактов; команды выходят на
+// такт позже своего состояния:
+//   A: ACTIVE (такт 2), READ/WRITE с автопрегардом (4), данные READ на DQ 5..8;
+//   B: ACTIVE своего банка (5, tRRD 3 такта), READ с автопрегардом (8, tRCD 3), данные 9..12 —
+//      те же такты и тот же приём (video_second), что у второго пакета сдвоенного чтения; прегард
+//      банка B кончается к ACTIVE следующего слота (такт 13), как и у сдвоенного чтения.
+// Запись A (одно слово на такте 4) DQ к 9..12 не занимает. Регенерация (все банки) и обращение A в
+// банк видео (копия ROM в банке 3) — без B. Видео-запись по-прежнему только в A. Чтение видео, которое
+// в споре с CPU уступало слот, теперь идёт в B того же слота: обслужены оба. Прежде видео делило с
+// чипсетом и CPU одно обращение на слот, и при работе блиттера в Workbench не успевало (полосы).
+wire [31:0] video_addr32 = {11'd0,video_addr};
+localparam BANK_LO = RAS_WIDTH+CAS_WIDTH;
+wire [1:0] video_bank = video_addr32[BANK_LO+1:BANK_LO];
+wire [1:0] chip_bank  = addr32[BANK_LO+1:BANK_LO];
+wire [1:0] p2_bank    = p2_addr32[BANK_LO+1:BANK_LO];
+// 8 ноября 2026 (0.13.1, проверка): обращение B выключено. Версия: на 0.12.15 (без B) пользователь видел
+// «срыва нет», с 0.12.17 (с B) развёртка в Workbench снова срывается — проверяется связь с нагрузкой SDRAM
+// (два ACTIVE на слот). Без B видео делит с чипсетом и CPU одно обращение на слот, как в 0.12.16.
+localparam VIDEO_B = 1'b0;
+wire video_rd_b = VIDEO_B && VIDEO_PORT && VIDEO_STREAM && video_cs && !video_we;
+wire b_p2_ok    = video_rd_b && p2_bank != video_bank;  // CPU в A, чтение видео в B
+reg video_b = 1'b0;                       // в этом слоте идёт обращение B
+reg [RAS_WIDTH-1:0] vb_row = 0;
+reg [CAS_WIDTH-1:0] vb_col = 0;
+reg [1:0] vb_bank = 0;
+reg video_turn = 1'b1;
+wire video_grant = VIDEO_PORT && video_cs && (!p2_cs || (!b_p2_ok && (video_turn || (video_urgent && video_streak != 31))));
+wire b_go = video_rd_b && ((cs && !refresh && chip_bank != video_bank) ||
+            (!cs && refreshcnt != 0 && !video_grant && p2_cs && p2_bank != video_bank));
+always @(negedge clk or negedge reset_n) begin
+  if (!reset_n) video_turn <= 1'b1;
+  else if (state == STATE_RAS && sync_i && !cs && refreshcnt != 0 && p2_cs && VIDEO_PORT && video_cs)
+    video_turn <= !video_grant;   // видео взяло спорный слот — следующий спорный за CPU
+end
+// Decode the next write source on the arbitration edge. DQ then has
+// a single select from this register to its rising-edge I/O register.
+reg output_video=0;
+always @(negedge clk or negedge reset_n) begin
+  if(!reset_n)output_video<=0;
+  else if(state==STATE_RAS && sync_i)output_video<=!cs && refreshcnt!=0 && video_grant;
+end
+wire [31:0] video_word = VIDEO_STREAM ? video_din[31:0]:video_din[video_word_index*32 +: 32];
+// Сдвоенное чтение видео (7 ноября 2026): READ на CAS без автопрегарда и
+// второй READ столбца +4 с автопрегардом на READ_1, впритык к первому пакету.
+// Слова второго пакета приходят на четырёх спадах после READ_3, вне автомата
+// состояний; прегард начинается через BL после второго READ, и к ACTIVE
+// следующего слота (через 12 тактов) tRP выдержан. DMA просит его только для
+// пары, выровненной на 8 столбцов: второй столбец — тот же с битом 2.
+reg video_dbl = 0;
+reg [2:0] video_second = 0;
+always @(negedge clk or negedge reset_n) begin
+  if (!reset_n) begin video_ack<=0; video_single<=0; video_dout<=0; video_word_index<=0;video_fetch_index<=0;video_read_valid<=0;video_second<=0; end
+  else begin
+    video_read_valid<=0;
+    if(VIDEO_STREAM && state==STATE_READ_3 && ((sdram_port==PORT_VIDEO && !ram_we && video_dbl) || video_b)) video_second<=4;
+    if(VIDEO_PORT && video_b && state==STATE_READ_3) begin video_ack<=~video_ack; video_single<=1'b1; end
+    else if(video_second!=0) video_second<=video_second-1'b1;
+    if(VIDEO_STREAM && video_second!=0) begin video_dout[31:0]<={ram_dout_hi,ram_dout_lo};video_read_valid<=1; end
+    if(state==STATE_LAST) video_fetch_index<=0;
+    if(state==STATE_RAS_WAIT_0) video_word_index<=0;
+    // Streaming writes cross three registers: capture read address (rising edge),
+    // capture BRAM, then DQ OREG. Request the next word before CAS so the pad
+    // holds the correct beat across the 270-degree SDRAM clock, including clock/OBUF delays.
+    // 8 ноября 2026: каждое слово просится на такт раньше прежнего — в захвате добавлен триггер
+    // адреса по фронту (amiga_video_capture.sv, read_address_q), BRAM больше не берёт адрес со спада.
+    // Слово 0 (STATE_LAST прошлого слота) и такты WRITE на DQ не меняются.
+    if(state==STATE_RAS && sync_i)video_fetch_index<=1;
+    if(state==STATE_RAS_WAIT_0)video_fetch_index<=2;
+    if(state==STATE_CAS)video_fetch_index<=3;
+    if(sdram_port==PORT_VIDEO) begin
+      if(state==STATE_CAS_WAIT_0) video_word_index<=1;
+      if(state==STATE_CAS_WAIT_1) video_word_index<=2;
+      if(state==STATE_READ_0) video_word_index<=3;
+      if(!ram_we) begin
+        if(VIDEO_STREAM) begin
+          if(state==STATE_READ_0 || state==STATE_READ_1 || state==STATE_READ_2 || state==STATE_READ_3)begin
+            video_dout[31:0]<={ram_dout_hi,ram_dout_lo};video_read_valid<=1;
+          end
+        end else begin
+        if(state==STATE_READ_0) video_dout[31:0]<={ram_dout_hi,ram_dout_lo};
+        if(state==STATE_READ_1) video_dout[63:32]<={ram_dout_hi,ram_dout_lo};
+        if(state==STATE_READ_2) video_dout[95:64]<={ram_dout_hi,ram_dout_lo};
+        if(state==STATE_READ_3) video_dout[127:96]<={ram_dout_hi,ram_dout_lo};
+        end
+      end
+      if(state==STATE_READ_3) begin video_ack<=~video_ack; video_single<=1'b0; end
+    end
+  end
+end
 
 always @(negedge clk, negedge reset_n) begin
   if (!reset_n)
@@ -311,11 +448,14 @@ always @* begin
       sd_addr_next = {RAS_WIDTH{1'b0}};
       if (init_counter == CLOCK_CYCLES_UNTIL_INIT_PRECHARGE[INIT_COUNTER_WIDTH-1:0])
         sd_addr_next[10] = 1'b1;
-      else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH2_END[INIT_COUNTER_WIDTH-1:0])
+      else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH1_END[INIT_COUNTER_WIDTH-1:0] && init_refresh_count == 7)
         sd_addr_next = MODE;
     end
     STATE_RAS:
-      sd_addr_next = cs ? addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH] : p2_addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH];
+      sd_addr_next = cs ? addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH] :
+        video_grant ? video_addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH] : p2_addr32[RAS_WIDTH+CAS_WIDTH-1:CAS_WIDTH];
+    STATE_CAS_WAIT_0:
+      if (VIDEO_PORT && video_b) sd_addr_next = vb_row;   // ACTIVE обращения B
     default: ;
   endcase
 end
@@ -328,19 +468,21 @@ always @(negedge clk) begin
   case (state)
     STATE_INIT: begin
       sdram_port <= PORT_IDLE;
+      video_b <= 1'b0;
       refreshcnt <= SYNC_CYCLES_PER_REFRESH[REFRESHCNT_MAX_WIDTH-1:0];
 
       if (init_counter == CLOCK_CYCLES_UNTIL_INIT_PRECHARGE[INIT_COUNTER_WIDTH-1:0]) begin
         sd_cmd <= CMD_PRECHARGE;
       end else if (init_counter == CLOCK_CYCLES_UNTIL_INIT_PRECHARGE_END[INIT_COUNTER_WIDTH-1:0]) begin
         sd_cmd <= CMD_AUTO_REFRESH;
-      end else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH1_END[INIT_COUNTER_WIDTH-1:0]) begin
+      end else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH1_END[INIT_COUNTER_WIDTH-1:0] && init_refresh_count != 7) begin
         sd_cmd <= CMD_AUTO_REFRESH;
-      end else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH2_END[INIT_COUNTER_WIDTH-1:0]) begin
+      end else if (init_counter == CLOCK_CYCLES_UNTIL_REFRESH1_END[INIT_COUNTER_WIDTH-1:0] && init_refresh_count == 7) begin
         sd_cmd  <= CMD_LOAD_MODE;
       end
     end
     STATE_RAS: begin
+      video_dbl <= 0;
       if (cs) begin
 
         sd_addr_cas[RAS_WIDTH-1:0] <= {RAS_WIDTH{1'b0}};
@@ -355,6 +497,13 @@ always @(negedge clk) begin
 
         addr_0  <= addr[0];
 
+      end else if (video_grant) begin
+        sd_addr_cas<=0;
+        sd_addr_cas[CAS_WIDTH-1:0]<=video_addr32[CAS_WIDTH-1:0];
+        sd_addr_cas[10]<=!video_we && !(VIDEO_STREAM && video_double);
+        video_dbl<=VIDEO_STREAM && video_double && !video_we;
+        sd_ba<=video_addr32[RAS_WIDTH+CAS_WIDTH+1:RAS_WIDTH+CAS_WIDTH];
+        ram_ds<=0; ram_we<=video_we; ram_din<=0; addr_0<=0;
       end else if (p2_cs) begin
 
         sd_addr_cas[RAS_WIDTH-1:0] <= {RAS_WIDTH{1'b0}};
@@ -371,6 +520,10 @@ always @(negedge clk) begin
       end
 
       if (sync_i) begin
+        video_b <= b_go;
+        vb_row  <= video_addr32[BANK_LO-1:CAS_WIDTH];
+        vb_col  <= video_addr32[CAS_WIDTH-1:0];
+        vb_bank <= video_bank;
         if (refreshcnt != 0)
           refreshcnt <= refreshcnt - 1;
 
@@ -384,6 +537,9 @@ always @(negedge clk) begin
 
           refreshcnt <= SYNC_CYCLES_PER_REFRESH[REFRESHCNT_MAX_WIDTH-1:0];
 
+        end else if (video_grant) begin
+          sdram_port <= PORT_VIDEO;
+          sd_cmd <= CMD_ACTIVE;
         end else if (p2_cs) begin
           sdram_port <= PORT_2;
           sd_cmd     <= CMD_ACTIVE;
@@ -392,7 +548,7 @@ always @(negedge clk) begin
     end
     STATE_RAS_WAIT_0: begin
       // Выводы DQ включаются на такт раньше WRITE: шина свободна, а такт SDRAM теперь ближе.
-      if (ram_we && (sdram_port == PORT_1 || sdram_port == PORT_2))
+      if (ram_we && (sdram_port == PORT_1 || sdram_port == PORT_2 || sdram_port == PORT_VIDEO))
         sd_dq <= 1;
     end
     STATE_CAS: begin
@@ -409,11 +565,43 @@ always @(negedge clk) begin
             sd_dq <= 1;
           end
         end
+        PORT_VIDEO: begin
+          sd_cmd<=ram_we ? CMD_WRITE : CMD_READ;
+          sd_dq<=ram_we;
+          if(ram_we) sd_addr_cas[1:0]<=2'd1;
+        end
         PORT_REFRESH: begin
           sd_cmd <= CMD_AUTO_REFRESH;
         end
         default: ;
       endcase
+    end
+    // Запись видео: WRITE на CAS, CAS_WAIT_0, CAS_WAIT_1 и READ_0, столбцы +0..+3,
+    // по слову за такт (слова меняются так же, как прежние такты пакета);
+    // автопрегард на последней. Блок 16 байт выровнен на 4 столбца, поэтому
+    // меняются только два младших бита столбца; адрес выходит вместе с командой.
+    STATE_CAS_WAIT_0, STATE_CAS_WAIT_1, STATE_READ_0: begin
+      if(VIDEO_PORT && video_b && state==STATE_CAS_WAIT_0) begin
+        sd_cmd <= CMD_ACTIVE;       // банк B, строка — sd_addr_next
+        sd_ba  <= vb_bank;
+        sd_addr_cas <= 0;
+        sd_addr_cas[CAS_WIDTH-1:0] <= vb_col;
+        sd_addr_cas[10] <= 1'b1;   // READ B с автопрегардом
+      end
+      if(VIDEO_PORT && sdram_port==PORT_VIDEO && ram_we) begin
+        sd_dq<=1;
+        sd_cmd<=CMD_WRITE;
+        if(state==STATE_CAS_WAIT_0) sd_addr_cas[1:0]<=2'd2;
+        if(state==STATE_CAS_WAIT_1) begin sd_addr_cas[1:0]<=2'd3; sd_addr_cas[10]<=1'b1; end
+      end
+      // Второй READ сдвоенного чтения: столбец +4 (бит 2) с автопрегардом,
+      // адрес готов на такт раньше команды на READ_1.
+      if(VIDEO_PORT && sdram_port==PORT_VIDEO && video_dbl && state==STATE_CAS_WAIT_1) begin
+        sd_addr_cas[2]<=1'b1; sd_addr_cas[10]<=1'b1;
+      end
+    end
+    STATE_READ_1: begin
+      if(VIDEO_PORT && ((sdram_port==PORT_VIDEO && video_dbl) || video_b)) sd_cmd<=CMD_READ;
     end
     STATE_LAST: begin
       sdram_port <= PORT_IDLE;
@@ -453,7 +641,7 @@ generate
       if (low_en[1]) p2_dout48[15:0] <= addr_0 ? r_hi : r_lo;
     end
     always @(negedge clk) begin
-      sd_dqm <= 0;
+      sd_dqm <= state == STATE_INIT ? {DATA_WIDTH/8{1'b1}} : 0;
 
       case (state)
         STATE_CAS: begin
@@ -478,7 +666,7 @@ generate
 
   end else begin
     always @(negedge clk) begin
-      sd_dqm <= 0;
+      sd_dqm <= state == STATE_INIT ? {DATA_WIDTH/8{1'b1}} : 0;
       if (state == STATE_READ_DATA && sdram_port == PORT_1) dout <= ram_dout;
       if (state == STATE_READ_DATA && sdram_port == PORT_2) p2_dout <= ram_dout;
 

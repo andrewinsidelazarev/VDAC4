@@ -21,3 +21,7 @@ or the release binary packages and is not published here.
 ../SD/AMIGA/DF0.ADF is Amiga Test Kit 1.21 by Keir Fraser and contributors (public domain /
 Unlicense), see disks/AmigaTestKit-1.21/COPYING and disks/README.txt.
 upstream/ holds only the NanoMig files this build needs, without modification.
+
+fpga/hdmi_tx.sv and fpga/tmds_encoder.sv are copied from the VDAC4 Mega Drive
+core and retain their Apache-2.0 SPDX headers. The local 720p framebuffer,
+scaler and VIDEO overlay adaptations are GPL-3.0-or-later.

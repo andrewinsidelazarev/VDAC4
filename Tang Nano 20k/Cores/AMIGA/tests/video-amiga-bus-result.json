@@ -1,0 +1,115 @@
+{
+  "passed": false,
+  "cases": [],
+  "failures": [
+    {
+      "case": [
+        256,
+        0,
+        0,
+        1,
+        0,
+        2,
+        736
+      ],
+      "error": "pixel 160,0 got 5C010B expected 000B5E info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 161,0 got 5C010B expected 000B5E info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 162,0 got 5D020B expected 010B5F info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 163,0 got 5A030B expected 020B5C info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 164,0 got 5B040B expected 030B5D info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 165,0 got 5B040B expected 030B5D info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 166,0 got 58050B expected 040B5A info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 167,0 got 59060B expected 050B5B info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 168,0 got 56070B expected 060B58 info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 169,0 got 56070B expected 060B58 info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 170,0 got 57080B expected 070B59 info 200016B8200 geom 0,22 736,512 diag 17090000\npixel 171,0 got 54090B expected 080B56 info 200016B8200 geom 0,22 736,512 diag 17090000\nchip read 002000 got d979 expected 2000, CCK 1\nchip read 002000 got d979 expected 2000, CCK 2\nchip read 002000 got d979 expected 2000, CCK 3\nchip read 002004 got 9eeb expected 2004, CCK 5\nchip read 002004 got 9eeb expected 2004, CCK 6\nchip read 002004 got 9eeb expected 2004, CCK 7\nchip read 002008 got 421a expected 2008, CCK 9\nchip read 002008 got 421a expected 2008, CCK 0\nsource 256 lace 0 mode 0: 1401600 pixels, 1 frames, 1051200 bad, diagnostic 26090000 info 16B8200 geometry 0,22 736x512\ntraffic 2, misses in checked interval 0, chip data errors 280809, CPU chip cycles held 214578\nSDRAM bursts in checked interval: video read 12102 write 52292 refresh 3735\nTMDS 1401600 pixels, 0 bad; CPU 24456 chipset 118054 reads, 1 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        0,
+        0,
+        1,
+        40,
+        2
+      ],
+      "error": "pixel 160,0 got 74290B expected 280B76 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 161,0 got 74290B expected 280B76 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 162,0 got 00000B expected 290B77 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 163,0 got 720000 expected 2A0B74 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 164,0 got 720000 expected 2A0B74 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 165,0 got 732C0B expected 2B0B75 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 166,0 got 702D0B expected 2C0B72 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 167,0 got 702D0B expected 2C0B72 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 168,0 got 712E0B expected 2D0B73 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 169,0 got 002F0B expected 2E0B70 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 170,0 got 002F0B expected 2E0B70 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 171,0 got 000000 expected 2F0B71 info 20A016A0200 geom 40,22 640,512 diag 00090000\nchip read 002000 got d979 expected 2000, CCK 1\nchip read 002000 got d979 expected 2000, CCK 2\nchip read 002000 got d979 expected 2000, CCK 3\nchip read 002004 got 9eeb expected 2004, CCK 5\nchip read 002004 got 9eeb expected 2004, CCK 6\nchip read 002004 got 9eeb expected 2004, CCK 7\nchip read 002008 got 421a expected 2008, CCK 9\nchip read 002008 got 421a expected 2008, CCK 0\nsource 256 lace 0 mode 0: 1401600 pixels, 1 frames, 1051200 bad, diagnostic 00090000 info A016A0200 geometry 40,22 640x512\ntraffic 2, misses in checked interval 0, chip data errors 287235, CPU chip cycles held 191685\nSDRAM bursts in checked interval: video read 8710 write 47537 refresh 3719\nTMDS 1401600 pixels, 0 bad; CPU 23586 chipset 125218 reads, 1 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        1,
+        0,
+        1,
+        40,
+        3
+      ],
+      "error": "pixel 160,0 got 692916 expected 28166B info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 161,0 got 692916 expected 28166B info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 162,0 got 000016 expected 29166A info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 163,0 got 6F0000 expected 2A1669 info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 164,0 got 6F0000 expected 2A1669 info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 165,0 got 6E2C16 expected 2B1668 info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 166,0 got 6D2D16 expected 2C166F info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 167,0 got 6D2D16 expected 2C166F info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 168,0 got 6C2E16 expected 2D166E info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 169,0 got 002F16 expected 2E166D info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 170,0 got 002F16 expected 2E166D info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 171,0 got 000000 expected 2F166C info 30A018A0200 geom 40,24 640,512 diag 000D0000\nchip read 002000 got d979 expected 2000, CCK 1\nchip read 002000 got d979 expected 2000, CCK 2\nchip read 002000 got d979 expected 2000, CCK 3\nchip read 002004 got 9eeb expected 2004, CCK 1\nchip read 002004 got 9eeb expected 2004, CCK 2\nchip read 002004 got 9eeb expected 2004, CCK 3\nchip read 002008 got 421a expected 2008, CCK 1\nchip read 002008 got 421a expected 2008, CCK 2\nsource 256 lace 1 mode 0: 1401600 pixels, 1 frames, 1051200 bad, diagnostic 000D0000 info 10A018A0200 geometry 40,24 640x512\ntraffic 3, misses in checked interval 0, chip data errors 138714, CPU chip cycles held 18824\nSDRAM bursts in checked interval: video read 32535 write 47541 refresh 3710\nTMDS 1401600 pixels, 0 bad; CPU 43746 chipset 68479 reads, 1 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        200,
+        0,
+        4,
+        0,
+        40,
+        2
+      ],
+      "error": "pixel 0,450 got EC2993 expected 2893EE info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 1,450 got EC2993 expected 2893EE info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 2,450 got 000093 expected 2993EF info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 3,450 got 000093 expected 2993EF info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 4,450 got EA0000 expected 2A93EC info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 5,450 got EA0000 expected 2A93EC info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 6,450 got EB2C93 expected 2B93ED info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 7,450 got EB2C93 expected 2B93ED info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 8,450 got E82D93 expected 2C93EA info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 9,450 got E82D93 expected 2C93EA info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 10,450 got E92E93 expected 2D93EB info 20A02CA0190 geom 40,44 640,400 diag 00110000\npixel 11,450 got E92E93 expected 2D93EB info 20A02CA0190 geom 40,44 640,400 diag 00110000\nchip read 002000 got d979 expected 2000, CCK 1\nchip read 002000 got d979 expected 2000, CCK 2\nchip read 002000 got d979 expected 2000, CCK 3\nchip read 002004 got 9eeb expected 2004, CCK 5\nchip read 002004 got 9eeb expected 2004, CCK 6\nchip read 002004 got 9eeb expected 2004, CCK 7\nchip read 002008 got 421a expected 2008, CCK 9\nchip read 002008 got 421a expected 2008, CCK 0\nsource 200 lace 0 mode 4: 1651200 pixels, 2 frames, 1651200 bad, diagnostic 00110000 info 20A02CA0190 geometry 40,44 640x400\ntraffic 2, misses in checked interval 0, chip data errors 289639, CPU chip cycles held 184596\nSDRAM bursts in checked interval: video read 7542 write 44213 refresh 3706\nTMDS 1651200 pixels, 0 bad; CPU 23199 chipset 129328 reads, 2 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        1,
+        2,
+        1,
+        40,
+        3
+      ],
+      "error": "pixel 208,36 got 692916 expected 28166B info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 209,36 got 692916 expected 28166B info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 210,36 got 000016 expected 29166A info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 211,36 got 6F0000 expected 2A1669 info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 212,36 got 6F0000 expected 2A1669 info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 213,36 got 6E2C16 expected 2B1668 info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 214,36 got 6D2D16 expected 2C166F info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 215,36 got 6C2E16 expected 2D166E info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 216,36 got 6C2E16 expected 2D166E info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 217,36 got 002F16 expected 2E166D info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 218,36 got 000000 expected 2F166C info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 219,36 got 713116 expected 301673 info 30A018A0200 geom 40,24 640,512 diag 000D0000\nchip read 002000 got d979 expected 2000, CCK 1\nchip read 002000 got d979 expected 2000, CCK 2\nchip read 002000 got d979 expected 2000, CCK 3\nchip read 002004 got 9eeb expected 2004, CCK 1\nchip read 002004 got 9eeb expected 2004, CCK 2\nchip read 002004 got 9eeb expected 2004, CCK 3\nchip read 002008 got 421a expected 2008, CCK 1\nchip read 002008 got 421a expected 2008, CCK 2\nsource 256 lace 1 mode 2: 1401600 pixels, 1 frames, 852768 bad, diagnostic 000D0000 info 10A018A0200 geometry 40,24 640x512\ntraffic 3, misses in checked interval 0, chip data errors 138714, CPU chip cycles held 21384\nSDRAM bursts in checked interval: video read 32447 write 47541 refresh 3717\nTMDS 1401600 pixels, 0 bad; CPU 43894 chipset 67978 reads, 1 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        1,
+        0,
+        1,
+        0,
+        3,
+        736
+      ],
+      "error": "pixel 160,0 got 410116 expected 001643 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 161,0 got 410116 expected 001643 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 162,0 got 400216 expected 011642 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 163,0 got 470316 expected 021641 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 164,0 got 460416 expected 031640 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 165,0 got 460416 expected 031640 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 166,0 got 000000 expected 041647 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 167,0 got 440600 expected 051646 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 168,0 got 4B0716 expected 061645 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 169,0 got 4B0716 expected 061645 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 170,0 got 4A0816 expected 071644 info 300018B8200 geom 0,24 736,512 diag 000D0000\npixel 171,0 got 490916 expected 08164B info 300018B8200 geom 0,24 736,512 diag 000D0000\nchip read 002000 got d979 expected 2000, CCK 1\nchip read 002000 got d979 expected 2000, CCK 2\nchip read 002000 got d979 expected 2000, CCK 3\nchip read 002004 got 9eeb expected 2004, CCK 1\nchip read 002004 got 9eeb expected 2004, CCK 2\nchip read 002004 got 9eeb expected 2004, CCK 3\nchip read 002008 got 421a expected 2008, CCK 1\nchip read 002008 got 421a expected 2008, CCK 2\nsource 256 lace 1 mode 0: 1401600 pixels, 1 frames, 1051200 bad, diagnostic 000D0000 info 100018B8200 geometry 0,24 736x512\ntraffic 3, misses in checked interval 0, chip data errors 138714, CPU chip cycles held 29620\nSDRAM bursts in checked interval: video read 36995 write 53332 refresh 3759\nTMDS 1401600 pixels, 0 bad; CPU 43260 chipset 64390 reads, 1 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        0,
+        0,
+        1,
+        40,
+        3
+      ],
+      "error": "pixel 160,0 got 74290B expected 280B76 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 161,0 got 74290B expected 280B76 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 162,0 got 00000B expected 290B77 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 163,0 got 720000 expected 2A0B74 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 164,0 got 720000 expected 2A0B74 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 165,0 got 732C0B expected 2B0B75 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 166,0 got 702D0B expected 2C0B72 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 167,0 got 702D0B expected 2C0B72 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 168,0 got 712E0B expected 2D0B73 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 169,0 got 002F0B expected 2E0B70 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 170,0 got 002F0B expected 2E0B70 info 20A016A0200 geom 40,22 640,512 diag 00090000\npixel 171,0 got 000000 expected 2F0B71 info 20A016A0200 geom 40,22 640,512 diag 00090000\nchip read 002000 got d979 expected 2000, CCK 1\nchip read 002000 got d979 expected 2000, CCK 2\nchip read 002000 got d979 expected 2000, CCK 3\nchip read 002004 got 9eeb expected 2004, CCK 1\nchip read 002004 got 9eeb expected 2004, CCK 2\nchip read 002004 got 9eeb expected 2004, CCK 3\nchip read 002008 got 421a expected 2008, CCK 1\nchip read 002008 got 421a expected 2008, CCK 2\nsource 256 lace 0 mode 0: 1401600 pixels, 1 frames, 1051200 bad, diagnostic 00090000 info A016A0200 geometry 40,22 640x512\ntraffic 3, misses in checked interval 0, chip data errors 138714, CPU chip cycles held 8381\nSDRAM bursts in checked interval: video read 16398 write 47541 refresh 3642\nTMDS 1401600 pixels, 0 bad; CPU 43316 chipset 72037 reads, 1 fields published in checked interval\n"
+    },
+    {
+      "case": [
+        256,
+        1,
+        0,
+        1,
+        40,
+        2
+      ],
+      "error": "pixel 160,0 got 692916 expected 28166B info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 161,0 got 692916 expected 28166B info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 162,0 got 000016 expected 29166A info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 163,0 got 6F0000 expected 2A1669 info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 164,0 got 6F0000 expected 2A1669 info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 165,0 got 6E2C16 expected 2B1668 info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 166,0 got 6D2D16 expected 2C166F info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 167,0 got 6D2D16 expected 2C166F info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 168,0 got 6C2E16 expected 2D166E info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 169,0 got 002F16 expected 2E166D info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 170,0 got 002F16 expected 2E166D info 30A018A0200 geom 40,24 640,512 diag 000D0000\npixel 171,0 got 000000 expected 2F166C info 30A018A0200 geom 40,24 640,512 diag 000D0000\nchip read 002000 got d979 expected 2000, CCK 1\nchip read 002000 got d979 expected 2000, CCK 2\nchip read 002000 got d979 expected 2000, CCK 3\nchip read 002004 got 9eeb expected 2004, CCK 5\nchip read 002004 got 9eeb expected 2004, CCK 6\nchip read 002004 got 9eeb expected 2004, CCK 7\nchip read 002008 got 421a expected 2008, CCK 9\nchip read 002008 got 421a expected 2008, CCK 0\nsource 256 lace 1 mode 0: 1401600 pixels, 1 frames, 1051200 bad, diagnostic 000D0000 info 10A018A0200 geometry 40,24 640x512\ntraffic 2, misses in checked interval 0, chip data errors 278514, CPU chip cycles held 220998\nSDRAM bursts in checked interval: video read 17622 write 47537 refresh 3731\nTMDS 1401600 pixels, 0 bad; CPU 26591 chipset 115433 reads, 1 fields published in checked interval\n"
+    }
+  ],
+  "hardware": false,
+  "electrical_timing": false,
+  "scope": "Actual capture/DMA/cache/RGB pixel path; behavioural SDRAM; parallel RGB and decoded TMDS; synthetic CPU/chipset traffic on marked cases",
+  "source_sha256": {
+    "fpga/sdram.sv": "a1cf756e9f654d6e88341c58660aa55970b671cb7dca21b2f47f638f2c3bd71e",
+    "fpga/amiga_video.sv": "0cd5b0733acfdd7f8558fd1970d87b643861462e5ba0e4645bef908dcba52dfb",
+    "fpga/amiga_video_capture.sv": "4fc67a0ea228f1c7cab92edb2225063cef9ab50837ebb9756f31c83916823f80",
+    "fpga/amiga_video_geometry.sv": "be6aba46f7e55041521636a700a3fbf6d300f32d51dc0f3bb67a71a3015efb86",
+    "fpga/amiga_video_cache.sv": "ec74a6610a926ac93fa1aaf44d685aa9398bbb2c699b75f9034923f21863ae4a",
+    "fpga/amiga_video_dma.sv": "655e98ec1084ea9c708c8648ebdfbec8ea184f7f6bab249cf20a9e0ac99e4ce3",
+    "fpga/nes_osd.sv": "572bf257d776f9d07213e302122f20f9a94274669e1ebd0557eab652e54edc7e",
+    "fpga/nes_osd_font.sv": "2e916d1c12b144e7310a2f9fe6e3fb39890b359bfcff1cd24fcc8ae1f2e5e4dd",
+    "fpga/hdmi_tx.sv": "6faf1b85a99991f6f5ce37137fc941ba292dd5319f06f679f6f7e8516b115577",
+    "fpga/tmds_encoder.sv": "191544375f36f0f217411e4af22bb6b0a4a21b53efe928ac97c4444b97264748",
+    "tests/sdram_burst_model.v": "220e01743ffd930c1c9e32457d258160ec7560807afe41acbd4bebfc358e8fb1",
+    "tests/video_system_top.sv": "d2be1ed41ac519edeaf74f7030c4bbcfbca580ce27828d527ad40014745c9129",
+    "tests/video_system_test.cpp": "3659531906ea18bdca96242fbdcfd247eedd135160f6e0e8e517d9fb169639ba",
+    "tests/run_video_system.py": "84b7187128e88e24853812b30b711b397626b9d5ca2b2fefec61d09b3925a253"
+  }
+}

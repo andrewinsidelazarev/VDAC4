@@ -60,6 +60,7 @@ struct Sim {
     uint32_t rd(uint32_t a){begin(2,a);for(int i=0;i<8;i++)cycle(0);uint32_t v=0;for(int i=0;i<8;i++)v=(v<<4)|cycle(0);end();return v;}
     void packet(unsigned seq,const uint8_t *p,bool duplicate=false) {
         std::vector<uint32_t> w(64,0);for(unsigned i=0;i<256;i++)w[i/4]|=uint32_t(p[i])<<(8*(i%4));
+        if(seq==1){write(0x4000,w);write(0x40fc,{w.back()});} // payload and last-word replay
         write(0x4000,w);wr(0x48,(seq<<16)|256);if(duplicate)wr(0x48,(seq<<16)|256);
         advance(400ull*16*257);CHECK(!(rd(0x44)&2));CHECK(rd(0x48)==seq);CHECK(rd(0x54)==0);
     }
@@ -70,7 +71,12 @@ int main(int argc,char **argv) {
     std::vector<uint8_t> rom((std::istreambuf_iterator<char>(f)),{});CHECK(rom.size()==524288);
     unsigned cases=0;
     for(unsigned p:{285u,570u,1140u,5700u})for(unsigned phase=0;phase<400;phase+=40) {
-        Sim s(p,phase);CHECK(s.rd(0)==0x56444334);CHECK(s.rd(4)==0x0501000A);
+        Sim s(p,phase);CHECK(s.rd(0)==0x56444334);CHECK(s.rd(4)==0x0501000C);
+        CHECK(s.rd(0x1a0)==0);CHECK(s.rd(0x1a4)==0x41565331);CHECK(s.rd(0x1a8)==0x12345678);
+        for(unsigned v=0;v<16;v++){s.wr(0x1a0,v);CHECK(s.rd(0x1a0)==v);}
+        s.wr(0x1a0,~0u);CHECK(s.rd(0x1a0)==15);s.wr(0x1a0,0);
+        // 0.13.3: режим совместимости — 0x1AC (бит 0), признак AMC1 в 0x1B0
+        CHECK(s.rd(0x1ac)==0);CHECK(s.rd(0x1b0)==0x414D4331);s.wr(0x1ac,~0u);CHECK(s.rd(0x1ac)==1);s.wr(0x1ac,0);CHECK(s.rd(0x1ac)==0);
         for(unsigned i=0;i<36;i++)CHECK(s.rd(0x60+4*i)==0xd1a60000+i);
         s.wr(0x60,0xffffffff);CHECK(s.rd(0x60)==0xd1a60000); // diagnostics are read-only
         CHECK(s.rd(0xf4)==0);CHECK(s.rd(0xf8)==0);
@@ -89,6 +95,9 @@ int main(int argc,char **argv) {
         s.wr(0x44,1);s.wr(0x48,0x10100);CHECK(s.rd(0x54)==1); // missing payload
         s.wr(0x44,1);s.wr(0x4000,0);s.wr(0x48,0x10100);CHECK(s.rd(0x54)==1); // partial payload
         s.wr(0x44,1);s.wr(0x48,0x20100);CHECK(s.rd(0x54)==1); // sequence gap
+        s.wr(0x44,1);s.wr(0x4004,0);CHECK(s.rd(0x54)==1); // payload starts with a gap
+        s.wr(0x44,1);s.wr(0x4000,0);s.wr(0x4008,0);CHECK(s.rd(0x54)==1); // missing middle word
+
         CHECK((s.rd(0x108)>>16)==0x5d01);CHECK((s.rd(0x100)>>16)==2850);
         CHECK(s.q.sd_cs_n);s.wr(0x100,0x103);CHECK(!s.q.sd_cs_n);
         s.write(0x2000,{0x12345678,0x9abcdef0});s.advance(2400);s.wr(0x104,0);s.wr(0x108,8);
@@ -131,6 +140,13 @@ int main(int argc,char **argv) {
             s.wr(0x194,4);s.wr(0x180,1048576);CHECK(s.q.disk_size==1048576);s.wr(0x194,0);
             s.q.disk_sector=100000;s.q.disk_rd=0x10;s.advance(1600);s.q.disk_rd=0;s.advance(1600);
             CHECK((s.rd(0x184)>>8&255)==0x10);t=s.rd(0x18c);s.write(0x5000,payload);s.wr(0x190,t);s.advance(400ull*2100);
+            CHECK(!s.q.disk_busy);CHECK(!(s.rd(0x184)&4));
+            // HD1 (ядро 0.11, карта Evo у AMIGA.ELF 0.18): unit 5 подключается, запрос второго диска — 0x20; unit 6 — отказ.
+            s.wr(0x194,5);s.wr(0x180,2013290496u);CHECK(s.q.disk_size==2013290496u);CHECK(!(s.rd(0x184)&4));
+            s.wr(0x194,6);s.wr(0x180,1048576);CHECK(s.rd(0x184)&4);CHECK(s.q.disk_size==2013290496u);s.wr(0x194,0);
+            s.q.disk_reset=1;s.advance(1600);s.q.disk_reset=0;s.advance(1600);CHECK(!(s.rd(0x184)&4));
+            s.disk_bytes.clear();s.q.disk_sector=1008;s.q.disk_rd=0x20;s.advance(1600);s.q.disk_rd=0;s.advance(1600);
+            CHECK((s.rd(0x184)>>8&255)==0x20);CHECK(s.rd(0x188)==1008);t=s.rd(0x18c);s.write(0x5000,payload);s.wr(0x190,t);s.advance(400ull*2100);
             CHECK(!s.q.disk_busy);CHECK(!(s.rd(0x184)&4));
             // Дискета и диск разом: ящик берёт диск, запрос дискеты ждёт своей очереди и не считается принятым.
             s.disk_bytes.clear();s.q.disk_sector=200;s.q.disk_rd=0x11;s.advance(1600);CHECK(s.q.disk_busy);CHECK(s.q.disk_served_ide);

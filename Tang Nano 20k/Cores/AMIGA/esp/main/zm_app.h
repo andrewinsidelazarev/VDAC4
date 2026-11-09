@@ -29,10 +29,12 @@ extern "C" {
 #endif
 
 #define ZM_APP_ABI_MAJOR 1
-#define ZM_APP_ABI_MINOR 10   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
+#define ZM_APP_ABI_MINOR 12   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
                                 4: core_* (ядра ПЛИС из кэша BL616), link_*, sock_* (TCP/UDP);
                                 5: ui_* — экран приложения оверлеем Tang поверх картинки Evo;
-                                6: app_done — приложение кончило работу: выгрузить */
+                                6: app_done — приложение кончило работу: выгрузить;
+                                11: wifi_rssi — уровень сигнала Wi-Fi;
+                                12: sock_open_tls — сокет TCP с шифрованием TLS */
 
 /* core->temperature: датчика нет (или ещё не прочитан). */
 #define ZM_TEMPERATURE_UNKNOWN (-32768)
@@ -113,6 +115,8 @@ typedef struct {
   uint16_t faults_i2s;            /* отказов вывода в ЦАП */
   uint16_t cover_serial;          /* меняется со сменой обложки; 0 — обложки нет */
   char stations[ZM_UI_STATIONS][ZM_UI_STATION_TEXT];
+  /* ABI 1.11 */
+  int8_t wifi_dbm;                /* радио: уровень Wi-Fi, дБм (core->wifi_rssi); 0 — неизвестен */
 } zm_ui_model_t;
 
 /* ABI 1.7: UTF-8 имена на microSD Tang; flags bit 0 — каталог. */
@@ -127,6 +131,15 @@ typedef struct zm_core zm_core_t;
 typedef struct zm_app zm_app_t;
 
 typedef void (*zm_task_fn)(void* arg);
+
+/* task_start: stack_bytes | ZM_TASK_STACK_PSRAM — внутренней памяти на стек нет — его можно взять в
+ * PSRAM (прошивка 0.1.112+; старая такого размера не даст: ZM_NO_MEMORY, как и без флага). Только
+ * задаче, которая не трогает flash ESP: пока он пишется, кэш выключен и стек в PSRAM недоступен.
+ * 03.11.2026 при радио задаче поиска обложки (6 КБ) внутренней памяти не хватало (свободно ~2 КБ).
+ * Осторожно: с PLAYER 1.34 (поиск с этим флагом при радио) ESP упала — порча кучи; PLAYER 1.35 флаг
+ * не берёт. И задача со стеком в PSRAM, кончаясь, удаляется вспомогательной задачей ESP-IDF во
+ * внутренней памяти: её нет — abort(). Брать флаг — только с запасом внутренней памяти. */
+#define ZM_TASK_STACK_PSRAM 0x80000000u
 
 struct zm_core {
   uint16_t size;
@@ -178,7 +191,8 @@ struct zm_core {
    * имени не ищутся (сборка ELF их скрывает): таблицу функций модуль отдаёт
    * через arg2, как приложение.
    * resource — файл целиком в PSRAM (банк MIDI): живёт до перезапуска ESP или
-   * до resource_release. ZM_NOT_FOUND — файла нет: приложение просит плагин
+   * до resource_release (NULL — все ресурсы, прошивка 0.1.112+; старые на NULL ничего не делают).
+   * ZM_NOT_FOUND — файла нет: приложение просит плагин
    * прислать его (своей командой), и ядро кладёт его в кэш. */
   int (*module_open)(const char* name, void* arg1, void* arg2, void** handle,
                      int* entry_result);
@@ -200,7 +214,9 @@ struct zm_core {
    * соединилось). Возвращает поток (ответ 2xx) или NULL. Запрос — HTTP/1.0: тело
    * без chunked; ответ «ICY 200» (Shoutcast) — как HTTP 200.
    * net_header — значение заголовка ответа (имя без учёта регистра) или NULL;
-   * строка живёт до следующего вызова для этого потока.
+   * строка живёт до следующего вызова для этого потока. Имя «:url» (прошивка
+   * 0.1.119+) — адрес, с которого пришёл ответ, после всех переадресаций; у
+   * прошивки старше — NULL.
    * net_read — до count байтов тела: >0 — сколько, 0 — за timeout_ms ничего,
    * −1 — конец или обрыв.
    * net_close — закрыть. Потоков разом — до двух; звать из задачи, открывшей
@@ -315,6 +331,19 @@ struct zm_core {
    * Открыть его — sd_open. ZM_NO_MEMORY — нет места на карте, ZM_BUSY — карта занята,
    * ZM_ERROR — файл уже есть или иной отказ; при отказе файла не остаётся. */
   int (*sd_create)(const char* path, uint32_t sectors);
+
+  /* ABI 1.11: wifi_rssi — уровень сигнала точки доступа: ZM_OK, *dbm — дБм (меньше нуля);
+   * ZM_ERROR — Wi-Fi не подключена. Драйвер Wi-Fi при каждом вызове — звать не чаще раза в
+   * секунду. Звать, только если size таблицы вмещает поле. */
+  int (*wifi_rssi)(int* dbm);
+
+  /* ABI 1.12: sock_open_tls — сокет TCP с шифрованием TLS (HTTPS и подобное) к host:port.
+   * Сертификат сервера проверяется по набору корневых сертификатов прошивки (тот же, что у
+   * net_open), договор TLS — до timeout_ms. Номер сокета ≥ 0 — дальше те же sock_send,
+   * sock_recv и sock_close (сокетов разом — до пяти вместе с обычными); ZM_ERROR — не
+   * соединилось или сертификат не прошёл. Договор TLS расходует много стека: звать из задачи
+   * со стеком не меньше 6 КБ. Звать, только если size таблицы вмещает поле. */
+  int (*sock_open_tls)(const char* host, uint16_t port, uint32_t timeout_ms);
 };
 
 /* Таблица приложения: заполняет приложение в main. */

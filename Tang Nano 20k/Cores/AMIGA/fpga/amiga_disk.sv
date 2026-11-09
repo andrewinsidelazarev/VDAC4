@@ -21,7 +21,7 @@ module amiga_disk (
     reg [3:0] pace;
     reg [31:0] sector, token, completed, df0_size;
     reg [7:0] drive;
-    reg [2:0] unit;                     // 0 — DF0, 4 — HD0
+    reg [2:0] unit;                     // 0 — DF0, 4 — HD0, 5 — HD1 (карта Evo, ядро 0.11)
     reg writing, error;
     reg [127:0] filled;
     reg [31:0] rx [0:127];              // хост -> гость
@@ -63,7 +63,7 @@ module amiga_disk (
             if (wr_stb && wr_addr==18'h67) floppy_wrprot<=wr_data[0];
             // Импульс сообщает гостю о смене носителя, в том числе во время сброса.
             if (wr_stb && wr_addr==18'h60 && state==IDLE) begin
-                if (unit==0 ? (wr_data==0 || wr_data==901120) : unit==4) begin
+                if (unit==0 ? (wr_data==0 || wr_data==901120) : (unit==4 || unit==5)) begin
                     image_size<={32'b0,wr_data}; image_mounted[unit]<=1; error<=0;
                     if (unit==0) df0_size<=wr_data;
                 end else error<=1;

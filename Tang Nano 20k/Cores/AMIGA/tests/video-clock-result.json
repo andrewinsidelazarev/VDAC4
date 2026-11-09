@@ -1,0 +1,14 @@
+{
+  "passed": true,
+  "hardware": false,
+  "vendor_model": "C:\\Gowin\\Gowin_V1.9.11.03_Education_x64\\IDE\\simlib\\gw2a\\prim_sim.v",
+  "vendor_model_sha256": "797e52271b149b650f4ed6ae0ef2794a853c6ef19973f957abc4f576fa48b7a1",
+  "result": "PASS 2850 CLKOUTD3 edges aligned to CLKOUT falling edge; SDRAM clock CLKOUTP 270 degrees\npixel_edges=2700 pixel_period_ns=37.040000 serializer_period_ns=7.408000\nperiod85_ns=11.696000 period28_ns=35.088000 sdram_phase_ns=8.772000 sdram_high_ns=5.848000 video_lock=1\nE:\\zx\\cache\\tmp\\amiga-video-clock-12dafy49\\pll_tb.sv:46: $finish called at 300000000 (1ps)\n",
+  "source_sha256": {
+    "fpga/amigaclks.v": "44a0201380998951abf60f0e72035bda4d1bb348cb564e0c611f5947eb593021",
+    "fpga/amigaVdac4.sdc": "0d1018d153d4709cb80dd541e0955b122aa368ca555a2d45307a3ca425d3d948",
+    "tests/run_video_clock.py": "6d7145240676b71677d4497b2542470ddf073f50c6dfb5bffb7ec468e9ab791d"
+  },
+  "clock28_phase_ns": 5.847953216374269,
+  "scope": "Vendor behavioral system PLL, 27/135MHz video clocks (576p, 0.13.0), divider initialization and SDC correspondence; no routed clock skew or analog jitter measurement"
+}

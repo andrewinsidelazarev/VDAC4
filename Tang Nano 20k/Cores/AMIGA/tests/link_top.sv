@@ -10,6 +10,7 @@ module link_top(
     output [7:0] disk_mounted, disk_data, output [63:0] disk_size,
     output disk_busy, disk_served_ide, disk_done, disk_strobe, output [8:0] disk_addr
 );
+    wire [3:0] picture;wire compat;wire [31:0] video_diagnostic=32'h12345678;
     reg [1:0] phase=0;
     wire [31:0] debug_words [0:35];
     wire [8:0] trace_index; wire [31:0] trace_start;

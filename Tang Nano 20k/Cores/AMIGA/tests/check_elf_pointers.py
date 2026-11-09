@@ -24,13 +24,17 @@ def sections(data):
 
 
 def loop_end(data, text, literal):
-    """Литерал читает l32r, и следом идёт wsr.lend: значение — конец цикла, адрес кода."""
+    """Литерал читает l32r, и следом идёт wsr.lend того же регистра: значение — конец цикла, адрес кода.
+    wsr.lend at — байты (at<<4) 01 13; регистр бывает любой (AMIGA.ELF 0.18: a14 после nop)."""
     for at in range(text['off'], text['off'] + text['size'] - 3):
         if data[at] & 15 != 1:
             continue
         pc = at - text['off'] + text['addr']
         imm = data[at + 1] | data[at + 2] << 8
-        if ((pc + 3) & ~3) + ((imm | ~0xFFFF) << 2) == literal and b'\xf0\x01\x13' in data[at + 3:at + 9]:
+        if ((pc + 3) & ~3) + ((imm | ~0xFFFF) << 2) != literal:
+            continue
+        wsr = bytes([data[at] & 0xF0, 0x01, 0x13])
+        if wsr in data[at + 3:at + 9]:
             return True
     return False
 

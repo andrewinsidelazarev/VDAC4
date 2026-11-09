@@ -149,6 +149,8 @@
 
 module minimig
 (
+ output wire video_window,
+ input wire video_steal,
 	//m68k pins
 	input [23:1]  cpu_address, // m68k address bus
 	output [15:0] cpu_data, // m68k data bus
@@ -396,6 +398,8 @@ wire        _wprot;				//disk is write-protected
 
 wire  [1:0] blver = 2'b00;     // part of mister video config, originally set by MCU
 wire        hbl, hde;
+wire video_vde,video_hde;
+assign video_window=video_vde && video_hde;
 assign      hblank = blver ? ~hde : hbl;
 
 //--------------------------------------------------------------------------------------
@@ -447,6 +451,7 @@ assign ide_fast = ~ide_config[5] & cpucfg[1];
 //instantiate agnus
 agnus AGNUS1
 (
+ .vde(video_vde),
 	.clk(clk),
 	.clk7_en(clk7_en),
 	.cck(cck),
@@ -490,7 +495,8 @@ agnus AGNUS1
 	.a1k(chipset_config[2]),
 	.ecs(|chipset_config[4:3]),
 	.aga(chipset_config[4]),
-	.floppy_speed(floppy_config[0])
+	.floppy_speed(floppy_config[0]),
+	.video_hold(video_steal)   // 9.11.2026: видео отстаёт — блиттер уступает каждый второй слот
 );
 
 //instantiate paula
@@ -590,7 +596,8 @@ assign res = {shres & |chipset_config[4:3], hires};
 
 //instantiate Denise
 denise DENISE1
-(		
+(
+ .display_window(video_hde),		
 	.clk(clk),
 	.clk7_en(clk7_en),
 	.c1(c1),
@@ -680,9 +687,9 @@ minimig_m68k_bridge CPU1
 	.dbs(dbs),
 	.xbs(xbs),
 `ifndef DISABLE_IDE
-	.nrdy(gayle_nrdy & rd_cyc),
+	.nrdy((gayle_nrdy & rd_cyc) | (video_steal & dbs)), // видео отстаёт: CPU ждёт chip RAM
 `else
-	.nrdy(1'b0),
+	.nrdy(video_steal & dbs),
 `endif
 	.bls(bls),
 	.memory_config(memory_config[3:0]),

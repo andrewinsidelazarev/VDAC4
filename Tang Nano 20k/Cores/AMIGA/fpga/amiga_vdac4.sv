@@ -4,6 +4,14 @@
 `define ENABLE_AGA
 `define CPU_SLOW14
 `define ENABLE_CACHE
+// 9 ноября 2026 (0.13.5): турбо chip RAM снова включено (osd_turbo=3), поэтому нужен CHIPRAM_CACHE —
+// снуп всех записей chip-шины (CPU и DMA) в кэш CPU, иначе свежераспакованный код шёл бы из старых строк.
+// Причина: без кэша TG68K берёт каждое слово кода из chip RAM по шине чипсета (16 бит, ~560 нс), а у A1200
+// есть кэш команд 68020 и 32-битная шина. Nexus 7 (Andromeda) держит весь код в chip RAM: VBL первой сцены
+// — ~13 тыс. команд и ~11 тыс. слов данных за кадр (эмуляция 68020), это почти весь кадр шины; основной поток
+// (распаковка, предрасчёт следующей сцены) не получал времени, к позиции музыки $043A не успевал — спираль
+// крутилась вечно. Турбо chip: выборка команд из chip RAM через кэш, данные — по шине чипсета, как прежде.
+// (7 ноября 2026 CHIPRAM_CACHE был убран как мёртвый код при osd_turbo=2.)
 `define CHIPRAM_CACHE
 `define DENISE_EBR
 `define ENABLE_RTC
@@ -69,7 +77,8 @@ wire clk_7;
 wire clk_28m;
 wire clk_85m;
 wire clk_85m_shifted;
-wire clk_pixel;
+wire clk_pixel,video_locked;
+reg video_keep28=0;   // clk_28m: PLL видео уже захватывала частоту (см. ниже)
 
 amigaclks amigaclks (
 	.clk_in(clk_27m),
@@ -80,8 +89,9 @@ amigaclks amigaclks (
 	.locked(pll_lock),
 	.vidmode(1'b1),
 	.clk_tmds(clk_pixel_x5),
-	.clk_pixel(),
-	.video_locked()
+	.clk_pixel(clk_pixel),
+	.video_locked(video_locked),
+	.video_keep(video_keep28)
 );
 
 wire rst_28m, rst_28m_n;
@@ -107,7 +117,7 @@ wire	clk7_en;
 wire	clk7n_en;
 
 
-assign clk_pixel=clk_28m; // one pixel domain; serializer runs at 5x
+
 
 assign mux_sel=0, pa_en=0, ft_int_n=1, ft_miso=0;
 assign link_irq_n=1'bz;
@@ -121,11 +131,19 @@ wire hid_strobe, hid_start, hid_reset; wire [7:0] hid_data, key_free;
 wire [14:0] audio_left, audio_right;
 wire [5:0] leds; wire fdd_step_n;
 wire [1:0] osd_cpu=3, osd_chipmem=3, osd_slowmem=0, osd_fastmem=2;
-wire [2:0] osd_chipset=6, osd_turbo=2, osd_volume=4;
+wire [2:0] osd_chipset=6, osd_turbo=3, osd_volume=4; // турбо: бит 0 chip RAM (с 0.13.5), бит 1 kick; режим совместимости — 0
 wire [1:0] osd_floppy_drives=0, osd_video_filter=0, osd_video_scanlines=0, osd_video_screen=0;
 wire osd_video_mode=0, osd_floppy_turbo=0, osd_ide_enable=1, osd_stereo_mix=0;
 wire osd_floppy_wrprot=floppy_wrprot;
 wire hs_n, vs_n; wire [7:0] red, green, blue;
+wire video_window,video_lace,video_field;
+wire [3:0] picture;
+wire compat_req;   // режим совместимости из LINK (0x6B), применяется при сбросе — см. cpu_config ниже
+wire video_cs,video_we,video_double,video_steal;wire [20:0] video_address;
+wire [127:0] video_din,video_dout;wire video_ack,video_read_valid,video_single;wire [1:0] video_fetch_index;wire [31:0] video_diagnostic;
+// 7 ноября 2026: видео отстаёт (clk85) -> clk28, в nrdy моста CPU minimig.
+reg [1:0] video_steal_s=0;wire video_steal_28=video_steal_s[1];
+always @(posedge clk_28m) video_steal_s<={video_steal_s[0],video_steal};
 wire [2:0] mouse_buttons;
 wire kbd_mouse_level, kbd_reset, keyboard_ack;
 wire [1:0] kbd_mouse_type; wire [7:0] kbd_mouse_data, joystick0, joystick1;
@@ -146,14 +164,36 @@ always @(posedge clk_28m) begin
     else if (warm_reset!=0) warm_reset<=warm_reset-1'b1;
 end
 wire nanomig_reset=!rom_done || |warm_reset;
+// 7 ноября 2026: развёртка HDMI сбрасывается только до первого захвата PLL видео, как в ядре
+// MD (md_video.sv, 03.11.2026, плата). LOCK у rPLL на плате изредка проваливается при живом
+// такте; прежде каждый провал сбрасывал hx/vy, кодеры TMDS, кэш и геометрию — кадр рвался,
+// телевизор и карта захвата теряли картинку («иногда пропадает»). Дальше счётчики идут сами.
+reg [2:0] video_lock_s=0;
+reg video_run=0;
+always @(posedge clk_pixel) begin
+    video_lock_s<={video_lock_s[1:0],video_locked};
+    if(video_lock_s[2]) video_run<=1;
+end
+// 8 ноября 2026: LOCK PLL видео — в домене clk_28m (другая PLL). Пиксельный такт даёт CLKDIV,
+// а он до 0.12.12 стоял, пока LOCK низкий: счётчик в домене clk_pixel (0.12.11) провала не видел.
+// video_keep28: после первого захвата CLKDIV больше не останавливается — провал LOCK не рвёт
+// пиксельный такт и линию такта TMDS. Провалы считаются: 0x68, биты 29:24 (до 63).
+reg [2:0] video_lock28=0;
+reg [5:0] video_lock_drops=0;
+always @(posedge clk_28m) begin
+    video_lock28<={video_lock28[1:0],video_locked};
+    if(video_lock28[2]) video_keep28<=1;
+    if(video_keep28 && video_lock28[2:1]==2'b10 && video_lock_drops!=6'd63)
+        video_lock_drops<=video_lock_drops+1'b1;
+end
 wire [31:0] debug_words [0:35];
 wire [31:0] cpu_debug [0:23];
 wire [31:0] cpu_trace [0:3];
 wire [8:0] trace_index; wire [31:0] trace_start;
 wire osd_wr, osd_show, floppy_wrprot; wire [8:0] osd_addr; wire [31:0] osd_data, osd_bar;
 wire [5:0] osd_sel; wire [29:0] osd_band, osd_rule; wire [11:0] rtc;
-assign debug_words[0]=32'h414d4406;
-assign debug_words[1]={14'b0,warm_reset,btn[1:0],kbd_reset,soft_reset,nanomig_reset,
+assign debug_words[0]=32'h414d4407;
+assign debug_words[1]={1'b0,cpu_debug[0][12:0],warm_reset,btn[1:0],kbd_reset,soft_reset,nanomig_reset,
                       rom_done,sdram_ready,pll_lock,rst_28m,1'b0};
 `ifdef AMIGA_DEBUG
 reg [15:0] debug_hs_count, debug_vs_count;
@@ -181,10 +221,12 @@ assign debug_words[31]={8'b0,red,green,blue};
 for (genvar t=0;t<4;t=t+1) assign debug_words[32+t]=cpu_trace[t];
 `else
 // Обычная сборка: счётчики и трасса занимают логику и блочную память, включаются define AMIGA_DEBUG.
-for (genvar d=2;d<36;d=d+1) assign debug_words[d]=0;
+assign debug_words[2]={video_locked,video_run,video_lock_drops,cpu_debug[2][23:0]}; // LOCK видео, развёртка идёт, провалы LOCK, адрес CPU
+for (genvar d=3;d<36;d=d+1) assign debug_words[d]=0;
 `endif
 amiga_link link(.clk(clk_28m),.rst_n(rst_28m_n),.sck(link_sck),.cs_n(link_cs_n),
     .io_in(link_io),.io_out(link_out),.io_oe(link_oe),.clk7_en(clk7_en),.clk7n_en(clk7n_en),
+    .picture(picture),.video_diagnostic(video_diagnostic),
     .audio_left(audio_left),.audio_right(audio_right),.key_free(key_free),.debug_words(debug_words),
     .trace_index(trace_index),.trace_start(trace_start),
     .osd_wr(osd_wr),.osd_addr(osd_addr),.osd_data(osd_data),.osd_show(osd_show),.osd_sel(osd_sel),
@@ -195,7 +237,7 @@ amiga_link link(.clk(clk_28m),.rst_n(rst_28m_n),.sck(link_sck),.cs_n(link_cs_n),
     .hid_strobe(hid_strobe),.hid_start(hid_start),.hid_data(hid_data),.hid_reset(hid_reset),
     .sd_cs_n(SD_CS),.sd_sck(SD_SCK),.sd_mosi(SD_MOSI),.sd_miso(SD_MISO),
     .boot_req(boot_req),.soft_reset(soft_reset),.rom_ready(rom_done),
-    .rom_we(rom_write),.rom_addr(rom_address),.rom_word(rom_value));
+    .rom_we(rom_write),.rom_addr(rom_address),.rom_word(rom_value),.compat(compat_req));
 hid hid(.clk(clk_28m),.reset(rst_28m | hid_reset),.data_in_strobe(hid_strobe),
     .data_in_start(hid_start),.data_in(hid_data),.data_out(),.db9_port(6'b0),.irq(),.iack(1'b1),
     .mouse_buttons(mouse_buttons),.kbd_mouse_level(kbd_mouse_level),.kbd_mouse_type(kbd_mouse_type),
@@ -227,11 +269,21 @@ wire [47:0] fastram_dout48; // wide read data of the cpu cache port
 assign ram_din = sdram_dout;
 
 // pack config values into minimig config
+// 8 ноября 2026 (0.13.3): режим совместимости (amiga_link 0x6B, F11 -> SETUP -> COMPATIBILITY) — для старых
+// демок и игр под A500. Берётся только во время сброса Amiga (nanomig_reset): тип процессора и карта памяти
+// под работающим процессором не меняются. В режиме:
+//  - cpu_config 2'b00 (68000): кадры исключений 68000 без слова формата (трюк «RTE» старого кода), MOVE SR в
+//    режиме пользователя, MOVEC — неверная инструкция, так что Exec видит 68000 (SR_Read/VBR_Stackframe = 2 в
+//    cpu_wrapper.v); адрес 24 бита, как у A500 (cpu_wrapper.v, cpu_addr);
+//  - fast RAM нет (автоконфигурация её не объявляет; fastramcfg защёлкивается при сбросе в cpu_wrapper.v);
+//  - турбо нет: ROM, как и всё остальное, — через шину чипсета, без быстрого пути и его кэша.
+reg compat_mode=1'b0;
+always @(posedge clk_28m) if (nanomig_reset) compat_mode<=compat_req;
 wire [5:0] chipset_config = { 1'b0,osd_chipset,osd_video_mode,1'b0 };
-wire [1:0] cpu_config = { |osd_cpu ? 2'b11 : 2'b00 };
-wire [7:0] memory_config = { 4'b0_000, osd_slowmem, osd_chipmem };   
-wire [2:0] fastram_config = { 1'b0, osd_fastmem };   
-wire [2:0] turbo_config = { osd_turbo };
+wire [1:0] cpu_config = compat_mode ? 2'b00 : { |osd_cpu ? 2'b11 : 2'b00 };
+wire [7:0] memory_config = { 4'b0_000, osd_slowmem, osd_chipmem };
+wire [2:0] fastram_config = compat_mode ? 3'b000 : { 1'b0, osd_fastmem };
+wire [2:0] turbo_config = compat_mode ? 3'b000 : { osd_turbo };
 wire [3:0] floppy_config = { osd_floppy_drives, osd_floppy_wrprot, osd_floppy_turbo };
 wire [3:0] video_config = { osd_video_filter, osd_video_scanlines };   
 // FIXME - setting ide_config[5] prevents minimig from using
@@ -271,6 +323,7 @@ nanomig nanomig
 `endif
 
  // video
+ .video_window(video_window),.video_lace(video_lace),.video_field(video_field),.video_steal(video_steal_28),
  .hs(hs_n), // horizontal sync
  .vs(vs_n), // vertical sync
  .r(red),
@@ -372,7 +425,7 @@ sdram #(
     .RAS_WIDTH(11),
     .CAS_WIDTH(8),
     .SYNC_DELAY(3),               // falling-edge DQ capture preserves return timing
-    .CHIP48_BURST(CHIP48_BURST)   // the wide 64 bit fetch AGA or cache needs
+    .VIDEO_PORT(1),.VIDEO_STREAM(1),.CHIP48_BURST(CHIP48_BURST)   // the wide 64 bit fetch AGA or cache needs
 ) sdram (
 	.sd_data    ( IO_sdram_dq   ), // 32 bit bidirectional data bus
 	.sd_addr    ( O_sdram_addr  ), // 11 bit multiplexed address bus
@@ -407,75 +460,23 @@ sdram #(
 	.p2_ds         ( fastram_be      ), // upper/lower data strobe
 	.p2_cs         ( fastram_sel     ), // cpu/chipset requests read/wrie
 	.p2_we         ( fastram_wr      ),  // cpu/chipset requests write
-	.p2_ack        ( fastram_ready   )
+	.p2_ack        ( fastram_ready   ),
+    .video_cs(video_cs),.video_we(video_we),.video_double(video_double),.video_urgent(video_steal),.video_addr(video_address),
+    .video_din(video_din),.video_dout(video_dout),.video_ack(video_ack),.video_read_valid(video_read_valid),.video_single(video_single),.video_fetch_index(video_fetch_index)
 );
 
 
-wire [15:0] silent_audio[1:0];
-assign silent_audio[0]=0, silent_audio[1]=0;
-
-// Окно меню дискет поверх картинки. Координаты считаются от синхроимпульсов AGA: кадр 908x626,
-// на HDMI видно 165..886 x 45..622 (снято с карты захвата), середина 525 x 334; окно 470x406 — вокруг неё.
-reg [10:0] osd_cx=0; reg [9:0] osd_cy=0; reg osd_hs=1, osd_vs=1;
-always @(posedge clk_28m) begin
-    osd_hs<=hs_n; osd_vs<=vs_n;
-    if (osd_hs && !hs_n) begin osd_cx<=0; osd_cy<=osd_cy+1'b1; end
-    else osd_cx<=osd_cx+1'b1;
-    if (osd_vs && !vs_n) osd_cy<=0;
-end
-wire osd_box, osd_hl, osd_band_px, osd_text; wire [23:0] osd_text_rgb;
-nes_osd #(.COLS(56),.ROWS(24),.PAD(12),.WX0(290),.WY0(131),.FRAME_Y(1)) osd(.clk(clk_28m),
-    .wr(osd_wr),.wr_addr(osd_addr),.wr_data(osd_data),.show(osd_show),.sel(osd_sel),
-    .band_rows(osd_band),.rule_rows(osd_rule),
-    .clk_pixel(clk_28m),.cx(osd_cx),.cy(osd_cy),
-    .box(osd_box),.hl(osd_hl),.band(osd_band_px),.text(osd_text),.text_rgb(osd_text_rgb));
-wire [23:0] osd_rgb = osd_text ? osd_text_rgb : osd_hl ? 24'h2C4C9C : osd_band_px ? 24'h1E3266 :
-    osd_box ? {3'b0,red[7:3],3'b0,green[7:3],3'b0,blue[7:3]}+24'h080C28 : {red,green,blue};
-wire [2:0] tmds;
-wire tmds_clock;
-
-wire vreset, vpal, interlace, short_frame;
-
-video_analyzer video_analyzer (
-    .clk         ( clk_28m   ),
-    .hs          ( hs_n      ),
-    .vs          ( vs_n      ),
-    .pal         ( vpal      ),
-    .short_frame ( short_frame ),
-    .screen      ( osd_video_screen ),
-    .interlace   ( interlace ),
-    .vreset      ( vreset    )
-);
-
-hdmi #(
-    .DVI_OUTPUT(1),
-    .AUDIO_BIT_WIDTH(16),
-    .VENDOR_NAME( { "MiSTle", 16'd0} ),
-    .PRODUCT_DESCRIPTION( {"Nanomig", 72'd0} )
-) hdmi(
-  .clk_pixel_x5(clk_pixel_x5),
-  .clk_pixel(clk_pixel),
-  .clk_audio(1'b0),
-  .audio_sample_word( silent_audio ),
-  .tmds(tmds),
-  .tmds_clock(tmds_clock),
-
-  .pal_mode(vpal),
-  .short_frame ( short_frame ),
-  .screen ( osd_video_screen ),
-  .interlace(interlace),
-  .reset(vreset),    // signal to synchronize HDMI
-
-  .rgb( osd_rgb )
-);
-
-// differential output
-ELVDS_OBUF tmds_bufds [3:0] (
-        .I({tmds_clock, tmds}),
-        .O({O_tmds_clk_p, O_tmds_data_p}),
-        .OB({O_tmds_clk_n, O_tmds_data_n})
-);
-
-
+// 720p renderer, independent of the chipset raster. Audio remains on LINK.
+wire [2:0] tmds;wire tmds_clock;
+amiga_video video(.clk28(clk_28m),.clk85(clk_85m),.hclk(clk_pixel),.hclk5(clk_pixel_x5),
+ .reset28(rst_28m),.reset85(rst_85m),.hreset(!video_run),
+ .hs(hs_n),.vs(vs_n),.lace(video_lace),.field(video_field),.window_in(video_window),
+ .rgb_in({red,green,blue}),.picture(picture),
+ .osd_wr(osd_wr),.osd_addr(osd_addr),.osd_data(osd_data),.osd_show(osd_show),.osd_sel(osd_sel),
+ .osd_band(osd_band),.osd_rule(osd_rule),
+ .ram_cs(video_cs),.ram_we(video_we),.ram_double(video_double),.ram_address(video_address),.ram_din(video_din),
+ .ram_dout(video_dout),.ram_ack(video_ack),.ram_read_valid(video_read_valid),.ram_single(video_single),.ram_fetch_index(video_fetch_index),.diagnostic(video_diagnostic),.steal(video_steal),.raster_debug(),
+ .tmds_clock(tmds_clock),.tmds(tmds));
+ELVDS_OBUF tmds_bufds[3:0](.I({tmds_clock,tmds}),.O({O_tmds_clk_p,O_tmds_data_p}),.OB({O_tmds_clk_n,O_tmds_data_n}));
 endmodule
 `default_nettype wire

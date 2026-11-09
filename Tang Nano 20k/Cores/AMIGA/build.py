@@ -6,6 +6,9 @@ from validation import fpga_report
 root=Path(__file__).resolve().parent
 ap=argparse.ArgumentParser();ap.add_argument('kind',choices=['esp','fpga'])
 ap.add_argument('--cache',default=r'E:\zx\cache\tmp')
+ap.add_argument('--place-option',type=int,choices=[0,1,2],help='Isolated Gowin placement strategy')
+ap.add_argument('--synthesis-target',type=float,help='Compiler target only; physical clocks and SDC stay unchanged')
+ap.add_argument('--no-replication',action='store_true',help='Disable optional PnR replication without changing RTL')
 args=ap.parse_args()
 stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d-%H%M%SZ')
 stage=Path(args.cache)/('amiga-'+args.kind+'-'+stamp)
@@ -20,6 +23,14 @@ else:
     shutil.copytree(root/'upstream/src',stage/'upstream/src',ignore=shutil.ignore_patterns('impl'))
     shutil.copytree(root/'fpga',stage/'fpga')
     shutil.copyfile(root/'build.tcl',stage/'build.tcl')
+    if args.place_option is not None:
+        import re
+        p=stage/'build.tcl';p.write_text(re.sub(r'set_option -place_option [012]',f'set_option -place_option {args.place_option}',p.read_text()))
+    if args.synthesis_target is not None:
+        import re
+        p=stage/'build.tcl';p.write_text(re.sub(r'set_option -global_freq [0-9.]+',f'set_option -global_freq {args.synthesis_target}',p.read_text()))
+    if args.no_replication:
+        p=stage/'build.tcl';p.write_text(p.read_text().replace('run all','set_option -replicate_resources 0\nrun all'))
     command=[r'C:\Gowin\Gowin_V1.9.11.03_Education_x64\IDE\bin\gw_sh.exe','build.tcl']
     target=stage/'impl/pnr/amigaVdac4.bin'
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()

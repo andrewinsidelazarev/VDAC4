@@ -9,6 +9,8 @@
 // TODO:
 // - check IDE head adressing heads[0] vs heads[drive]
 module nanomig (
+ output wire video_window,video_lace,video_field,
+ input wire video_steal,
    input	 clk_sys,
    input	 reset,
    input	 por,
@@ -365,62 +367,30 @@ cpu_wrapper cpu_wrapper
 // for the whole 7MHz bus cycle, which covers the three clk_sys cycles the
 // snoop state machine needs to look up and update the cached copy.
 `ifdef CHIPRAM_CACHE
-// Chip bus writes have to reach the cache or freshly loaded code keeps
-// executing from stale cache lines. Two problems have to be solved:
-//   - the write strobe is only asserted for about two of the four clocks of a
-//     7MHz bus cycle, while the cache samples the snoop address and data three
-//     clocks after being told about the write, so the live bus signals would
-//     hand it the following access instead,
-//   - the cache needs three clocks per snoop while the chip bus can deliver a
-//     write every four, so a write arriving while the snoop machine is still
-//     busy would be dropped silently.
-// Writes are therefore queued and handed over at a fixed one-per-four-clocks
-// pace, with address, data and byte selects held stable until the cache has
-// consumed them.
+// Записи chip-шины (CPU и DMA) обязаны попасть в кэш, иначе свежезаписанный код
+// исполняется из старых строк. Строб записи держится около двух из четырёх тактов
+// цикла 7 МГц, а кэш берёт адрес и данные снупа три такта подряд после импульса
+// (IDLE -> WAIT -> SNOOP в cpu_cache_new), поэтому адрес, данные и байты
+// защёлкиваются по спаду строба и держатся до следующей записи.
+// 9 ноября 2026 (0.13.5): прежняя очередь на две записи с выдачей раз в четыре такта
+// (10 блоков SSRAM, указатели) заменена одним регистром — ПЛИС заполнена (CLS 100 %).
+// Этого достаточно: запись на chip-шине бывает не чаще раза в четыре такта clk_sys,
+// снупу нужно три, автомат снупа ничем другим не занят (очистка кэша по CACR делает
+// недействительным всё, пропуск снупа во время неё безвреден, как и прежде).
 reg         ram_we_n_d;
 reg  [22:1] snoop_adr_r;
 reg  [15:0] snoop_dat_r;
 reg  [1:0]  snoop_bs_r;
 reg         snoop_act;
-
-// two entries are enough: the chip bus delivers a write at most every four
-// clocks and one is handed over every four, so the queue only has to absorb
-// the case where a write arrives while the previous one is still being passed
-reg  [22:1] sq_adr [0:1];
-reg  [15:0] sq_dat [0:1];
-reg  [1:0]  sq_bs  [0:1];
-reg  [1:0]  sq_wr, sq_rd;
-reg  [1:0]  sq_pace;
-wire        sq_empty = (sq_wr == sq_rd);
-wire        sq_full  = ((sq_wr - sq_rd) == 2'd2);
-wire        sq_push  = ram_we_n_d && !_ram_we;
+wire        snoop_push = ram_we_n_d && !_ram_we;   // спад строба записи chip-шины
 
 always @(posedge clk_sys) begin
   ram_we_n_d <= _ram_we;
-  snoop_act  <= 1'b0;
-
-  if(sq_push && !sq_full) begin
-    sq_adr[sq_wr[0]] <= ram_address[22:1];
-    sq_dat[sq_wr[0]] <= ram_data;
-    sq_bs [sq_wr[0]] <= {~_ram_bhe, ~_ram_ble};
-    sq_wr              <= sq_wr + 2'd1;
-  end
-
-  if(sq_pace != 2'd0)
-    sq_pace <= sq_pace - 2'd1;
-  else if(!sq_empty) begin
-    snoop_adr_r <= sq_adr[sq_rd[0]];
-    snoop_dat_r <= sq_dat[sq_rd[0]];
-    snoop_bs_r  <= sq_bs [sq_rd[0]];
-    snoop_act   <= 1'b1;
-    sq_rd       <= sq_rd + 2'd1;
-    sq_pace     <= 2'd3;
-  end
-
-  if(!cpu_rst) begin
-    sq_wr   <= 2'd0;
-    sq_rd   <= 2'd0;
-    sq_pace <= 2'd0;
+  snoop_act  <= snoop_push;
+  if(snoop_push) begin
+    snoop_adr_r <= ram_address[22:1];
+    snoop_dat_r <= ram_data;
+    snoop_bs_r  <= {~_ram_bhe, ~_ram_ble};
   end
 end
 
@@ -878,7 +848,7 @@ always @(posedge clk_sys, posedge reset) begin
 	   if(ide_request[2:0] == 3'b101) begin
 	      // check if it's a read or write in progress
 
-	      if ( ide_cmd == 8'hc4 ) begin
+	      if ( ide_cmd == 8'hc4 || ide_cmd[7:4] == 4'h2 ) begin
 		 // read multiple command: jump right to next read
 		 ide_exec <= IDE_EXEC_READ_SECTOR;
 		 ide_exec_cnt <= 9'd0;
@@ -887,7 +857,10 @@ always @(posedge clk_sys, posedge reset) begin
 
 		 // check how many sectors can be sent in this
 		 // transfer
-		 if ( ide_sector_cnt < ide_spb ) begin
+		 if ( ide_cmd[7:4] == 4'h2 ) begin
+		    ide_sdc_cnt <= 8'd1;
+		    ide_io_size <= 8'd1;
+		 end else if ( ide_sector_cnt < ide_spb ) begin
 		    ide_sdc_cnt <= ide_sector_cnt;
 		    ide_io_size <= ide_sector_cnt;
 		 end else begin
@@ -928,11 +901,11 @@ always @(posedge clk_sys, posedge reset) begin
 	      // advance to next sector
 	      // ide_sector goes from 1 to sectors,
 	      // ide_head goes from 0 to heads-1
-	      if ( ide_sector < sectors[0] )
+	      if ( ide_sector < sectors[ide_drv] )
 		ide_sector <= ide_sector + 8'd1;
 	      else begin
 		 ide_sector <= 8'd1;
-		 if( ide_head < heads[0]-1 )
+		 if( ide_head < heads[ide_drv]-1 )
 		   ide_head <= ide_head + 8'd1;
 		 else begin
 		    ide_head <= 8'd0;
@@ -1505,6 +1478,7 @@ uart_port uart_port (
 
 minimig minimig
 (
+ .video_window(video_window),.video_steal(video_steal),
 	//m68k pins
 	.cpu_address  (chip_addr        ), // M68K address bus
 	.cpu_data     (chip_dout        ), // M68K data bus
@@ -1591,8 +1565,8 @@ minimig minimig
 	._hsync       (hs_in            ), // horizontal sync
 	._vsync       (vs_in            ), // vertical sync
 	._csync       (                 ), // composite sync
-	.field1       (                 ),
-	.lace         (                 ),
+	.field1       (video_field      ),
+	.lace         (video_lace       ),
 	.red          (red              ), // red
 	.green        (green            ), // green
 	.blue         (blue             ), // blue
@@ -1637,28 +1611,9 @@ minimig minimig
  	.sdc_byte_out_data  ( sdc_byte_out_data_fdc ) 
 );
 
-Amber AMBER
-(
-	.clk28m(clk_sys),
-	.lr_filter(video_config[3:2]),	//interpolation filters settings for low resolution
-	.hr_filter(video_config[3:2]),	//interpolation filters settings for high resolution
-	.scanline(video_config[1:0]),	//scanline effect enable
-	.htotal(htotal[8:1]),		//video line length
-	.hires(res[0]),			//display is in hires mode (from bplcon0)
-	.dblscan(1'b1),			//enable VGA output (enable scandoubler)
-	.red_in(r_in), 			//red componenent video in
-	.green_in(g_in),  		//green component video in
-	.blue_in(b_in),			//blue component video in
-	._hsync_in(hs_in),		//horizontal synchronisation in
-	._vsync_in(vs_in),		//vertical synchronisation in
-	._csync_in(1'b1),		//composite synchronization in, only used if dblscan==0
-	.red_out(r), 		        //red componenent video out
-	.green_out(g),  	        //green component video out
-	.blue_out(b),		        //blue component video out
-	._hsync_out(hs),		//horizontal synchronisation out
-	._vsync_out(vs)			//vertical synchronisation out
- );
-    
+// Native 14MHz hires stream; line storage/scaling belongs to amiga_video.
+assign {r,g,b}={r_in,g_in,b_in};
+assign hs=hs_in,vs=vs_in;
 endmodule
 `ifndef GATEMATE
  `ifndef LATTICE

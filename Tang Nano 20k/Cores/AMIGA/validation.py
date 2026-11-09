@@ -35,7 +35,7 @@ def fpga_report(stage: Path, out: Path):
     ioff=re.search(r'I/O Register as FF\s*\|\s*(\d+)/',resource)
     if ioff:result['io_registers']=int(ioff[1])
     controller=stage/'fpga/sdram.sv'
-    if controller.is_file() and 'dq_out <= addr_0' in controller.read_text(encoding='utf-8'):
+    if controller.is_file() and 'reg [31:0] dq_out;' in controller.read_text(encoding='utf-8'):
         # This wrapper has 20 command/address I/O FFs plus 32 IREG + 32 OREG.
         if not ioff or int(ioff[1])<84:raise ValueError('SDRAM input/output registers did not both pack into I/O')
     result['passed']=(not result['setup_violated_endpoints'] and not result['hold_violated_endpoints']

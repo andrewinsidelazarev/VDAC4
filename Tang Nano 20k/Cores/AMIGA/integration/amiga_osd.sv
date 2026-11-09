@@ -16,8 +16,8 @@
 //   rule[r] — в строке r тонкий разделитель (2 строки кадра посередине ячейки) во всю ширину текста.
 module nes_osd #(
     parameter COLS = 56, ROWS = 24,
-    parameter PAD = 12,                          // поле от рамки до текста, такты и строки кадра
-    parameter WW = 2 * PAD + COLS * 8 - 2,       // справа нет пустых двух точек последнего знака
+    parameter PAD = 12, SCALE_X = 1,
+    parameter WW = 2 * PAD + (COLS * 8 - 2) * SCALE_X,
     parameter WH = 2 * PAD + ROWS * 16 - 2,      // снизу — пустой строки шрифта последней строки
     parameter WX0 = 0, WY0 = 0,
     parameter FRAME_Y = 1
@@ -53,10 +53,10 @@ module nes_osd #(
     end
 
     // оформление: два снятых подряд значения равны — устоялось, берётся с начала кадра
-    reg [29:0] band_a = 0, band_b = 0, band_r = 0, rule_a = 0, rule_b = 0, rule_r = 0;
+    reg [ROWS-1:0] band_a = 0, band_b = 0, band_r = 0, rule_a = 0, rule_b = 0, rule_r = 0;
     always @(posedge clk_pixel) begin
-        band_a <= band_rows; band_b <= band_a;
-        rule_a <= rule_rows; rule_b <= rule_a;
+        band_a <= band_rows[ROWS-1:0]; band_b <= band_a;
+        rule_a <= rule_rows[ROWS-1:0]; rule_b <= rule_a;
         if (cx == 0 && cy == FRAME_Y) begin
             if (band_a == band_b) band_r <= band_b;
             if (rule_a == rule_b) rule_r <= rule_b;
@@ -67,17 +67,19 @@ module nes_osd #(
     // y (на строку кадра) — половина точки 0…1, строка шрифта 0…7, строка текста 0…ROWS−1
     wire [10:0] px = cx + 11'd3;
     reg yp = 0;
-    reg [2:0] xf = 0;
+    localparam X_BITS=SCALE_X==2 ? 4:3;
+    reg [X_BITS-1:0] xphase=0;
+    wire [2:0] xf=xphase >> (SCALE_X==2 ? 1:0);
     reg [2:0] yf = 0;
     reg [5:0] xc = 0;
     reg [4:0] yr = 0;
     reg xin = 0, yin = 0;
     always @(posedge clk_pixel) begin
-        if (px + 11'd1 == TX0) begin xf <= 0; xc <= 0; xin <= 1; end
+        if (px + 11'd1 == TX0) begin xphase<=0; xc<=0; xin<=1; end
         else if (xin) begin
-            xf <= xf + 1'b1;
-            if (xf == 7) begin
-                if (xc == COLS - 1) xin <= 0; else xc <= xc + 1'b1;
+            xphase<=xphase+1'b1;
+            if (&xphase) begin
+                if (xc==COLS-1) xin<=0;else xc<=xc+1'b1;
             end
         end
         if (cx == 0) begin
@@ -98,8 +100,8 @@ module nes_osd #(
     reg [31:0] word = 0;
     always @(posedge clk_pixel) word <= tram[{yr, xc[5:2]}];
     wire in_box = px >= WX0 && px < WX0 + WW && cy >= WY0 && cy < WY0 + WH;
-    wire edge_px = px == WX0 || px == WX0 + WW - 1 || cy < WY0 + 2 || cy >= WY0 + WH - 2;
-    wire in_line = in_box && !edge_px && yin && px >= TX0 - 4 && px < TX0 + COLS * 8 - 2;   // ширина строки
+    wire edge_px = px < WX0+SCALE_X || px >= WX0+WW-SCALE_X || cy < WY0+2 || cy >= WY0+WH-2;
+    wire in_line = in_box && !edge_px && yin && px >= TX0-4*SCALE_X && px < TX0+(COLS*8-2)*SCALE_X;
     reg a_box = 0, a_border = 0, a_on = 0, a_hl = 0, a_band = 0, a_rule = 0;
     reg [1:0] a_sub = 0;
     reg [2:0] a_xf = 0;

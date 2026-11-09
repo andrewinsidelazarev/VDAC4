@@ -4,13 +4,16 @@
  * запись идёт и в PSRAM, и сразу в файл на карте Tang. HD0: образ, выбранный в меню (путь в /AMIGA/HD0.CFG),
  * пока не выбран — /AMIGA/HD0.HDF; работает на месте, секторы прямо с карты. Выбранный диск — системный:
  * /AMIGA/DF0.ADF при старте не вставляется, чтобы загрузка шла с диска.
- * Диск с карты Evo только для чтения: записывать на неё некуда.
+ * Дискета с карты Evo только для чтения: записывать на неё некуда.
+ * HD1 (ядро 0.11+): карта Evo целиком — том EVO: в Workbench, только чтение (evo_vol.h, плагин VDAC4 Cores 0.15+);
+ * архивы LHA на ней — ещё и каталоги, распакованные на лету (evo_lha.h).
  */
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include "zm_app.h"
+#include "zm_level.h"
 #include "ps2_hid.h"
 
 #define ROM_PATH "/AMIGA/KICK31.ROM"
@@ -21,7 +24,7 @@
 #define HD0_CFG "/AMIGA/HD0.CFG"
 #define HD0_PATH_MAX 512u
 #define HDF_MAX_SECTORS 8388607u    /* размер в регистре ядра — 32 бита в байтах */
-#define VERSION 0x0501000Au
+#define VERSION 0x0501000Cu
 #define R_DISK_SIZE 0x180u
 #define R_DISK_STATUS 0x184u
 #define R_DISK_SECTOR 0x188u
@@ -37,8 +40,9 @@
 static const zm_core_t *core;
 static void *lock, *link_lock, *wake;
 static volatile int running, state, exit_req, live;
+static volatile int restart_req;   /* 8.11.2026, слой 0.25: смена режима совместимости — полный перезапуск сеанса */
 static volatile int worker_done=1, audio_done=1;
-static uint32_t core_version, input_ms, generation;
+static uint32_t core_version, input_ms, alive_ms, generation;
 static char error_text[80];
 static uint8_t ring[256], head, tail, lost, joy, buttons, last_x, last_y, mouse_base;
 static int32_t mouse_x, mouse_y;
@@ -98,6 +102,9 @@ static int load_disk(uint8_t **disk) {
     return 1;
 }
 static int disk_step(int *served);
+static void ev_read(uint32_t lba,uint8_t *o);
+static void ev_rdb_view(uint8_t *b);
+static void ev_write(uint32_t lba,const uint8_t *data);
 /* Смену носителя ядро принимает только в простое (amiga_disk.sv), запись в занятый ящик молча теряется: прежний диск уже снят,
  * новый не подключён, и система не видит диска. Меню держит этот поток, запрос гостя ждёт ответа: сначала обслужить его. */
 static int mount_unit(unsigned unit,uint32_t bytes) {
@@ -177,8 +184,20 @@ static int disk_step(int *served) {
         if (!hd0_file || sector>=hd0_sectors) return 0;
         if (writing) {
             if (!take_sector() || !sd_retry_write(hd0_file,sector,(const uint8_t *)sector_words)) return 0;
-        } else if (!sd_retry_read(hd0_file,sector,(uint8_t *)sector_words) ||
-                   !send_sector((const uint8_t *)sector_words)) return 0;
+        } else {
+            if (!sd_retry_read(hd0_file,sector,(uint8_t *)sector_words)) return 0;
+            if (sector==0) ev_rdb_view((uint8_t *)sector_words);
+            if (!send_sector((const uint8_t *)sector_words)) return 0;
+        }
+    } else if (drive==0x20) {
+        /* Том EVO с карты Evo (evo_vol.h): блоки собираются здесь; запись — в память ESP, на карту никогда. */
+        if (writing) {
+            if (!take_sector()) return 0;
+            ev_write(sector,(const uint8_t *)sector_words);
+        } else {
+            ev_read(sector,(uint8_t *)sector_words);
+            if (!send_sector((const uint8_t *)sector_words)) return 0;
+        }
     } else return 0;
     return wr(R_DISK_ACK,token);
 }
@@ -296,6 +315,7 @@ static void amiga_restart(void) {
 }
 #include "amiga_fs.h"
 #include "disk_menu.h"
+#include "evo_vol.h"
 /* Время Evo: минуты и прочее — двоичные, год — две цифры, как у настоящего MSM6242; месяц 0…11, у числа сверху день недели. */
 static void rtc_apply(void) {
     uint8_t t[6];
@@ -368,6 +388,7 @@ static int input_step(ps2_hid_t *parser) {
         ps2_hid_init(parser);
         if (!wr(0x1c,0)) return 0;
         f4_down=0;
+        ja_release_all();
         // The guest OS may have consumed key-down events already. Release them
         // after clearing the transport FIFO, so overflow cannot stick modifiers.
         for (unsigned k=0;k<128;k++) if (down[k]) pending[count++]=(uint16_t)(k|128);
@@ -386,6 +407,7 @@ static int input_step(ps2_hid_t *parser) {
             // Меню открылось: что держали нажатым, отпустить, отпускания уйдут уже меню.
             if (menu_open && !was_open) {
                 was_open=1;
+                ja_release_all();
                 for (unsigned k=0;k<128;k++) if (down[k]) {
                     uint8_t release=(uint8_t)(k|128);
                     if (!hid_packet(1,&release,1)) return 0;
@@ -394,12 +416,15 @@ static int input_step(ps2_hid_t *parser) {
             }
             continue;
         }
-        if (ev==PS2_HID_CLEAR) { if (!wr(0x1c,0)) return 0; }
+        if (ev==PS2_HID_CLEAR) { ja_release_all(); if (!wr(0x1c,0)) return 0; }
         else if ((ev&127)==61 && (f4_down ||
-                 (!(ev&128) && !down[61] && (down[104] || down[108]) && (down[106] || down[110])))) {
-            // Ctrl+Alt+F4 resets once. Plain F4 belongs to the guest/Test Kit.
+                 (!(ev&128) && !down[61] && !ja_held[61] && (down[104] || down[108] || ja_held[104] || ja_held[108]) &&
+                  (down[106] || down[110] || ja_held[106] || ja_held[110])))) {
+            // Ctrl+Alt+F4 resets once, также когда Ctrl и Alt назначены на джойстик. Plain F4 belongs to the guest/Test Kit.
             if (!(ev&128) && !f4_down && !wr(0x44,3)) return 0;
             f4_down=(ev&128)==0;
+        } else if (ja_input(ev)) {
+            // Клавиша джойстика: Amiga её не получает.
         } else {
             if (!rd(0x0c,&free_slots)) return 0;
             if (!free_slots) break;
@@ -410,13 +435,16 @@ static int input_step(ps2_hid_t *parser) {
         }
         ++at;
     }
+    if (!menu_blink_step()) return 0;
     if (menu_open) { b=0; j=0; dx=dy=0; core->mutex_lock(lock); mouse_x=mouse_y=0; core->mutex_unlock(lock); }
     // NanoMig expects USB mouse coordinates; Kempston Y grows upward.
     uint8_t mouse[3]={b,(uint8_t)dx,(uint8_t)-dy};
     if (!hid_packet(2,mouse,3)) return 0;
     core->mutex_lock(lock); mouse_x-=dx; mouse_y-=dy; core->mutex_unlock(lock);
-    // USB/NanoMig order: R,L,D,U,fire1,fire2. Amiga game port is port 1.
-    uint8_t js[2]={1,(uint8_t)((j&31)|((j>>1)&32))};
+    // USB/NanoMig order: R,L,D,U,fire1,fire2. Кнопки Kempston и клавиатуры в режиме KEYS складываются. В меню клавиши у него, джойстика нет.
+    // Устройство 0, не 1: userio при joy_swap=0 перекрещивает входы, joystick0 → _joy1 → порт 2 (игровой, JOY1DAT),
+    // joystick1 → порт 1 (мышь). До 0.16 джойстик уходил в порт мыши, игры его не видели (tests/run_joystick.py).
+    uint8_t js[2]={0,(uint8_t)((j&31)|((j>>1)&32)|(menu_open?0:ja_mask))};
     return hid_packet(3,js,2);
 }
 
@@ -430,30 +458,41 @@ static int audio_read(uint32_t a,uint32_t *v,unsigned n) {
     core->mutex_unlock(link_lock);
     return ok;
 }
+/* The same K-weighted integrated loudness processor as TRACKER.ELF.
+ * Paula can also be loud at unity: allow attenuation down to -18 dB. */
+static void audio_prepare(zm_level_t *level,float *frames,const uint32_t *words,unsigned n) {
+    for(unsigned i=0;i<n;i++) {
+        frames[2*i]=(float)(int16_t)words[i]/32768.0f;
+        frames[2*i+1]=(float)(int16_t)(words[i]>>16)/32768.0f;
+    }
+    zm_level_process(level,frames,n);
+}
 static void audio_task(void *arg) {
     (void)arg;
+    static zm_level_t level; /* owned only by this task, outside its 4 KiB stack */
+    uint32_t level_gen=~0u;
     while (running) {
         if (!live) { core->delay(10); continue; }
         uint32_t gen=generation, wp=0, last=core->millis();
         zm_pcm_format_t fmt={48000,2};
         if (core->pcm_open(&fmt)!=ZM_OK) { core->delay(20); continue; }
+        if(level_gen!=gen || !level.ready) {
+            zm_level_init(&level,48000,ZM_LEVEL_BASE_DB,-18.0f);level_gen=gen;
+        } else zm_level_discontinuity(&level);
         audio_read(0x20,&wp,1);
         uint32_t rp=gray_decode(wp&1023);
         while (running && live && generation==gen) {
             if (!audio_read(0x20,&wp,1)) break;
             wp=gray_decode(wp&1023);
             uint32_t now=core->millis(), have=(wp-rp)&1023;
-            if (now-last>=18 || have>768) { rp=(wp-192)&1023; have=192; }
+            if (now-last>=18 || have>768) { rp=(wp-192)&1023; have=192; zm_level_discontinuity(&level); }
             last=now;
             if (have>384) have=384;
             while (have && running && live && generation==gen) {
                 uint32_t words[16]; float frames[32];
                 unsigned n=have>16?16:have; if (n>1024-rp) n=1024-rp;
                 if (!audio_read(0x6000+rp*4,words,n)) break;
-                for (unsigned i=0;i<n;i++) {
-                    frames[2*i]=(float)(int16_t)words[i]/32768.0f;
-                    frames[2*i+1]=(float)(int16_t)(words[i]>>16)/32768.0f;
-                }
+                audio_prepare(&level,frames,words,n);
                 unsigned done=0;
                 while (done<n && running && live && generation==gen) {
                     int wrote=core->pcm_write(frames+2*done,n-done);
@@ -467,6 +506,18 @@ static void audio_task(void *arg) {
         core->pcm_flush(); core->pcm_close();
     }
     audio_done=1;
+}
+/* Плагин молчит дольше 1,5 с — Evo сброшена. Знак жизни — любая его команда (alive_ms, command()), не только ВВОД: файл
+ * с карты Evo из меню F11 идёт командами 0x77…0x79 без ВВОДа несколько секунд, и после него слой уходил в WC (02.11.2026;
+ * у NES то же учтено в rom_source.h). input_ms — только для мыши: по нему считается сдвиг. Время и отметка — под одним
+ * замком, разность — со знаком: без этого ответ плагина между millis() и чтением отметки давал «минус 1 мс», то есть
+ * 4 млрд, и тихий выход в WC (02.11.2026, копирование значков с тома EVO). */
+static int plugin_silent(uint32_t *now) {
+    core->mutex_lock(lock);
+    *now=core->millis();
+    const int32_t quiet=(int32_t)(*now-alive_ms);
+    core->mutex_unlock(lock);
+    return quiet>1500;
 }
 static void worker(void *arg) {
     (void)arg;
@@ -495,14 +546,15 @@ static void worker(void *arg) {
             if (core->core_load("AMIGA",&core_version)!=ZM_OK) fail("AMIGA.BIN load failed");
             else if (core_version!=VERSION) fail("AMIGA.BIN / AMIGA.ELF version mismatch");
             else if (!mount_disk(disk)) fail("ADF bridge unavailable; update AMIGA.BIN");
-            else if (!upload_rom(rom)) fail("Kickstart LINK transfer or CRC failed");
+            /* 8.11.2026, слой 0.25: режим совместимости — в ядро до загрузки ROM, пока процессор в сбросе */
+            else if ((mode_read_config(),!upload_rom(rom))) fail("Kickstart LINK transfer or CRC failed");
             else ok=1;
         }
         if (rom) core->free(rom);
         if (ok && running && !exit_req) {
             ps2_hid_t parser; ps2_hid_init(&parser);
             core->mutex_lock(lock);
-            input_ms=core->millis(); mouse_base=1; lost=1;
+            input_ms=alive_ms=core->millis(); mouse_base=1; lost=1;
             core->mutex_unlock(lock);
             core->mutex_lock(link_lock); ++generation; live=1; core->mutex_unlock(link_lock);
             /* Kickstart читает часы через 1,1 с после сброса (модель), а TIME плагин присылает, когда увидел
@@ -511,12 +563,15 @@ static void worker(void *arg) {
             for (uint32_t t0=core->millis();!rtc_pending && running && !exit_req && core->millis()-t0<RTC_WAIT_MS;)
                 core->signal_wait(wake,20);
             if (rtc_pending) rtc_apply();
+            ev_mount();                         // карта Evo — HD1, пока процессор в сбросе: Kickstart ищет диски сразу
             if (!rom_release()) { fail("Kickstart did not start"); ok=0; }
-            core->mutex_lock(lock); input_ms=core->millis(); core->mutex_unlock(lock);
+            core->mutex_lock(lock); input_ms=alive_ms=core->millis(); core->mutex_unlock(lock);
             df0_data=disk; disk=NULL;
             /* Карта Tang в этом ядре — при прошивке с посекторным доступом: запись в DF0 и HD0, меню. */
             if (sd_disk_api()) {
                 uint32_t sectors=0; void *file=NULL;
+                keys_read_config();
+                if(!video_read_config()){fail("Video controls unavailable; update AMIGA.BIN");ok=0;}
                 menu_available=1;
                 if (df0_data && !strcmp(df0_name,"DF0.ADF") &&
                     core->sd_open(ADF_PATH,1,&sectors,&file)==ZM_OK) {
@@ -530,8 +585,9 @@ static void worker(void *arg) {
             }
             uint32_t input_at=core->millis()-4;
             while (ok && running && !exit_req) {
-                uint32_t now=core->millis();
-                if (now-input_ms>1500) break;
+                uint32_t now;
+                if (restart_req) break;
+                if (plugin_silent(&now)) { core->log("amiga: the plugin is silent (Evo reset?), back to slot 0"); break; }
                 // Сектора идут подряд, клавиатура и мышь — не чаще 4 мс: ввод стоит дорого по LINK.
                 if (now-input_at>=4) {
                     input_at=now;
@@ -553,8 +609,20 @@ static void worker(void *arg) {
         df0_data=NULL;
         df0_close_file();
         if (hd0_file) { core->sd_close(hd0_file); hd0_file=NULL; }
+        ev_close();
         menu_items_free();
         rx_discard();
+        /* 8.11.2026, слой 0.25: смена режима совместимости (F11 -> SETUP) — полный перезапуск: ядро и ROM заново, как
+         * выход в WC и новый запуск, но без WC. Прежде режим включался тёплым сбросом, и после перехода 68000 -> 68020
+         * Amiga на плате зависла (Kickstart доверяет памяти прошлого запуска, а процессор и карта памяти другие). */
+        if (restart_req && ok && running && !exit_req) {
+            restart_req=0;
+            core->log("amiga: restart, compatibility mode %s",mode_compat?"on":"off");
+            /* тем же путём, что выход в WC и новый запуск: Tang — в слот 0, затем ядро заново */
+            if (loaded && core->core_back(10000)!=ZM_OK) { fail("Could not return to TS-Config"); state=255; continue; }
+            state=1; continue;
+        }
+        restart_req=0;
         if (loaded && core->core_back(10000)!=ZM_OK) { fail("Could not return to TS-Config"); ok=0; }
         state=ok?3:255;
     }
@@ -592,7 +660,9 @@ static int rx_command(uint8_t cmd,const uint8_t *p,uint16_t n) {
 }
 static int command(uint8_t cmd,const uint8_t *p,uint16_t n) {
     uint8_t ok=0;
+    core->mutex_lock(lock); alive_ms=core->millis(); core->mutex_unlock(lock);   // любая команда — плагин жив
     if (cmd==0x6E || cmd==0x6F) return evo_command(cmd,p,n);
+    if (cmd==0x76) return ev_sd_done(p,n);
     if (cmd>=0x77 && cmd<=0x79) return rx_command(cmd,p,n);
     if (cmd==0x7A) { const uint8_t reply[2]={1,1}; core->reply(0xFA,reply,sizeof reply); return ZM_OK; }
     if (cmd==0x70) {
@@ -645,7 +715,7 @@ static int start(const zm_core_t *c) {
     if (!lock || !link_lock || !wake) return ZM_NO_MEMORY;
     state=0; live=0; exit_req=0; running=1; worker_done=0;
     // Ядро 0, ниже звука: ответы Evo идут на ядре 1, а TLS и распаковка заняты секундами.
-    int r=c->task_start(worker,NULL,16384,2,0);
+    int r=c->task_start(worker,NULL,16384u|ZM_TASK_STACK_PSRAM,2,0);
     if (r!=ZM_OK) { running=0; worker_done=1; return r; }
     audio_done=0; r=c->task_start(audio_task,NULL,4096,4,0);
     if (r!=ZM_OK) { audio_done=1; running=0; c->signal_give(wake); }
@@ -658,7 +728,7 @@ static void stop(void) {
 #ifndef AMIGA_HOST_TEST
 int main(int argc,char **argv) {
     static const zm_app_t app={sizeof(zm_app_t),ZM_APP_ABI_MAJOR,ZM_APP_ABI_MINOR,
-        "amiga","0.14",0x6E,0x7A,start,stop,command,NULL,NULL,NULL};
+        "amiga","0.26",0x6E,0x7A,start,stop,command,NULL,NULL,NULL};   /* 0.24: разделы NET; 0.25: SETUP, режим совместимости; 0.26: смена режима — перезапуск сеанса */
     if (argc!=3) return 0;
     *(const zm_app_t **)argv[2]=&app;
     return ZM_APP_ABI_MAJOR;

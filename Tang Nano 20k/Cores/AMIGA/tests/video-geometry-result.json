@@ -1,0 +1,10 @@
+{
+  "passed": true,
+  "hardware": false,
+  "result": "PASS 102706560 active pixels: 576p50/480p60, games 200/256 rows, interlace 400/512/576, width 640/736 (crop), 4:3/wide, sizes 100/95/90% and reserved config bits\n",
+  "sha256": {
+    "fpga/amiga_video_geometry.sv": "9bcfa2ac80802f94b6b23bbd725a8203895ac37ec0cf41c435a1df7eae5c71c5",
+    "tests/video_geometry_test.cpp": "99bafc514a4accb7a4550606dc1da2c8bacd4f99fe8b3052f2e4cd7423137e44",
+    "tests/run_video_geometry.py": "0e09173436fd0d6140fccd932b026c8df141c4dd9e79fa4164e997b29bfecf81"
+  }
+}

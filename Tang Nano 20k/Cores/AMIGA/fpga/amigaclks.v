@@ -10,7 +10,9 @@ module amigaclks (
 	input vidmode,	// 1: 28MHz pixel clock, 0: 56MHz pixel clock (RTG)
 	output clk_tmds,
 	output clk_pixel,
-	output video_locked
+	output video_locked,
+	// 8 ноября 2026: 1 — CLKDIV больше не останавливать (после первого захвата PLL видео)
+	input video_keep
 );
 
 
@@ -74,7 +76,7 @@ assign clk_tmds = clk_tmds_i;
 CLKDIV clkdiv_inst (
     .CLKOUT(clk_pixel),
     .HCLKIN(clk_tmds_i),
-    .RESETN(1'b1),
+    .RESETN(video_locked | video_keep),
     .CALIB(1'b0)
 );
 
@@ -89,7 +91,7 @@ rPLL tmdsclk_inst (
     .CLKOUTD3(),
     .RESET(1'b0),
     .RESET_P(1'b0),
-    .CLKIN(clk_28_i),
+    .CLKIN(clk_in),
     .CLKFB(1'b0),
     .FBDSEL(fbdsel),
     .IDSEL(6'b0000000),
@@ -99,12 +101,16 @@ rPLL tmdsclk_inst (
     .FDLY(4'b0000)
 );
 
-defparam tmdsclk_inst.FCLKIN = "28.5";
+// 8 ноября 2026 (0.13.0): вывод 576p50 / 480p60 вместо 720p. Под нагрузкой в Workbench развёртка 720p
+// (TMDS 742,5 Мбит/с на линию) пропадала, хотя логика ядра выдавала её без перерыва. Такт TMDS теперь
+// 27 × 5 / 1 = 135 МГц (ФД 27 МГц, VCO 540, ODIV 4), CLKDIV ÷5 — точка 27 МГц, 270 Мбит/с на линию.
+// Те же делители у 576p ядра TS-Config (Firmware/rtl/fb_clocking.sv, HD = 0).
+defparam tmdsclk_inst.FCLKIN = "27";
 defparam tmdsclk_inst.DYN_IDIV_SEL = "false";
 defparam tmdsclk_inst.IDIV_SEL = 0;
-defparam tmdsclk_inst.DYN_FBDIV_SEL = "true";
+defparam tmdsclk_inst.DYN_FBDIV_SEL = "false";
 defparam tmdsclk_inst.FBDIV_SEL = 4;
-defparam tmdsclk_inst.DYN_ODIV_SEL = "true";
+defparam tmdsclk_inst.DYN_ODIV_SEL = "false";
 defparam tmdsclk_inst.ODIV_SEL = 4;
 defparam tmdsclk_inst.PSDA_SEL = "0000";
 defparam tmdsclk_inst.DYN_DA_EN = "true";
