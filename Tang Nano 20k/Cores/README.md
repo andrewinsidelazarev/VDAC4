@@ -11,7 +11,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.10 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
 | **Amiga / AGA** (на основе NanoMig) — 68020, 2 МиБ chip + 4 МиБ fast, дискета DF0, жёсткий диск HDF, HDMI 576p | карта Tang, `CORES` | 0.13.7, слой ESP 0.27 | [`SD/CORES/AMIGA.BIN`](SD/CORES/AMIGA.BIN), [`AMIGA.ELF`](SD/CORES/AMIGA.ELF) |
-| **Mega Drive / Genesis** (на основе mdtang) — YM2612 и PSG синтезирует ESP, снимки F5/F6, HDMI 720p60/720p50 по стандарту; нужна прошивка ESP 0.1.111 | карта Tang, `CORES` | 0.8, слой ESP 1.5 | [`SD/CORES/MD.BIN`](SD/CORES/MD.BIN), [`MD.ELF`](SD/CORES/MD.ELF) |
+| **Mega Drive / Genesis** (на основе mdtang) — YM2612 и PSG синтезирует ESP, снимки F5/F6, HDMI 720p60/720p50 по стандарту; нужна прошивка ESP 0.1.111 | карта Tang, `CORES` | 0.8, слой ESP 1.7 | [`SD/CORES/MD.BIN`](SD/CORES/MD.BIN), [`MD.ELF`](SD/CORES/MD.ELF) |
 
 `.BIN` — само ядро. `.ELF` — его слой на ESP: клавиатура и мышь Evo, звук на ЦАП ESP, сохранения на
 карты, выход в WC. Исходники TS-Config, FT812 и ядра видео — в [`../Firmware`](../Firmware), Next,
@@ -24,7 +24,8 @@ Tang: битстрим ядра — во flash Tang, а `VIDEO.ELF` лежит �
 Tang: меню ядер, загрузка и ошибки ([описание](../../ESP32%20S3%20Zero%20N8R8/Network/VDAC4%20Cores/README.md)).
 С плагином 0.20 и файл с панели WC (`.nes`, `.adf`, `.md`, `.gen`, `.smd`) идёт экраном: он принимает образ с карты
 Evo порциями DMA, рисует «Loading the game», имя файла и полосу хода и оставляет образ слою ядра (прошивка ESP
-0.1.123: MD.ELF 1.5, NES.ELF 0.10, AMIGA.ELF 0.27 его берут).
+0.1.123: MD.ELF 1.5+, NES.ELF 0.10, AMIGA.ELF 0.27 его берут). Плагин 0.21 повторяет команды экрану, если ESP на миг
+замолчала (иначе образ уходил слою пакетами по 512 байт — 2 МБ за 70 с).
 Картинку, название, год и клавишу меню ядра («Manage - F1») экран берёт из ELF самого ядра —
 раздел `.vdac4.card`; его вставляет сборка слоя (`esp/tools/build.ps1`) из `esp/card/card.bin`
 ядра. Новому ядру — своя папка `esp/card` (формат и инструменты — `cores_ui/CARD.md` плагина).
@@ -38,7 +39,7 @@ Evo порциями DMA, рисует «Loading the game», имя файла �
   приложение не давало места `VIDEO.ELF`, и FTVIEW4 молча играл ролик путём FT812.
 - Прошивка BL616 модуля Tang **38** — [`../BL616`](../BL616): её кэш ядер грузит ядро с карты в ПЛИС,
   по F12 возвращает TS-Config, ядро видео поднимает из слота 3 flash Tang.
-- Плагин Wild Commander **VDAC4 Cores** 0.13 (файл с панели экраном с полосой хода — 0.20 и прошивка ESP 0.1.123) —
+- Плагин Wild Commander **VDAC4 Cores** 0.13 (файл с панели экраном с полосой хода — 0.20 и прошивка ESP 0.1.123; 0.21 — повтор команд экрану) —
   [`ESP32 S3 Zero N8R8/Network/VDAC4 Cores`](../../ESP32%20S3%20Zero%20N8R8/Network/VDAC4%20Cores): меню ядер,
   часы Evo для Next, сектора карты Evo для Next, NES из меню — сразу в меню F1 ядра.
 - Для ядра видео — плагин Wild Commander **FTVIEW4** (сборка bb34) — [`../FTVIEW4`](../FTVIEW4):
@@ -109,6 +110,12 @@ Evo порциями DMA, рисует «Loading the game», имя файла �
 Джойстик Kempston работает в Next и NES. Мышь Kempston работает в Next.
 
 ## Проверено на плате
+
+2026-11-09, ночь, ESP 0.1.123, плагин VDAC4 Cores 0.21:
+- **Mega Drive, MD.ELF 1.7** (Аладдин, Jungle Book): звук не хрипит — вывод 48 кГц с фильтром, громкость x3 с ограничителем
+  (прежде сырые 53 кГц и тихо); синтез YM вдвое быстрее (1.6), каналы делятся между ядрами ESP.
+- **Плагин 0.21**: файл с панели идёт экраном ядер и после паузы ESP на команде («Работает»); в 0.20 первый запуск после
+  записи нового ELF на карту Tang уходил на пакеты по 512 байт — 70 с без полосы.
 
 2026-11-09, ESP 0.1.123, BL616 41, TS-Config 1.46, плагин VDAC4 Cores 0.20, COREMENU.ELF 0.3:
 - **Файл с панели WC экраном ядер** — `.gen` (MD.ELF 1.5), `.nes` (NES.ELF 0.10), `.adf` (AMIGA.ELF 0.27): графический экран

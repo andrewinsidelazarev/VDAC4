@@ -664,7 +664,7 @@ class CoresPluginTest(unittest.TestCase):
 
     def test_header_names_the_plugin(self) -> None:
         data = CORES_WMF.read_bytes()
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.20")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.21")
         self.assertEqual(data[34], 2, "две страницы: код и (0.20) таблицы с буфером порции")
         self.assertEqual((data[36], data[38], data[39]), (0, 1, 1), "страница 1 — сектор таблиц CRC16")
         self.assertEqual(len(data) % 512, 0, "файл — целыми секторами")
@@ -1150,6 +1150,71 @@ class CoresPluginTest(unittest.TestCase):
         self.assertEqual(esp.scr_file_packets, (len(self.ROM) + 511) // 512)
         self.assertEqual(esp.taken, self.ROM)
         self.assertEqual(esp.core, "MD")
+
+    def test_panel_file_esp_stall_on_begin_keeps_screen(self) -> None:
+        """09.11.2026, плата: первый запуск MD после записи нового MD.ELF на карту Tang. Сразу после ответа на
+        LIST задача обмена ESP молчала дольше 16 попыток обмена (~0,4 с) — кадр BEGIN выброшен (SpiLink_Push),
+        до COREMENU он не дошёл (в журнале ни «raw media DMA», ни «receiving»). Плагин 0.20 ошибку отправки не
+        смотрел, ответа ждал ~0,1 с (NX_WAIT) и молча пустил образ слою пакетами по 512 байт: 2 МБ — 70 с,
+        полосы хода нет. 0.21: кадр не ушёл — BEGIN ещё раз, ответа ждать секунды."""
+        armed = []
+
+        class StallEsp(FileLayerEsp):
+            def __call__(self, command: int, payload: bytes) -> bytes:
+                if command == CMD_SCR_LIST and not self.scr_lists:
+                    armed.append(1)
+                return super().__call__(command, payload)
+
+        h = CoresHarness()
+        esp = StallEsp(screen=True, cores=(("NEXT", 907418, True), ("MD", 907418, True)))
+        esp.scr_on_after = 8
+        written = h.link._written
+
+        def stall_after_list() -> None:
+            # LIST разобран, ответ Z80 забрала — дальше 20 запросов ESP не замечает (больше 16 попыток кадра)
+            if armed and not h.link.core.to_z80 and not h.link.rx:
+                armed.clear()
+                h.link.ignore_requests = 20
+            written()
+
+        h.link._written = stall_after_list
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM, ps2={600: F12})
+        self.assertEqual(esp.scr_file_to, "MD", "BEGIN дошёл до экрана со второй попытки")
+        self.assertEqual(esp.scr_file_packets, 0)
+        self.assertTrue(esp.scr_file_raws > 0, "образ — порциями DMA экрану")
+        self.assertEqual(esp.taken, self.ROM)
+        self.assertFalse({0x77, 0x78, 0x79} & set(esp.commands), "слою пакетами — не шло")
+        self.assertEqual(esp.core, "MD")
+
+    def test_panel_file_esp_stall_on_list_keeps_screen(self) -> None:
+        """0.21: та же пауза ESP — на LIST (после ответа на CORE_LIST): LIST повторяется, экран и порции DMA."""
+        armed = []
+
+        class StallEsp(FileLayerEsp):
+            def __call__(self, command: int, payload: bytes) -> bytes:
+                if command == CMD_CORE_LIST:
+                    armed.append(1)
+                return super().__call__(command, payload)
+
+        h = CoresHarness()
+        esp = StallEsp(screen=True, cores=(("NEXT", 907418, True), ("MD", 907418, True)))
+        esp.scr_on_after = 8
+        written = h.link._written
+
+        def stall_after_core_list() -> None:
+            if armed and not h.link.core.to_z80 and not h.link.rx:
+                armed.clear()
+                h.link.ignore_requests = 20
+            written()
+
+        h.link._written = stall_after_core_list
+        h.start(esp, file_name=b"Aladdin (Europe).gen", file=self.ROM, ps2={600: F12})
+        self.assertEqual(h.prwow_windows, [], "окна WC нет: экран остался")
+        self.assertEqual(len(esp.scr_lists), 1)
+        self.assertEqual(esp.scr_file_to, "MD")
+        self.assertTrue(esp.scr_file_raws > 0)
+        self.assertEqual(esp.taken, self.ROM)
+        self.assertFalse({0x77, 0x78, 0x79} & set(esp.commands))
 
     def test_panel_file_firmware_without_put_uses_packets(self) -> None:
         """Прошивка не принимает блоки от Z80 (нет LINK_S_PUT_CAPABLE) — пакетами."""

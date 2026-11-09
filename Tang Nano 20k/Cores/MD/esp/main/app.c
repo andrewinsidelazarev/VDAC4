@@ -19,7 +19,7 @@
 #include "ps2_hid.h"
 #include "zm_app.h"
 
-#define APP_VERSION "1.5"
+#define APP_VERSION "1.7"
 #define MD_PERSONALITY 0x06u
 #define SILENCE_MS 1500u          /* плагин молчит дольше — Evo сбросилась: назад в слот 0 */
 

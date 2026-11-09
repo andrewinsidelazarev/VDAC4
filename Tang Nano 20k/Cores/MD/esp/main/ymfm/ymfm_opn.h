@@ -177,6 +177,9 @@ public:
 	// return the AM offset from LFO for the given channel
 	uint32_t lfo_am_offset(uint32_t choffs) const;
 
+	// VDAC4: AM LFO до сдвига канала — lfo_am_offset(choffs) = (lfo_am_raw() << 1) >> ((1 << (ams ^ 3)) - 1)
+	uint32_t lfo_am_raw() const { return m_lfo_am; }
+
 	// return LFO/noise states
 	uint32_t noise_state() const { return 0; }
 
@@ -774,7 +777,18 @@ public:
 	// экземпляра на двух ядрах ESP (у каждого все записи в регистры). Сумма каналов с искажением ЦАП,
 	// как в generate, но без деления на 6: канал — 9 бит (±256); ЦАП — у того, кто считает канал 6.
 	void generate_part(int32_t &left, int32_t &right, uint32_t chanmask);
+	// VDAC4 (09.11.2026): n отсчётов разом — то же, что n раз generate_part в lr[2i], lr[2i + 1], если между
+	// отсчётами в YM не пишут ничего, кроме адреса и данных ЦАП (2A, 2C): dac[i] — m_dac_data отсчёта i (берётся,
+	// если ЦАП включён и канал 6 в chanmask). Записи, меняющие FM или включение ЦАП, делят блок на отрезки.
+	void generate_span(int32_t *lr, uint32_t n, uint32_t chanmask, const uint16_t *dac);
 	bool dac_enabled() const { return m_dac_enable != 0; }
+	uint16_t dac_data() const { return m_dac_data; }
+	uint16_t address() const { return m_address; }
+	// VDAC4: канал chnum — у этого экземпляра (см. fm_engine_base::vdac4_take_channel); такты каналов в
+	// generate_span с прошлого обнуления
+	void take_channel(ym2612 &from, uint32_t chnum);
+	uint32_t channel_cycles(uint32_t chnum) const { return m_fm.m_v4_cyc[chnum]; }
+	void clear_channel_cycles() { for (uint32_t &c : m_fm.m_v4_cyc) c = 0; }
 	uint32_t m_cyc_clock = 0, m_cyc_out = 0;   // VDAC4: такты ESP (CCOUNT) в generate_part — такт и выход
 
 protected:

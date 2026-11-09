@@ -93,10 +93,8 @@ Scr_List:
         ld c,l
         ex de,hl
         ld a,CMD_SCR_LIST
-        call Proto_Send
-        ld a,RESP_SCR_LIST
-        ld de,NX_WAIT
-        jp Proto_WaitCmd
+        ld e,RESP_SCR_LIST
+        jp Scr_Ask                       ; 0.21: с повтором (см. Scr_Ask)
 
 ; Меню экраном: список, затем STATE, пока экран не скажет, что Tang с оверлеями есть. Не сказал
 ; за SCR_WAIT кадров — экран прочь, окно WC.
@@ -157,6 +155,61 @@ Scr_Shown:
         scf
         ret
 
+; 0.21 (09.11.2026, плата: первый запуск MD после записи нового MD.ELF на карту Tang): сразу после ответа
+; на LIST задача обмена ESP молчала дольше 16 попыток обмена (~0,4 с), и кадр BEGIN был выброшен
+; (SpiLink_Push) — до COREMENU он не дошёл (ни «raw media DMA», ни «receiving» в журнале ESP). 0.20
+; ошибку отправки не смотрела, ответа ждала ~0,1 с (NX_WAIT) и молча отдавала образ слою пакетами по 512
+; байт: 2 МБ — 70 с, полосы хода нет. Так же мог пропасть и LIST (тогда — окно WC и те же пакеты).
+; Команда экрану с повтором: кадр не ушёл — ещё раз (до SCR_ASK_TRIES); ответа — до SCR_ASK_WAIT × NX_WAIT
+; опросов (секунды); доклад ESP об ошибке (#EE: у старого COREMENU такой команды нет) — сразу «нет».
+; Вход: A — команда, E — код ответа, HL — данные, BC — длина. Выход: CF=0 — ответ в ProtoBuf; CF=1 — нет.
+SCR_ASK_TRIES   equ 3
+SCR_ASK_WAIT    equ 32
+Scr_Ask:
+        ld (ScrAskCmd),a
+        ld a,e
+        ld (ScrAskResp),a
+        ld (ScrAskData),hl
+        ld a,SCR_ASK_TRIES
+.try:
+        ld (ScrTries),a
+        xor a
+        ld (ProtoErr),a
+        push bc
+        ld hl,(ScrAskData)
+        ld a,(ScrAskCmd)
+        call Proto_Send
+        pop bc
+        jr c,.again                      ; кадр не ушёл: ESP молчала дольше 16 попыток обмена
+        push bc
+        ld b,SCR_ASK_WAIT
+.wait:
+        push bc
+        ld a,(ScrAskResp)
+        ld de,NX_WAIT
+        call Proto_WaitCmd
+        pop bc
+        jr nc,.got
+        ld a,(ProtoErr)
+        or a
+        jr nz,.refused                   ; ESP ответила ошибкой: экран такой команды не знает
+        djnz .wait
+        pop bc
+.again:
+        ld a,(ScrTries)
+        dec a
+        jr nz,.try
+        scf
+        ret
+.refused:
+        pop bc
+        scf
+        ret
+.got:
+        pop bc
+        or a
+        ret
+
 ; 0.19: образ с карты Evo (файл с панели WC) — экрану: COREMENU принимает его, рисуя ход полосой,
 ; и оставляет слою ядра (прошивка 0.1.123+, ABI 1.14); слой берёт его (#7A [1], Nes_Take), а не
 ; принимает второй раз. 0.20 — всем ядрам: MD.ELF 1.5, NES.ELF 0.10, AMIGA.ELF 0.27 умеют брать.
@@ -164,6 +217,7 @@ Scr_Shown:
 ; прошивка принимает блоки от Z80 (LINK_S_PUT_CAPABLE в статусе обмена): ScrRaw = 1.
 ; Выход: CF=0 — экран принимает (ScrFile = 1); CF=1 — нет: экрана нет, он старый (0.1), нет памяти —
 ; образ пойдёт слою, как прежде.
+; 0.21: BEGIN — через Scr_Ask (повтор безопасен: COREMENU на новый BEGIN начинает приём заново).
 Scr_FileBegin:
         xor a
         ld (ScrFile),a
@@ -191,10 +245,8 @@ Scr_FileBegin:
         ld c,l
         ld hl,ScrBuf
         ld a,CMD_FILE_BEGIN
-        call Proto_Send
-        ld a,RESP_FILE_BEGIN
-        ld de,NX_WAIT
-        call Proto_WaitCmd
+        ld e,RESP_FILE_BEGIN
+        call Scr_Ask
         ret c
         ld a,(ProtoRxLen)
         cp 2
@@ -609,6 +661,10 @@ ScrRawSecs:     db 0                    ; секторов в порции
 ScrRawWait:     db 0
 ScrRawCtl:      db CMD_FILE_RAW         ; управление raw media: [#4D][длина LE16][смещение LE32][XOR]
                 ds 7
+ScrTries:       db 0                    ; 0.21: Scr_Ask — попыток осталось, команда, код ответа, данные
+ScrAskCmd:      db 0
+ScrAskResp:     db 0
+ScrAskData:     dw 0
 ScrKept:        db 0                    ; 1 — экран выгружен, его «Loading» оставлен на HDMI
 ScrCmd:         db 0
 ScrSt:          db 0

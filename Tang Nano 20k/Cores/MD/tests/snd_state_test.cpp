@@ -36,6 +36,10 @@ int main(int argc, char **argv) {
     { size_t k = 0; for (unsigned b = 0; b <= blocks; b++) { while (k < ev.size() && (t[k] - t0) / 24 < uint64_t(b) * MD_SND_BLOCK) k++; first[b] = k; } }
     std::vector<uint8_t> mem(md_snd_size());
     md_snd_init(mem.data());
+    // MD_SND_SPLIT_TEST=1 (MD.ELF 1.6): каналы между половинами переставляются каждый блок — снимок и загрузка
+    // обязаны дать тот же звук и при другом делении (снимок пишется с делением 3)
+    const char *split_test = std::getenv("MD_SND_SPLIT_TEST");
+    if (split_test && *split_test == '1') md_snd_test_split(mem.data(), 1);
     float out[MD_SND_BLOCK * 2];
     std::vector<md_snd_write_t> bw;
     auto block = [&](unsigned b, std::vector<float> *pcm) {

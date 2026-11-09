@@ -42,6 +42,11 @@ int md_snd_block_begin(void *mem, const md_snd_write_t *w, unsigned nw, unsigned
 void md_snd_render_half(void *mem, int half);
 /* Стерео float −1..1, n кадров; gain — общее усиление. */
 void md_snd_mix(void *mem, float *out, float gain);
+/* MD.ELF 1.6: каналы YM 0..split-1 считает половина 0, остальные — половина 1; граница сдвигается между блоками
+ * по тактам (ESP). Ответ — граница сейчас, moves — смен за сеанс (может быть NULL). md_snd_test_split(mem, 1) —
+ * проверка на ПК: граница меняется каждый блок, звук обязан остаться тем же. */
+unsigned md_snd_split(const void *mem, unsigned *moves);
+void md_snd_test_split(void *mem, int on);
 /* Такты процессора на половины прошлого блока (ESP — CCOUNT; ПК — 0). */
 void md_snd_cycles(const void *mem, uint32_t *half0, uint32_t *half1);
 /* Они же по частям: такт ymfm и выход каналов половины 0, то же половины 1, PSG; psg_half — чья была PSG. */

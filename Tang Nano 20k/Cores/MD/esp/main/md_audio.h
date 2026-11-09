@@ -37,8 +37,14 @@
  * секунду: NTSC 262 x 3420 / 1008 x 60 = 53 336 Гц, PAL 313 x 3420 / 1008 x 50 = 53 098 Гц (было 53 571 — очередь
  * вывода пустела бы на 0,44 / 0,89 %, а подгонка — не больше отсчёта на блок, 0,39 %). Режим — из md_ctrl игры;
  * смена NTSC/PAL — вывод открывается заново между блоками.
+ *
+ * MD.ELF 1.7 (09.11.2026, плата, Аладдин: «хрип, а не звук», «тихий звук»): вывод — 48 000 Гц через md_resample.h
+ * (пересчёт с фильтром до ~21 кГц, громкость x3 и ограничитель −1 дБ, как у TSFM). Частота YM (53 098 / 53 336 Гц)
+ * задаёт только шаг пересчёта, смена NTSC/PAL вывод не переоткрывает. Очередь вывода держится у SND_Q_TARGET
+ * подстройкой шага (не больше SND_TRIM_MAX) — прежнее «отсчёт выбросить / повторить» рвало волну раз в блок.
  */
 #include "md_sound.h"
+#include "md_resample.h"
 
 #define R_SND_WP   0x20u          /* {обороты[31:16], указатель в коде Грея[9:0]} */
 #define R_CLK_KHZ  0x28u          /* MCLK, кГц */
@@ -52,8 +58,9 @@
 #define SND_LAT    (1285714u * 25u / 1000u)      /* 25 мс */
 #define SND_SKIP   (1285714u / 10u)              /* 100 мс */
 #define SND_EVQ    16384u
-#define SND_Q_HI   90u
-#define SND_Q_LO   12u
+#define SND_Q_TARGET 60.0f       /* мс в очереди вывода (с хвостом DMA ~80 мс на 48 кГц) */
+#define SND_TRIM_K   5.0e-5f     /* поправка шага на мс отклонения сглаженной очереди */
+#define SND_TRIM_MAX 3.0e-3f     /* ±0,3 % (5 центов) — не слышно */
 #define SND_POLL_MS 8u           /* кольцо 1024 слова: ЦАП 16 кГц заполняет его за 64 мс */
 
 static void *snd_mem, *snd_go, *snd_done;
@@ -91,7 +98,8 @@ typedef struct {
     uint64_t now;                 /* полное время ядра */
     uint32_t last20, rd;          /* rd — прочитано событий всего (по модулю 2^26, как запись) */
     uint64_t t_render;            /* начало следующего блока */
-    uint32_t lost, skips, blocks, drops, dups;
+    uint32_t lost, skips, blocks;
+    int32_t trim_min, trim_max;   /* поправка шага пересчёта, миллионные доли */
     uint32_t win_n, max0, max1;   /* за окно журнала: блоков, наибольшие такты половин */
     uint32_t events;              /* за окно журнала: событий из кольца ядра (0 — игра не пишет в YM и PSG) */
     uint32_t evq_max;             /* за окно журнала: наибольшее заполнение очереди */
@@ -162,6 +170,22 @@ static unsigned snd_take(uint64_t start, uint64_t end, unsigned n)
     return k;
 }
 
+/* MD.ELF 1.7: вывод — пересчёт в 48 кГц (md_resample.h) и запись в очередь прошивки */
+static md_rs_t snd_rs;
+static uint32_t snd_in_rate;                      /* частота отсчётов YM */
+static float snd_qs;                              /* сглаженная очередь вывода, мс */
+static float snd_out48[(MD_SND_BLOCK + 64) * 2];
+
+static void snd_write(const float *mix, unsigned n)
+{
+    const unsigned k = md_rs_process(&snd_rs, mix, n, snd_out48, MD_SND_BLOCK + 64);
+    for (unsigned done = 0; done < k && running;) {
+        const int w = core->pcm_write(snd_out48 + 2 * done, k - done);
+        if (w <= 0) break;
+        done += (unsigned)w;
+    }
+}
+
 static void snd_service(snd_pos_t *s, float *out)
 {
     if (snd_req == SND_REQ_SAVE) {
@@ -174,13 +198,9 @@ static void snd_service(snd_pos_t *s, float *out)
             core->signal_give(snd_go);
             md_snd_render_half(snd_mem, 0);
             if (core->signal_wait(snd_done, 100) != ZM_OK) break;
-            md_snd_mix(snd_mem, out, 0.9f);
+            md_snd_mix(snd_mem, out, 1.0f);
             s->t_render = end;
-            for (unsigned done = 0; done < n && running;) {
-                const int w = core->pcm_write(out + 2 * done, n - done);
-                if (w <= 0) break;
-                done += (unsigned)w;
-            }
+            snd_write(out, n);
         }
         unsigned k;
         do {                                           /* события в последнем неполном отсчёте */
@@ -210,12 +230,16 @@ static void snd_session(void)
     const uint32_t id = session_id;
     uint32_t khz = 0;
     if (live_read(R_CLK_KHZ, &khz, 1) != ZM_OK || khz < 40000 || khz > 70000) khz = 54000;
-    zm_pcm_format_t fmt = {snd_rate(khz), 2};
+    zm_pcm_format_t fmt = {MD_RS_OUT_RATE, 2};
     if (!snd_mem || core->pcm_open(&fmt) != ZM_OK) {
         while (running && session_live && session_id == id) core->delay(50);
         return;
     }
-    core->log("md: audio %u Hz, YM2612 on two ESP cores", (unsigned)fmt.rate);
+    snd_in_rate = snd_rate(khz);
+    md_rs_reset(&snd_rs);
+    md_rs_set_step(&snd_rs, snd_in_rate, 0.0f);
+    snd_qs = SND_Q_TARGET;
+    core->log("md: audio %u Hz from YM %u Hz, YM2612 on two ESP cores", (unsigned)fmt.rate, (unsigned)snd_in_rate);
     md_snd_reset(snd_mem);
     snd_evq_head = snd_evq_tail = 0;
     snd_pos_t s;
@@ -238,11 +262,7 @@ static void snd_session(void)
         if (!snd_poll(&s)) { core->delay(5); busy_ms = core->millis(); continue; }
         last_poll = core->millis();
         if (snd_req) { snd_service(&s, out); continue; }
-        if (snd_rate(khz) != fmt.rate) {                 /* NTSC <-> PAL: вывод заново на новой частоте */
-            core->pcm_close();
-            fmt.rate = snd_rate(khz);
-            if (core->pcm_open(&fmt) != ZM_OK) break;
-        }
+        if (snd_rate(khz) != snd_in_rate) snd_in_rate = snd_rate(khz);   /* NTSC <-> PAL: другой шаг пересчёта */
         const uint64_t target = s.now - SND_LAT;
         if (target > s.t_render + (uint64_t)MD_SND_BLOCK * MD_SND_TICKS &&
             (target > s.t_render + SND_SKIP || snd_evq_fill() > SND_EVQ / 4u * 3u)) {   /* отстали: применить без звука */
@@ -271,7 +291,7 @@ static void snd_session(void)
             core->signal_give(snd_go);                  /* половина 1 — помощник на ядре 1 */
             md_snd_render_half(snd_mem, 0);
             if (core->signal_wait(snd_done, 100) != ZM_OK) { s.lost++; break; }
-            md_snd_mix(snd_mem, out, 0.9f);
+            md_snd_mix(snd_mem, out, 1.0f);
             s.t_render = end;
             s.blocks++;
             {
@@ -284,19 +304,22 @@ static void snd_session(void)
                 if (c1 > s.max1) s.max1 = c1;
                 for (int i = 0; i < 5; i++) s.part[i] += pt[i];
             }
-            unsigned n = MD_SND_BLOCK;
             const uint32_t q = core->pcm_queued_ms();
             if (q < s.q_min) s.q_min = q;
             if (q > s.q_max) s.q_max = q;
             if (q < 5u) s.q_empty++;
-            if (q > SND_Q_HI) { n--; s.drops++; }
-            else if (q < SND_Q_LO) { out[2 * n] = out[2 * n - 2]; out[2 * n + 1] = out[2 * n - 1]; n++; s.dups++; }
-            unsigned done = 0;
-            while (done < n && running && session_live) {
-                const int w = core->pcm_write(out + 2 * done, n - done);
-                if (w <= 0) break;
-                done += (unsigned)w;
+            /* шаг пересчёта: очередь больше цели — читать вход чуть быстрее (выходных отсчётов меньше) */
+            snd_qs += ((float)q - snd_qs) * 0.0625f;
+            float eps = (snd_qs - SND_Q_TARGET) * SND_TRIM_K;
+            if (eps > SND_TRIM_MAX) eps = SND_TRIM_MAX;
+            if (eps < -SND_TRIM_MAX) eps = -SND_TRIM_MAX;
+            {
+                const int32_t ppm = (int32_t)(eps * 1e6f);
+                if (s.blocks == 1 || ppm < s.trim_min) s.trim_min = ppm;
+                if (s.blocks == 1 || ppm > s.trim_max) s.trim_max = ppm;
             }
+            md_rs_set_step(&snd_rs, snd_in_rate, eps);
+            snd_write(out, MD_SND_BLOCK);
             worked = 1;
         }
         if (!worked) { core->delay(2); busy_ms = core->millis(); }
@@ -306,13 +329,17 @@ static void snd_session(void)
        флэшем останавливает кэш обоих ядер, и код модуля из PSRAM стоит — чтение журнала во время игры давало
        рывок звука 82 мс); строка — до 127 байт */
     const uint64_t nb = s.blocks ? s.blocks : 1;
-    core->log("md: audio end: blocks %u, lost %u, skips %u, drop %u, dup %u, evq max %u, queue %u..%u ms, empty %u",
-              (unsigned)s.blocks, (unsigned)s.lost, (unsigned)s.skips, (unsigned)s.drops, (unsigned)s.dups,
-              (unsigned)s.evq_max, (unsigned)(s.q_min == 0xFFFFFFFFu ? 0u : s.q_min), (unsigned)s.q_max, (unsigned)s.q_empty);
-    core->log("md: synth kcyc/block (budget %u): h0 %u/%u, h1 %u/%u, psg %u",
-              (unsigned)(240000000u / (fmt.rate / MD_SND_BLOCK) / 1000u), (unsigned)(s.sum0 / nb / 1000u),
+    core->log("md: audio end: blocks %u, lost %u, skips %u, evq max %u, queue %u..%u ms, empty %u, trim %d..%d ppm",
+              (unsigned)s.blocks, (unsigned)s.lost, (unsigned)s.skips,
+              (unsigned)s.evq_max, (unsigned)(s.q_min == 0xFFFFFFFFu ? 0u : s.q_min), (unsigned)s.q_max, (unsigned)s.q_empty,
+              (int)s.trim_min, (int)s.trim_max);
+    /* MD.ELF 1.6: и деление каналов YM между ядрами — граница в конце и смен за сеанс */
+    unsigned moves = 0;
+    const unsigned split = md_snd_split(snd_mem, &moves);
+    core->log("md: synth kcyc/block (budget %u): h0 %u/%u, h1 %u/%u, psg %u, split %u, moves %u, lim %u/1000",
+              (unsigned)(240000000u / (snd_in_rate / MD_SND_BLOCK) / 1000u), (unsigned)(s.sum0 / nb / 1000u),
               (unsigned)(s.max0 / 1000u), (unsigned)(s.sum1 / nb / 1000u), (unsigned)(s.max1 / 1000u),
-              (unsigned)(s.part[4] / nb / 1000u));
+              (unsigned)(s.part[4] / nb / 1000u), split, moves, (unsigned)(snd_rs.lim_min * 1000.0f));
 }
 
 static void audio_task(void *arg)

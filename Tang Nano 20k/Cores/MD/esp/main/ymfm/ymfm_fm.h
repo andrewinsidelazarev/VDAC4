@@ -37,8 +37,10 @@
 // возвратом стоит около 23 тактов (замер MD.ELF 0.6), а на отсчёт их было около 20. Результат тот же бит в бит.
 #if defined(__GNUC__)
 #define VDAC4_HOT __attribute__((always_inline)) inline
+#define VDAC4_LAMBDA_HOT __attribute__((always_inline))
 #else
 #define VDAC4_HOT inline
+#define VDAC4_LAMBDA_HOT
 #endif
 
 #define YMFM_DEBUG_LOG_WAVFILES (0)
@@ -175,6 +177,9 @@ class fm_operator
 	// "quiet" value, used to optimize when we can skip doing work
 	static constexpr uint32_t EG_QUIET = 0x380;
 
+	// VDAC4: отрезок отсчётов (fm_engine_base::vdac4_span) берёт состояние оператора в локальные переменные
+	friend class fm_engine_base<RegisterType>;
+
 public:
 	// constructor
 	fm_operator(fm_engine_base<RegisterType> &owner, uint32_t opoffs);
@@ -192,8 +197,9 @@ public:
 	// set the current channel
 	void set_choffs(uint32_t choffs) { m_choffs = choffs; }
 
-	// prepare prior to clocking
-	bool prepare();
+	// prepare prior to clocking; VDAC4: recache = false — регистры оператора с прошлого prepare не менялись,
+	// кэш верен, проверяются только клавиша и активность (см. fm_engine_base::m_dirty_channels)
+	bool prepare(bool recache = true);
 
 	// master clocking function
 	void clock(uint32_t env_counter, int32_t lfo_raw_pm);
@@ -264,6 +270,9 @@ class fm_channel
 {
 	using output_data = ymfm_output<RegisterType::OUTPUTS>;
 
+	// VDAC4: отрезок отсчётов (fm_engine_base::vdac4_span) берёт состояние канала в локальные переменные
+	friend class fm_engine_base<RegisterType>;
+
 public:
 	// constructor
 	fm_channel(fm_engine_base<RegisterType> &owner, uint32_t choffs);
@@ -289,8 +298,8 @@ public:
 	// signal key on/off to our operators
 	void keyonoff(uint32_t states, keyon_type type, uint32_t chnum);
 
-	// prepare prior to clocking
-	bool prepare();
+	// prepare prior to clocking (VDAC4: recache — как у fm_operator::prepare)
+	bool prepare(bool recache = true);
 
 	// master clocking function
 	VDAC4_HOT void clock(uint32_t env_counter, int32_t lfo_raw_pm);
@@ -396,6 +405,25 @@ public:
 			m_channel[chnum]->output_4op(output, rshift, clipmax);
 	}
 
+	// VDAC4 Mega Drive (09.11.2026): n отсчётов каналов fmmask (OPN: 4 оператора, без ритма и шума) — то же,
+	// что n раз clock(fmmask) и output_channel каждого канала с выходом 5/256; к lr[2i], lr[2i + 1]
+	// прибавляется искажение ЦАП YM2612 от выхода каждого канала (как в ym2612::generate_part). Считает по
+	// каналу за проход: регистры канала и операторов на отрезке без записей постоянны и читаются один раз.
+	void vdac4_span(int32_t *lr, uint32_t n, uint32_t fmmask);
+
+	// VDAC4 (09.11.2026): взять канал chnum у другого экземпляра с теми же записями в регистры — тот считал
+	// канал, этот нет (половины YM на двух ядрах ESP делят каналы по нагрузке). Копируется всё, что меняют
+	// такт и prepare: фаза, огибающая, клавиша операторов, обратная связь канала, его активность; кэш операторов
+	// считается по своим регистрам (они те же), канал помечается для пересчёта кэша при следующем prepare.
+	void vdac4_take_channel(fm_engine_base &from, uint32_t chnum);
+
+	// VDAC4: такты ESP (CCOUNT) по каналам в vdac4_span — копятся, обнуляет вызывающий
+	uint32_t m_v4_cyc[CHANNELS] = {};
+private:
+	// VDAC4: один канал на len отсчётов отрезка (счётчики огибающих и LFO — в m_v4_*)
+	void vdac4_channel(fm_channel<RegisterType> &ch, int32_t *lr, uint32_t len, bool active);
+public:
+
 	// write to the OPN registers
 	void write(uint16_t regnum, uint8_t data);
 
@@ -436,7 +464,7 @@ public:
 	RegisterType &regs() { return m_regs; }
 
 	// invalidate any caches
-	void invalidate_caches() { m_modified_channels = RegisterType::ALL_CHANNELS; }
+	void invalidate_caches() { m_modified_channels = m_dirty_channels = RegisterType::ALL_CHANNELS; }
 
 	// simple getters for debugging
 	fm_channel<RegisterType> *debug_channel(uint32_t index) const { return m_channel[index].get(); }
@@ -471,6 +499,17 @@ protected:
 	uint32_t m_active_channels;      // mask of active channels (computed by prepare)
 	uint32_t m_modified_channels;    // mask of channels that have been modified
 	uint32_t m_prepare_count;        // counter to do periodic prepare sweeps
+	// VDAC4 (09.11.2026): каналы, у которых с их прошлого prepare менялись регистры, от которых зависит кэш
+	// операторов (cache_operator_data). Когда prepare (m_modified_channels — по-прежнему на любую запись), кэш
+	// пересчитывается только у них; у остальных — клавиша и активность. Прежде любая запись (в том числе в каналы
+	// другой половины и нажатие) пересчитывала кэш всех 12 операторов половины. Звук тот же: кэш — чистая функция
+	// регистров, а метка ставится на каждую запись, способную его изменить (с запасом).
+	uint32_t m_dirty_channels;
+	// VDAC4: vdac4_span — счётчик огибающих, PM и AM LFO по отсчётам отрезка (общие для всех каналов)
+	static constexpr uint32_t VDAC4_SPAN = 256;
+	uint32_t m_v4_env[VDAC4_SPAN];
+	int8_t m_v4_pm[VDAC4_SPAN];
+	uint8_t m_v4_am[VDAC4_SPAN];
 	RegisterType m_regs;             // register accessor
 	std::unique_ptr<fm_channel<RegisterType>> m_channel[CHANNELS]; // channel pointers
 	std::unique_ptr<fm_operator<RegisterType>> m_operator[OPERATORS]; // operator pointers

@@ -430,11 +430,14 @@ void fm_operator<RegisterType>::save_restore(ymfm_saved_state &state)
 //-------------------------------------------------
 
 template<class RegisterType>
-bool fm_operator<RegisterType>::prepare()
+bool fm_operator<RegisterType>::prepare(bool recache)
 {
-	// cache the data
-	m_regs.cache_operator_data(m_choffs, m_opoffs, m_cache);
-	m_pm_raw = INT32_MIN;                  // VDAC4: шаг фазы при PM — заново
+	// cache the data; VDAC4: только если регистры канала менялись (иначе кэш тот же)
+	if (recache)
+	{
+		m_regs.cache_operator_data(m_choffs, m_opoffs, m_cache);
+		m_pm_raw = INT32_MIN;              // VDAC4: шаг фазы при PM — заново
+	}
 
 	// clock the key state; VDAC4: first the release no clock has seen (m_key_dropped)
 	if (m_key_dropped != 0)
@@ -889,14 +892,14 @@ void fm_channel<RegisterType>::keyonoff(uint32_t states, keyon_type type, uint32
 //-------------------------------------------------
 
 template<class RegisterType>
-bool fm_channel<RegisterType>::prepare()
+bool fm_channel<RegisterType>::prepare(bool recache)
 {
 	uint32_t active_mask = 0;
 
 	// prepare all operators and determine if they are active
 	for (uint32_t opnum = 0; opnum < m_op.size(); opnum++)
 		if (m_op[opnum] != nullptr)
-			if (m_op[opnum]->prepare())
+			if (m_op[opnum]->prepare(recache))
 				active_mask |= 1 << opnum;
 
 	return (active_mask != 0);
@@ -1222,7 +1225,8 @@ fm_engine_base<RegisterType>::fm_engine_base(ymfm_interface &intf) :
 	m_total_clocks(0),
 	m_active_channels(ALL_CHANNELS),
 	m_modified_channels(ALL_CHANNELS),
-	m_prepare_count(0)
+	m_prepare_count(0),
+	m_dirty_channels(ALL_CHANNELS)
 {
 	// inform the interface of their engine
 	m_intf.m_engine = this;
@@ -1257,6 +1261,7 @@ void fm_engine_base<RegisterType>::reset()
 
 	// register type-specific initialization
 	m_regs.reset();
+	m_dirty_channels = ALL_CHANNELS;       // VDAC4: регистры обнулены — кэш всех операторов заново
 
 	// explicitly write to the mode register since it has side-effects
 	// QUESTION: old cores initialize this to 0x30 -- who is right?
@@ -1324,12 +1329,13 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 		if (RegisterType::DYNAMIC_OPS)
 			assign_operators();
 
-		// call each channel to prepare
+		// call each channel to prepare; VDAC4: кэш операторов — только у каналов с метками m_dirty_channels
 		m_active_channels = 0;
 		for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
 			if (bitfield(chanmask, chnum))
-				if (m_channel[chnum]->prepare())
+				if (m_channel[chnum]->prepare(bitfield(m_dirty_channels, chnum) != 0))
 					m_active_channels |= 1 << chnum;
+		m_dirty_channels &= ~chanmask;
 
 		// reset the modified channels and prepare count
 		m_modified_channels = m_prepare_count = 0;
@@ -1352,6 +1358,390 @@ uint32_t fm_engine_base<RegisterType>::clock(uint32_t chanmask)
 
 	// return the envelope counter as it is used to clock ADPCM-A
 	return m_env_counter;
+}
+
+
+//-------------------------------------------------
+//  vdac4_span - VDAC4 Mega Drive (09.11.2026): n
+//  samples of the fmmask channels at once
+//-------------------------------------------------
+//
+// То же, что n раз подряд clock(fmmask) и для каждого канала маски output_channel(temp, 5, 256) с искажением
+// ЦАП YM2612 (ym2612::generate_part), — если между отсчётами нет записей в регистры. Отличие только в порядке
+// работы: сначала общее на отрезок (prepare, счётчик огибающих, LFO — по отсчётам в m_v4_*), затем каждый канал
+// целиком по всем отсчётам. Каналы друг от друга не зависят, а регистры на отрезке постоянны — они читаются один
+// раз, состояние операторов живёт в локальных переменных (на ESP прежде на каждый оператор и отсчёт — чтения
+// битовых полей регистров и косвенные обращения через объекты). Код операторов повторяет fm_operator::clock,
+// clock_ssg_eg_state, clock_envelope, clock_phase, compute_volume и fm_channel::output_4op строка в строку;
+// совпадение бит в бит проверяется сравнением со старым движком (tests/snd_render.cpp на случайных записях).
+
+static inline uint32_t vdac4_fm_ccount()
+{
+#if defined(__XTENSA__)
+	uint32_t c; __asm__ __volatile__("rsr %0, ccount" : "=a"(c)); return c;
+#else
+	return 0;
+#endif
+}
+
+template<class RegisterType>
+void fm_engine_base<RegisterType>::vdac4_take_channel(fm_engine_base &from, uint32_t chnum)
+{
+	fm_channel<RegisterType> &dst = *m_channel[chnum];
+	fm_channel<RegisterType> const &src = *from.m_channel[chnum];
+	dst.m_feedback[0] = src.m_feedback[0];
+	dst.m_feedback[1] = src.m_feedback[1];
+	dst.m_feedback_in = src.m_feedback_in;
+	for (uint32_t opnum = 0; opnum < dst.m_op.size(); opnum++)
+	{
+		fm_operator<RegisterType> &d = *dst.m_op[opnum];
+		fm_operator<RegisterType> const &s = *src.m_op[opnum];
+		d.m_phase = s.m_phase;
+		d.m_env_attenuation = s.m_env_attenuation;
+		d.m_env_state = s.m_env_state;
+		d.m_ssg_inverted = s.m_ssg_inverted;
+		d.m_key_state = s.m_key_state;
+		d.m_keyon_live = s.m_keyon_live;
+		d.m_key_dropped = s.m_key_dropped;
+		m_regs.cache_operator_data(d.m_choffs, d.m_opoffs, d.m_cache);
+		d.m_pm_raw = INT32_MIN;
+	}
+	m_active_channels = (m_active_channels & ~(1u << chnum)) | (from.m_active_channels & (1u << chnum));
+	m_dirty_channels |= 1u << chnum;
+}
+
+template<class RegisterType>
+void fm_engine_base<RegisterType>::vdac4_span(int32_t *lr, uint32_t n, uint32_t fmmask)
+{
+	while (n != 0)
+	{
+		// первый отсчёт части — начало clock(): prepare после записей или по счётчику 4096
+		m_total_clocks++;
+		if (m_modified_channels != 0 || m_prepare_count++ >= 4096)
+		{
+			m_active_channels = 0;
+			for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
+				if (bitfield(fmmask, chnum))
+					if (m_channel[chnum]->prepare(bitfield(m_dirty_channels, chnum) != 0))
+						m_active_channels |= 1 << chnum;
+			m_dirty_channels &= ~fmmask;
+			m_modified_channels = m_prepare_count = 0;
+		}
+
+		// следующие отсчёты prepare не делают, пока счётчик не дойдёт до 4096: при счётчике c после первого
+		// отсчёта prepare будет в отсчёте m = 4097 - c от него
+		uint32_t len = 4097 - m_prepare_count;
+		if (len > n)
+			len = n;
+		if (len > VDAC4_SPAN)
+			len = VDAC4_SPAN;
+
+		// общее по отсчётам: счётчик огибающих, LFO
+		for (uint32_t i = 0; i < len; i++)
+		{
+			if (i != 0)
+			{
+				m_total_clocks++;
+				m_prepare_count++;
+			}
+			if (RegisterType::EG_CLOCK_DIVIDER == 1)
+				m_env_counter += 4;
+			else if (bitfield(++m_env_counter, 0, 2) == RegisterType::EG_CLOCK_DIVIDER)
+				m_env_counter += 4 - RegisterType::EG_CLOCK_DIVIDER;
+			m_v4_env[i] = m_env_counter;
+			m_v4_pm[i] = int8_t(m_regs.clock_noise_and_lfo());
+			m_v4_am[i] = uint8_t(m_regs.lfo_am_raw());
+		}
+
+		// каналы; такты каждого — для деления каналов между ядрами (md_sound.cpp)
+		for (uint32_t chnum = 0; chnum < CHANNELS; chnum++)
+			if (bitfield(fmmask, chnum))
+			{
+				uint32_t const t0 = vdac4_fm_ccount();
+				vdac4_channel(*m_channel[chnum], lr, len, bitfield(m_active_channels, chnum) != 0);
+				m_v4_cyc[chnum] += vdac4_fm_ccount() - t0;
+			}
+
+		lr += 2 * len;
+		n -= len;
+	}
+}
+
+template<class RegisterType>
+void fm_engine_base<RegisterType>::vdac4_channel(fm_channel<RegisterType> &ch, int32_t *lr, uint32_t len, bool active)
+{
+	using op_type = fm_operator<RegisterType>;
+	constexpr uint32_t EG_QUIET = op_type::EG_QUIET;
+
+	// таблица алгоритмов fm_channel::output_4op (0–7, OPN): вход оператора 2 (бит 0), 3 (биты 1–3),
+	// 4 (биты 4–6), в сумму — O1 (бит 7), O2 (бит 8), O3 (бит 9)
+	static uint16_t const s_algorithm_ops[8] =
+	{
+		1 | (2 << 1) | (3 << 4),
+		0 | (5 << 1) | (3 << 4),
+		0 | (2 << 1) | (6 << 4),
+		1 | (0 << 1) | (7 << 4),
+		1 | (0 << 1) | (3 << 4) | (1 << 8),
+		1 | (1 << 1) | (1 << 4) | (1 << 8) | (1 << 9),
+		1 | (0 << 1) | (0 << 4) | (1 << 8) | (1 << 9),
+		0 | (0 << 1) | (0 << 4) | (1 << 7) | (1 << 8) | (1 << 9)
+	};
+
+	// искажение ЦАП YM2612 (ym2612::dac_discontinuity)
+	auto disc = [](int32_t value) VDAC4_LAMBDA_HOT -> int32_t { return (value < 0) ? (value - 3) : (value + 4); };
+
+	// состояние и постоянные оператора на отрезке
+	struct v4op
+	{
+		op_type *p;
+		uint32_t phase;
+		uint16_t att;                  // m_env_attenuation (тот же тип: арифметика атаки зависит от него)
+		envelope_state state;
+		uint8_t inv;                   // m_ssg_inverted
+		uint32_t step;                 // m_cache.phase_step или PHASE_STEP_DYNAMIC
+		int32_t pm_raw;
+		uint32_t pm_step;
+		uint32_t ssg, ssg_mode, am_en, tl, sustain, shift;
+		uint8_t rate[EG_STATES];
+		uint16_t const *wave;
+	} op[4];
+
+	bool quiet = true;
+	for (int k = 0; k < 4; k++)
+	{
+		v4op &o = op[k];
+		op_type &p = *ch.m_op[k];
+		o.p = &p;
+		o.phase = p.m_phase;
+		o.att = p.m_env_attenuation;
+		o.state = p.m_env_state;
+		o.inv = p.m_ssg_inverted;
+		o.step = p.m_cache.phase_step;
+		o.pm_raw = p.m_pm_raw;
+		o.pm_step = p.m_pm_step;
+		o.ssg = m_regs.op_ssg_eg_enable(p.m_opoffs);
+		o.ssg_mode = m_regs.op_ssg_eg_mode(p.m_opoffs);
+		o.am_en = m_regs.op_lfo_am_enable(p.m_opoffs);
+		o.tl = p.m_cache.total_level;
+		o.sustain = p.m_cache.eg_sustain;
+		o.shift = p.m_cache.eg_shift;
+		for (int s = 0; s < EG_STATES; s++)
+			o.rate[s] = p.m_cache.eg_rate[s];
+		o.wave = p.m_cache.waveform;
+		// затихший после отпускания (fm_operator::clock): такт его не меняет
+		if (!(o.state == EG_RELEASE && o.att >= 0x3ff && !o.ssg))
+			quiet = false;
+	}
+
+	int16_t fb0 = ch.m_feedback[0], fb1 = ch.m_feedback[1], fbin = ch.m_feedback_in;
+
+	if (quiet)
+	{
+		// все четыре затихли: фаза и огибающие стоят, громкость каждого 0 (затухание > EG_QUIET) — выход канала 0,
+		// обратная связь оператора 1 — 0 (если канал активен); ЦАП даёт +4 в обе стороны
+		for (uint32_t i = 0; i < len; i++)
+		{
+			fb0 = fb1;
+			fb1 = fbin;
+			if (active)
+				fbin = 0;
+			lr[2 * i] += 4;
+			lr[2 * i + 1] += 4;
+		}
+		if (len != 0)
+			for (int k = 0; k < 4; k++)
+				op[k].p->m_ssg_inverted = 0;
+		ch.m_feedback[0] = fb0;
+		ch.m_feedback[1] = fb1;
+		ch.m_feedback_in = fbin;
+		return;
+	}
+
+	// регистры канала
+	uint32_t const choffs = ch.m_choffs;
+	uint32_t const feedback = m_regs.ch_feedback(choffs);
+	uint32_t const out_any = m_regs.ch_output_any(choffs);
+	uint32_t const out0 = m_regs.ch_output_0(choffs);
+	uint32_t const out1 = m_regs.ch_output_1(choffs);
+	uint32_t const am_shift = (1 << (m_regs.ch_lfo_am_sens(choffs) ^ 3)) - 1;
+	uint32_t const algorithm_ops = s_algorithm_ops[m_regs.ch_algorithm(choffs) & 7];
+
+	// fm_operator::start_attack(true) — повтор атаки SSG-EG
+	auto restart_attack = [](v4op &o) VDAC4_LAMBDA_HOT
+	{
+		if (o.state == EG_ATTACK)
+			return;
+		o.state = EG_ATTACK;
+		if (o.rate[EG_ATTACK] >= 62)
+			o.att = 0;
+	};
+
+	// fm_operator::clock
+	auto clock_op = [&](v4op &o, uint32_t env_counter, int32_t lfo_raw_pm) VDAC4_LAMBDA_HOT
+	{
+		if (o.state == EG_RELEASE && o.att >= 0x3ff && !o.ssg)
+		{
+			o.inv = false;
+			return;
+		}
+
+		// clock_ssg_eg_state
+		if (o.ssg)
+		{
+			if (bitfield(o.att, 9))
+			{
+				uint32_t const mode = o.ssg_mode;
+				if (bitfield(mode, 0))
+				{
+					o.inv = bitfield(mode, 2) ^ bitfield(mode, 1);
+					if (o.state != EG_ATTACK)
+						o.att = o.inv ? 0x200 : 0x3ff;
+				}
+				else
+				{
+					o.inv ^= bitfield(mode, 1);
+					if (o.state == EG_DECAY || o.state == EG_SUSTAIN)
+						restart_attack(o);
+					if (bitfield(mode, 1) == 0)
+						o.phase = 0;
+				}
+				if (o.state == EG_RELEASE)
+					o.att = 0x3ff;
+			}
+		}
+		else
+			o.inv = false;
+
+		// clock_envelope
+		if (bitfield(env_counter, 0, 2) == 0)
+		{
+			uint32_t ec = env_counter >> 2;
+			if (o.state == EG_ATTACK && o.att == 0)
+				o.state = EG_DECAY;
+			if (o.state == EG_DECAY && o.att >= o.sustain)
+				o.state = EG_SUSTAIN;
+			uint32_t const rate = o.rate[o.state];
+			uint32_t const rate_shift = rate >> 2;
+			ec <<= rate_shift;
+			if (bitfield(ec, 0, 11) == 0)
+			{
+				uint32_t const relevant_bits = bitfield(ec, (rate_shift <= 11) ? 11 : rate_shift, 3);
+				uint32_t const increment = attenuation_increment(rate, relevant_bits);
+				if (o.state == EG_ATTACK)
+				{
+					if (rate < 62)
+						o.att += (~o.att * increment) >> 4;
+				}
+				else
+				{
+					if (!o.ssg)
+						o.att += increment;
+					else if (o.att < 0x200)
+						o.att += 4 * increment;
+					if (o.att >= 0x400)
+						o.att = 0x3ff;
+				}
+			}
+		}
+
+		// clock_phase
+		uint32_t phase_step = o.step;
+		if (phase_step == opdata_cache::PHASE_STEP_DYNAMIC)
+		{
+			if (lfo_raw_pm != o.pm_raw)
+			{
+				o.pm_raw = lfo_raw_pm;
+				o.pm_step = m_regs.compute_phase_step(o.p->m_choffs, o.p->m_opoffs, o.p->m_cache, lfo_raw_pm);
+			}
+			phase_step = o.pm_step;
+		}
+		o.phase += phase_step;
+	};
+
+	// fm_operator::compute_volume с envelope_attenuation
+	auto volume = [&](v4op const &o, uint32_t phase, uint32_t am_offset) VDAC4_LAMBDA_HOT -> int32_t
+	{
+		if (o.att > EG_QUIET)
+			return 0;
+		uint32_t const sin_attenuation = o.wave[phase & (RegisterType::WAVEFORM_LENGTH - 1)];
+		uint32_t env = o.att >> o.shift;
+		if (RegisterType::EG_HAS_SSG && o.inv)
+			env = (0x200 - env) & 0x3ff;
+		if (o.am_en)
+			env += am_offset;
+		env += o.tl;
+		env = std::min<uint32_t>(env, 0x3ff);
+		int32_t const result = attenuation_to_volume((sin_attenuation & 0x7fff) + (env << 2));
+		return bitfield(sin_attenuation, 15) ? -result : result;
+	};
+
+	for (uint32_t i = 0; i < len; i++)
+	{
+		uint32_t const env_counter = m_v4_env[i];
+		int32_t const lfo_raw_pm = m_v4_pm[i];
+
+		// fm_channel::clock
+		fb0 = fb1;
+		fb1 = fbin;
+		clock_op(op[0], env_counter, lfo_raw_pm);
+		clock_op(op[1], env_counter, lfo_raw_pm);
+		clock_op(op[2], env_counter, lfo_raw_pm);
+		clock_op(op[3], env_counter, lfo_raw_pm);
+
+		// fm_channel::output_4op (rshift 5, clipmax 256)
+		int32_t left = 0, right = 0;
+		if (active)
+		{
+			uint32_t const am_offset = (uint32_t(m_v4_am[i]) << 1) >> am_shift;
+			int32_t opmod = 0;
+			if (feedback != 0)
+				opmod = (fb0 + fb1) >> (10 - feedback);
+			int32_t const op1value = fbin = int16_t(volume(op[0], (op[0].phase >> 10) + opmod, am_offset));
+			if (out_any != 0)
+			{
+				int16_t opout[8];
+				opout[0] = 0;
+				opout[1] = op1value;
+				opmod = opout[bitfield(algorithm_ops, 0, 1)] >> 1;
+				opout[2] = volume(op[1], (op[1].phase >> 10) + opmod, am_offset);
+				opout[5] = opout[1] + opout[2];
+				opmod = opout[bitfield(algorithm_ops, 1, 3)] >> 1;
+				opout[3] = volume(op[2], (op[2].phase >> 10) + opmod, am_offset);
+				opout[6] = opout[1] + opout[3];
+				opout[7] = opout[2] + opout[3];
+				opmod = opout[bitfield(algorithm_ops, 4, 3)] >> 1;
+				int32_t result = volume(op[3], (op[3].phase >> 10) + opmod, am_offset) >> 5;
+				if (bitfield(algorithm_ops, 7) != 0)
+					result = clamp(result + (opout[1] >> 5), -257, 256);
+				if (bitfield(algorithm_ops, 8) != 0)
+					result = clamp(result + (opout[2] >> 5), -257, 256);
+				if (bitfield(algorithm_ops, 9) != 0)
+					result = clamp(result + (opout[3] >> 5), -257, 256);
+				if (out0)
+					left = result;
+				if (out1)
+					right = result;
+			}
+		}
+		lr[2 * i] += disc(left);
+		lr[2 * i + 1] += disc(right);
+	}
+
+	// состояние — обратно
+	for (int k = 0; k < 4; k++)
+	{
+		v4op const &o = op[k];
+		op_type &p = *o.p;
+		p.m_phase = o.phase;
+		p.m_env_attenuation = o.att;
+		p.m_env_state = o.state;
+		p.m_ssg_inverted = o.inv;
+		p.m_pm_raw = o.pm_raw;
+		p.m_pm_step = o.pm_step;
+	}
+	ch.m_feedback[0] = fb0;
+	ch.m_feedback[1] = fb1;
+	ch.m_feedback_in = fbin;
 }
 
 
@@ -1444,6 +1834,23 @@ void fm_engine_base<RegisterType>::write(uint16_t regnum, uint8_t data)
 
 	// for now just mark all channels as modified
 	m_modified_channels = ALL_CHANNELS;
+
+	// VDAC4 (09.11.2026, только OPN — других движков в этой копии нет): чей кэш операторов может измениться.
+	// Регистры 30–B6 (обе части): канал — младшие 2 бита (3 — нет канала) и часть; A8–AF — частоты канала 3 в
+	// особом режиме — ещё и канал 2. Нажатие (28) кэш не меняет: клавишу prepare проверяет у всех каналов.
+	// Остальные общие (22 — LFO, 27 — режим канала 3 и прочие) — все каналы.
+	{
+		uint32_t const reg = regnum & 0xff;
+		if (reg >= 0x30)
+		{
+			if ((reg & 3) != 3)
+				m_dirty_channels |= 1 << ((reg & 3) + (CHANNELS > 3 ? 3 * bitfield(regnum, 8) : 0));
+			if ((reg & 0xf8) == 0xa8)
+				m_dirty_channels |= 1 << 2;
+		}
+		else if (reg != 0x28)
+			m_dirty_channels = ALL_CHANNELS;
+	}
 
 	// most writes are passive, consumed only when needed
 	uint32_t keyon_channel;
@@ -1594,7 +2001,7 @@ template<class RegisterType>
 void fm_engine_base<RegisterType>::engine_mode_write(uint8_t data)
 {
 	// mark all channels as modified
-	m_modified_channels = ALL_CHANNELS;
+	m_modified_channels = m_dirty_channels = ALL_CHANNELS;
 
 	// actually write the mode register now
 	uint32_t dummy1, dummy2;

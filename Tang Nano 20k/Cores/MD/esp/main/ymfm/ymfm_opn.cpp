@@ -2460,6 +2460,38 @@ void ym2612::generate_part(int32_t &left, int32_t &right, uint32_t chanmask)
 
 
 //-------------------------------------------------
+//  generate_span - VDAC4: n samples of chanmask
+//  channels (see ymfm_opn.h)
+//-------------------------------------------------
+
+void ym2612::take_channel(ym2612 &from, uint32_t chnum)
+{
+	m_fm.vdac4_take_channel(from.m_fm, chnum);
+}
+
+void ym2612::generate_span(int32_t *lr, uint32_t n, uint32_t chanmask, const uint16_t *dac)
+{
+	const uint32_t c0 = vdac4_ccount();
+	for (uint32_t i = 0; i < 2 * n; i++)
+		lr[i] = 0;
+	// каналы FM — как в generate_part: при включённом ЦАП канал 6 не тактуется и звучит ЦАПом
+	m_fm.vdac4_span(lr, n, m_dac_enable ? (chanmask & ~0x20u) : chanmask);
+	if (m_dac_enable && bitfield(chanmask, 5))
+	{
+		const bool out0 = m_fm.regs().ch_output_0(0x102) != 0;
+		const bool out1 = m_fm.regs().ch_output_1(0x102) != 0;
+		for (uint32_t i = 0; i < n; i++)
+		{
+			const int32_t dacval = dac_discontinuity(int16_t(dac[i] << 7) >> 7);
+			lr[2 * i] += out0 ? dacval : dac_discontinuity(0);
+			lr[2 * i + 1] += out1 ? dacval : dac_discontinuity(0);
+		}
+	}
+	m_cyc_clock += vdac4_ccount() - c0;
+}
+
+
+//-------------------------------------------------
 //  generate - generate one sample of sound
 //-------------------------------------------------
 

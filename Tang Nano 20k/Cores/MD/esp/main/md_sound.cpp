@@ -25,6 +25,17 @@
 // PSG считает та половина, у которой FM прошлого блока занял меньше тактов ESP (на ПК тактов нет — половина 1
 // при включённом ЦАП, иначе 0): выбор — на блок, в md_snd_block_begin, до запуска половин; PSG в блоке считает
 // ровно одна половина, поэтому звук от выбора не зависит.
+//
+// MD.ELF 1.6 (09.11.2026, «звук хрипит» — синтез на тяжёлых местах не успевал, догон пропуском): три правки
+// ymfm и движка, звук бит в бит прежний (WAV Jungle Book, PSG и трёх минут случайных записей во все регистры;
+// шесть искусственных нагрузок; снимки F5/F6):
+//  1. prepare пересчитывает кэш операторов только у каналов, чьи регистры менялись (m_dirty_channels), — прежде
+//     любая запись, даже в каналы другой половины, пересчитывала все 12 операторов половины;
+//  2. между записями, меняющими FM, отсчёты считаются отрезком по каналу за проход (ym2612::generate_span,
+//     fm_engine_base::vdac4_span): регистры канала читаются раз на отрезок, состояние операторов — в локальных
+//     переменных; данные ЦАП и адреса отрезок не делят (ЦАП — массивом по отсчётам);
+//  3. каналы делятся между половинами по тактам (rebalance): блок ждёт дольшую половину.
+// ПК: дольшая половина Jungle Book 113 -> 59 нс на отсчёт, случайные записи 160–185 -> 99–106.
 #include "md_sound.h"
 #include "ymfm/ymfm_opn.h"
 #include <math.h>
@@ -137,17 +148,37 @@ struct Engine {
     md_snd_write_t w[MD_SND_MAX_WRITES];
     unsigned nw, n;
     int32_t lr0[MD_SND_BLOCK * 2], lr1[MD_SND_BLOCK * 2];
+    uint16_t dacv[2][MD_SND_BLOCK];                      // данные ЦАП YM по отсчётам блока (у каждой половины свои)
     float psg_out[MD_SND_BLOCK];
     float hp_x[2], hp_y[2];
     uint32_t cyc[2];
     uint32_t parts[5];                                   // такт 0, выход 0, такт 1, выход 1, PSG (последний блок)
     int psg_half;                                        // половина, считающая PSG в этом блоке
     struct { uint16_t addr; uint8_t mode; } sh[2];       // адрес YM ({часть, адрес}) и биты 7-6 регистра 27 у экземпляров
-    Engine() : ym0(intf0), ym1(intf1), nw(0), n(0), parts{}, psg_half(0) { reset(); }
+    // MD.ELF 1.6: каналы 0..split-1 считает половина 0 (ym0), split..5 — половина 1 (ym1, с ЦАП); см. rebalance
+    unsigned split;
+    uint32_t ch_cyc[6];                                  // такты каналов в прошлом блоке (у той половины, что считала)
+    uint32_t ch_cost[6], base_cost[2], psg_cost;         // сглаженные: каналы, остальное у половин, PSG
+    uint32_t moves;                                      // смен деления за сеанс
+    int split_test;                                      // ПК: деление меняется каждый блок (сверка точности)
+    unsigned test_n;
+    Engine() : ym0(intf0), ym1(intf1), nw(0), n(0), parts{}, psg_half(0), split_test(0), test_n(0) { reset(); }
     void reset() {
         ym0.reset(); ym1.reset(); psg.reset();
         sh[0].addr = sh[1].addr = 0; sh[0].mode = sh[1].mode = 0;
         hp_x[0] = hp_x[1] = hp_y[0] = hp_y[1] = 0.0f;
+        // после сброса обоих экземпляров каналы у них одинаковы — деление можно менять без переноса
+        split = 3;
+        for (int c = 0; c < 6; c++) ch_cyc[c] = ch_cost[c] = 0;
+        base_cost[0] = base_cost[1] = psg_cost = 0;
+        moves = 0;
+    }
+    uint32_t mask(int half) const { return half ? (0x3Fu & ~((1u << split) - 1u)) : ((1u << split) - 1u); }
+    // деление на b: каналы, сменившие половину, берут состояние у прежней (ymfm vdac4_take_channel):
+    // граница растёт — канал split уходит из половины 1 в 0, убывает — канал split-1 из 0 в 1
+    void set_split(unsigned b) {
+        while (split < b) { ym0.take_channel(ym1, split); split++; }
+        while (split > b) { split--; ym1.take_channel(ym0, split); }
     }
 };
 
@@ -165,6 +196,19 @@ void ym_write(ymfm::ym2612 &ym, decltype(Engine::sh[0]) &sh, const md_snd_write_
         sh.mode = e.data;
     }
     ym.write(e.port, e.data);
+}
+
+// MD.ELF 1.6 (09.11.2026): запись меняет синтез FM — ym_write дойдёт до регистров FM (ym2612::write_data /
+// write_data_hi -> m_fm.write) или до включения ЦАП (2B); сброс YM — тоже. Адрес и данные ЦАП (2A, 2C) FM не
+// трогают: такие записи отрезок FM не делят (у Jungle Book ЦАП пишут каждые 3–4 отсчёта). Смотрится адрес
+// самого ym2612, а не тень sh.addr: после сброса YM они могут разойтись (ymfm адрес при сбросе не обнуляет).
+bool ym_fm_write(const ymfm::ym2612 &ym, decltype(Engine::sh[0]) &sh, const md_snd_write_t &e) {
+    if (e.kind == 2) return true;
+    if (e.kind != 0 || !(e.port & 1)) return false;
+    if (e.port == 1 && sh.addr == 0x27 && ((e.data ^ sh.mode) & 0xC0) == 0) return false;   // отбросит ym_write
+    const uint16_t a = ym.address();
+    if (e.port == 1) return !(a & 0x100) && a != 0x2A && a != 0x2C;
+    return (a & 0x100) != 0;
 }
 
 void *(*g_alloc)(size_t) = nullptr;
@@ -199,6 +243,7 @@ unsigned get16(const uint8_t *&p) { const unsigned v = p[0] | p[1] << 8; p += 2;
 
 extern "C" size_t md_snd_save(void *mem, uint8_t *buf, size_t cap) {
     Engine &e = *static_cast<Engine *>(mem);
+    e.set_split(3);                                      // MD.ELF 1.6: каналы 0–2 — у ym0, 3–5 — у ym1, как в 1.5
     std::vector<uint8_t> v0, v1;
     { ymfm::ymfm_saved_state s(v0, true); e.ym0.save_restore(s); }
     { ymfm::ymfm_saved_state s(v1, true); e.ym1.save_restore(s); }
@@ -237,6 +282,7 @@ extern "C" int md_snd_load(void *mem, const uint8_t *buf, size_t n) {
         ymfm::ymfm_saved_state s(v, false); e.ym1.save_restore(s);
         p += n1;
     }
+    e.split = 3;                                         // снимок — с делением 3 (md_snd_save)
     Psg &g = e.psg;
     for (int i = 0; i < 3; i++) g.period[i] = uint16_t(get16(p));
     for (int i = 0; i < 4; i++) g.cnt[i] = uint16_t(get16(p));
@@ -254,37 +300,104 @@ extern "C" size_t md_snd_size(void) { return sizeof(Engine); }
 extern "C" void md_snd_init(void *mem) { new (mem) Engine(); }
 extern "C" void md_snd_reset(void *mem) { static_cast<Engine *>(mem)->reset(); }
 
+// MD.ELF 1.6 (09.11.2026): деление каналов YM между половинами (ядрами ESP). Блок ждёт дольшую половину, а
+// нагрузка каналов разная: у Jungle Book на ПК половина 0 (каналы 0–2) — 62 нс на отсчёт, половина 1 (3–4, ЦАП,
+// PSG) — 27. Между блоками граница split сдвигается так, чтобы дольшая из двух была короче: по сглаженным тактам
+// каждого канала, остального у каждой половины и PSG в прошлых блоках. Канал 5 (с ЦАП) всегда у половины 1.
+// Канал, сменивший половину, берёт состояние у прежней (ym2612::take_channel) — звук от деления не зависит
+// (сверка на ПК: деление меняется каждый блок, WAV тот же). Порог 1/12 — чтобы граница не металась.
+namespace {
+void rebalance(Engine &e, unsigned prev_n) {
+    if (e.split_test) {
+        static const unsigned seq[5] = {3, 5, 1, 4, 2};
+        e.set_split(seq[e.test_n++ % 5]);
+        e.moves++;
+        return;
+    }
+    if (prev_n != MD_SND_BLOCK) return;                  // прошлый блок — догон или снимок: такты не показательны
+    uint32_t own[2] = {0, 0};
+    for (unsigned c = 0; c < 6; c++) {
+        e.ch_cost[c] = (3u * e.ch_cost[c] + e.ch_cyc[c]) / 4u;
+        own[c < e.split ? 0 : 1] += e.ch_cyc[c];
+    }
+    const uint32_t psg = e.parts[4];
+    e.psg_cost = (3u * e.psg_cost + psg) / 4u;
+    for (int h = 0; h < 2; h++) {
+        const uint32_t used = own[h] + (h == e.psg_half ? psg : 0u);
+        const uint32_t rest = e.cyc[h] > used ? e.cyc[h] - used : 0u;
+        e.base_cost[h] = (3u * e.base_cost[h] + rest) / 4u;
+    }
+    auto halves = [&](unsigned b, uint32_t *t0, uint32_t *t1) {
+        *t0 = e.base_cost[0]; *t1 = e.base_cost[1];
+        for (unsigned c = 0; c < 6; c++) *(c < b ? t0 : t1) += e.ch_cost[c];
+    };
+    auto block = [&](unsigned b) {                       // дольшая половина, если PSG у той, что легче
+        uint32_t t0, t1;
+        halves(b, &t0, &t1);
+        const uint32_t a = t0 + e.psg_cost > t1 ? t0 + e.psg_cost : t1;
+        const uint32_t z = t1 + e.psg_cost > t0 ? t1 + e.psg_cost : t0;
+        return a < z ? a : z;
+    };
+    unsigned best = e.split;
+    for (unsigned b = 1; b <= 5; b++) if (block(b) < block(best)) best = b;
+    const uint32_t now = block(e.split);
+    if (best != e.split && block(best) < now - now / 12u) { e.set_split(best); e.moves++; }
+}
+}  // namespace
+
 extern "C" int md_snd_block_begin(void *mem, const md_snd_write_t *w, unsigned nw, unsigned n) {
     Engine &e = *static_cast<Engine *>(mem);
     if (nw > MD_SND_MAX_WRITES || n > MD_SND_BLOCK) return 0;
+    rebalance(e, e.n);                                   // e.n — ещё прошлого блока
     memcpy(e.w, w, nw * sizeof *w);
     e.nw = nw; e.n = n;
-    // PSG — половине, у которой FM прошлого блока занял меньше тактов (ESP); без счётчика тактов (ПК) — по ЦАП
-    const uint32_t fm0 = e.parts[0] + e.parts[1], fm1 = e.parts[2] + e.parts[3];
+    // PSG — половине, у которой FM меньше (ESP: сглаженные такты при нынешнем делении); без счётчика тактов
+    // (ПК) — по ЦАП
+    uint32_t fm0 = e.base_cost[0], fm1 = e.base_cost[1];
+    for (unsigned c = 0; c < 6; c++) *(c < e.split ? &fm0 : &fm1) += e.ch_cost[c];
     e.psg_half = (fm0 || fm1) ? (fm0 > fm1 ? 1 : 0) : (e.ym1.dac_enabled() ? 1 : 0);
     return 1;
+}
+
+extern "C" void md_snd_test_split(void *mem, int on) { static_cast<Engine *>(mem)->split_test = on; }
+extern "C" unsigned md_snd_split(const void *mem, unsigned *moves) {
+    const Engine &e = *static_cast<const Engine *>(mem);
+    if (moves) *moves = e.moves;
+    return e.split;
 }
 
 extern "C" void md_snd_render_half(void *mem, int half) {
     Engine &e = *static_cast<Engine *>(mem);
     const uint32_t t0 = cycles();
     ymfm::ym2612 &ym = half ? e.ym1 : e.ym0;
-    const uint32_t mask = half ? 0x38u : 0x07u;
+    const uint32_t mask = e.mask(half);
     int32_t *lr = half ? e.lr1 : e.lr0;
     const bool psg = half == e.psg_half;
     ym.m_cyc_clock = ym.m_cyc_out = 0;
-    // YM: записи PSG — во втором проходе
-    unsigned k = 0;
+    // YM: записи PSG — во втором проходе. MD.ELF 1.6: FM считается отрезками между записями, меняющими FM
+    // (ym2612::generate_span — по каналу за проход); f — до какого отсчёта FM уже посчитан. Записи адреса и ЦАП
+    // применяются сразу, данные ЦАП каждого отсчёта (после его записей) — в dacv. Звук тот же, что у
+    // generate_part по отсчёту (сверка — tests/snd_render.cpp, случайные записи и музыка игр).
+    unsigned k = 0, f = 0;
+    uint16_t *const dv = e.dacv[half];
     for (unsigned i = 0; i < e.n; i++) {
         while (k < e.nw && e.w[k].pos <= i) {
             const md_snd_write_t &x = e.w[k++];
-            if (x.kind != 1) ym_write(ym, e.sh[half], x);
+            if (x.kind == 1) continue;
+            if (i > f && ym_fm_write(ym, e.sh[half], x)) {
+                ym.generate_span(lr + 2 * f, i - f, mask, dv + f);
+                f = i;
+            }
+            ym_write(ym, e.sh[half], x);
         }
-        ym.generate_part(lr[2 * i], lr[2 * i + 1], mask);
+        dv[i] = ym.dac_data();
     }
+    if (e.n > f) ym.generate_span(lr + 2 * f, e.n - f, mask, dv + f);
     // записи после последнего отсчёта блока — не должно быть, но не потерять
     for (; k < e.nw; k++) if (e.w[k].kind != 1) ym_write(ym, e.sh[half], e.w[k]);
     e.parts[2 * half] = ym.m_cyc_clock; e.parts[2 * half + 1] = ym.m_cyc_out;
+    for (unsigned c = 0; c < 6; c++) if (mask >> c & 1u) e.ch_cyc[c] = ym.channel_cycles(c);   // каналы — свои
+    ym.clear_channel_cycles();
     if (psg) {                                           // PSG: свой проход по блоку
         const uint32_t p0 = cycles();
         k = 0;

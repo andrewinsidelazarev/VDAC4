@@ -36,6 +36,9 @@ int main(int argc, char **argv) {
 
     std::vector<uint8_t> mem(md_snd_size());
     md_snd_init(mem.data());
+    // MD_SND_SPLIT_TEST=1 — каналы между половинами переставляются каждый блок (MD.ELF 1.6): WAV обязан совпасть
+    const char *split_test = std::getenv("MD_SND_SPLIT_TEST");
+    if (split_test && *split_test == '1') md_snd_test_split(mem.data(), 1);
     std::vector<int16_t> pcm;
     pcm.reserve(total * 2);
     std::vector<md_snd_write_t> bw;
@@ -78,6 +81,9 @@ int main(int argc, char **argv) {
     std::fclose(o);
     std::printf("событий %zu, отсчётов %llu (%.2f с звука), синтез на ПК %.3f с\n", ev.size(),
                 (unsigned long long)total, total / rate, sec);
+    unsigned moves = 0;
+    const unsigned split = md_snd_split(mem.data(), &moves);
+    std::printf("каналы половины 0: 0..%u, смен деления %u\n", split - 1, moves);
     std::printf("нс на отсчёт: половина 0 %.1f, половина 1 %.1f, дольшая из двух (блок на ESP) %.1f\n",
                 half_s[0] * 1e9 / double(total), half_s[1] * 1e9 / double(total), max_s * 1e9 / double(total));
     return 0;
