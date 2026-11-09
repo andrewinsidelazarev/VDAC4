@@ -16,7 +16,10 @@ module amiga_video_capture(
  output reg frame_toggle=0,output reg [43:0] frame_info=0,
  output reg [7:0] overruns=0,
  output reg [3:0] black_frames=0, // 8.11.2026: поля с окном DIW, где все точки окна чёрные (по кругу)
- output reg pal=1
+ output reg pal=1,
+ // 9.11.2026 (0.13.7): захват этого кадра ушёл ниже верха окна (вывод может брать этот буфер, см. amiga_video.sv)
+ output reg cap_ahead=0,
+ output wire cap_bank
 );
  reg [31:0] pixels[0:1023];
  reg [23:0] pixel_carry=0;
@@ -33,7 +36,13 @@ module amiga_video_capture(
  reg [10:0] cx=0;reg [9:0] cy=0;reg hd=1,vd=1;
  reg [1:0] used0=0,used1=0;
  reg bank=0,lace_r=0,field_r=0,skip_half=0,got=0,any_window=0,pal_seen=1,lit=0;
+ // 9 ноября 2026 (0.13.7): окно DIW есть на этой строке (win_line) / было на предыдущей (win_prev). Строки пишутся
+ // не только по окну прошлого кадра (in_rows), но и по окну этой строки: Nexus 7 двигает окно по вертикали каждый
+ // кадр (шар: DIWSTRT $2B81 -> $4381; финальные титры), и строки, вошедшие в окно больше чем на 2 строки дальше
+ // прошлого края, не записывались — вывод показывал их из прошлых кадров («уехал верхний/нижний сегмент»).
+ reg win_line=0,win_prev=0;
  reg [16:0] row_addr=0;
+ assign cap_bank=bank;
  reg [9:0] xmin=736,xmax=0,ymin=576,ymax=0;
  // 8 ноября 2026: в SDRAM пишется только окно DIW прошлого кадра (±1 блок, ±2 строки), а не всё
  // поле 736×288 с бордюрами: вывод всё равно показывает только окно. Workbench 640×256 — запись
@@ -78,7 +87,7 @@ module amiga_video_capture(
      // Без VSYNC cy стоит на 512 (окно выборки кончается на 311): между двумя кадровыми
      // импульсами не больше 288 строк, все внутри кадрового буфера.
      cx<=cx+1'b1;
-     if(hd && !hs) begin cx<=0;if(!cy[9]) cy<=cy+1'b1;end
+     if(hd && !hs) begin cx<=0;if(!cy[9]) cy<=cy+1'b1;win_prev<=win_line;win_line<=0;end
      // 7 ноября 2026: в длинном поле interlace (field=0) Agnus роняет VSYNC на HSSTRT
      // строки VSSTRT+1 — вместе с HSYNC, в коротком — посреди строки VSSTRT. Прежде
      // cy обнулялся без этой строки, и строки длинного поля ложились на 2 строки кадра
@@ -91,12 +100,14 @@ module amiga_video_capture(
        cy<={9'd0,lace && !field};
        if(cy>=300 && cy<=330) begin if(pal_seen)pal<=1; pal_seen<=1; end
        else if(cy>=250 && cy<=270) begin if(!pal_seen)pal<=0; pal_seen<=0; end
-       bank<=~bank;lace_r<=lace;field_r<=field;
+       bank<=~bank;lace_r<=lace;field_r<=field;cap_ahead<=0;
        row_addr<=(lace ? (field ? 17'd138:17'd0) : (!bank ? 17'd39744:17'd0));
        got<=0;any_window<=0;lit<=0;xmin<=736;xmax<=0;ymin<=576;ymax<=0;
      end
      if(sample) begin
        got<=1;
+       // 16 логических строк (8 строк Amiga, ~0,5 мс) запаса на запись половин строк в SDRAM и предвыборку вывода
+       if(!lace_r && y>=wy0+10'd16) cap_ahead<=1;
        if(local_x==0) begin
          skip_half<=ready_toggle[half]!=used1[half];
          // 8.11.2026: по кругу — рост виден и после загрузки (прежде стоял на 255 с запуска)
@@ -112,14 +123,14 @@ module amiga_video_capture(
              default:;
            endcase
          end
-       if(local_x==367 && !skip_half && in_rows && overlap) begin
+       if(local_x==367 && !skip_half && (in_rows || win_line || win_prev || window_in) && overlap) begin
          ready_toggle[half]<=~ready_toggle[half];
          if(half) begin address1<=row_addr+17'd69;first1<=blk0;last1<=blk1;end
          else begin address0<=row_addr;first0<=blk0;last0<=blk1;end
        end
        if(x==735) row_addr<=row_addr+(lace_r ? 17'd276:17'd138);
        if(window_in) begin
-         any_window<=1;if(|rgb)lit<=1;
+         any_window<=1;win_line<=1;if(|rgb)lit<=1;
          if(x<xmin)xmin<=x;if(x>xmax)xmax<=x;
          if(!any_window)ymin<=y;ymax<=y; // y внутри кадра только растёт
        end

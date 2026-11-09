@@ -27,13 +27,15 @@ module amiga_video(
     wire [7:0] overruns;
     wire [3:0] black_frames;
     wire pal;
+    wire cap_ahead,cap_bank; // 9.11.2026 (0.13.7): см. выбор банка ниже
     amiga_video_capture capture(.clk(clk28),.reset(reset28),.hs(hs),.vs(vs),
         .window_in(window_in),.lace(lace),.field(field),.rgb(rgb_in),
         .read_clk(clk85),.read_address(capture_read_address),.read_rgb(capture_rgb),
         .consumed(consumed),.ready_toggle(capture_ready),
         .address0(capture_address0),.address1(capture_address1),
         .first0(capture_first0),.last0(capture_last0),.first1(capture_first1),.last1(capture_last1),
-        .frame_toggle(capture_frame),.frame_info(capture_info),.overruns(overruns),.black_frames(black_frames),.pal(pal));
+        .frame_toggle(capture_frame),.frame_info(capture_info),.overruns(overruns),.black_frames(black_frames),.pal(pal),
+        .cap_ahead(cap_ahead),.cap_bank(cap_bank));
     wire request_toggle,request_done,cache_we;
     wire [22:0] request_info;
     wire [10:0] cache_address; // 8.11.2026: физический адрес кэша (слот*276 + слово)
@@ -61,6 +63,7 @@ module amiga_video(
     reg [2:0] info_s=0,pal_s=0;
     reg info_seen=0,have_frame=0;
     reg [43:0] latest_info=0;
+    reg [1:0] ahead_s=0,cbank_s=0; // захват ушёл ниже верха окна / его банк — в домен вывода
     // 7 ноября 2026: горизонталь окна DIW (x и ширина) меняет кроп, только если совпала
     // в двух кадрах подряд. В Workbench окно изредка сдвигалось на один кадр на
     // 2 пикселя, и вся картинка прыгала по горизонтали.
@@ -83,6 +86,7 @@ module amiga_video(
     wire new_frame=hx==0 && vy==v_active;
     always @(posedge hclk) begin
         info_s<={info_s[1:0],published};pal_s<={pal_s[1:0],pal};
+        ahead_s<={ahead_s[0],cap_ahead};cbank_s<={cbank_s[0],cap_bank};
         if(hreset)begin hx<=0;vy<=0;info_s<=0;info_seen<=0;have_frame<=0;frame_valid<=0;pal_h<=1;end
         else begin
             if(line_end)begin hx<=0;vy<=vy==(pal_h ? 10'd624:10'd524) ? 10'd0:vy+1'b1;end
@@ -93,7 +97,15 @@ module amiga_video(
                 seen_geom<={committed_info[39:30],committed_info[19:10]};
                 if({committed_info[39:30],committed_info[19:10]}==seen_geom)stable_geom<=seen_geom;
             end
-            if(new_frame)begin frame_valid<=have_frame;bank_h<=latest_info[41];lace_h<=latest_info[40];end
+            // 9 ноября 2026 (0.13.7): буферов кадра два, Amiga даёт кадр за 19,968 мс, вывод 576p — за 20,000 мс,
+            // фаза ползёт (полный цикл ~12,5 с). Всегда брать последний готовый кадр нельзя: в части фаз захват
+            // кадра через один начинал переписывать этот же буфер, пока вывод дочитывал его низ, — низ окна шёл из
+            // другого кадра (финальные титры Nexus 7: «уехал низ»). Если захват текущего кадра уже ниже верха
+            // окна (cap_ahead), берётся его буфер: захват пишет строки не медленнее, чем вывод читает, и остаётся
+            // впереди. Иначе — последний готовый: следующий кадр в его буфер начнётся не раньше чем через кадр.
+            // Interlace — один буфер на оба поля, там cap_ahead не ставится.
+            if(new_frame)begin frame_valid<=have_frame;bank_h<=ahead_s[1] && !latest_info[40] ? cbank_s[1]:latest_info[41];
+                lace_h<=latest_info[40];end
         end
     end
     wire active,advance_y;
