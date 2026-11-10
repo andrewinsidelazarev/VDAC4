@@ -79,6 +79,12 @@ namespace Vdac4Flasher
         {
             ShowSnapshotPage(p);
             if (!crowded) return;
+            // подпись хода меняется на ходу: короткая, потом длиннее (10.11.2026 на плате «Стирание раздела
+            // прошивки» обрезалась до «Стирание разде»)
+            report.Progress(25, Lang.T("Бэкап", "Backup"));
+            Application.DoEvents();
+            report.Progress(26, Lang.T("Стирание раздела прошивки", "Erasing the firmware partition"));
+            Application.DoEvents();
             message.ForeColor = Bad;
             message.Text = "✗  " + Lang.T(
                 "ESP32-S3 пропал с USB (перезапустился или отошёл кабель): Присоединенное к системе устройство не работает. Повторите шаг.",
@@ -163,11 +169,16 @@ namespace Vdac4Flasher
             content.AutoScroll = true;
 
             var status = new TableLayoutPanel { AutoSize = true, ColumnCount = 1, RowCount = 5, Dock = DockStyle.Fill, Margin = new Padding(0, 6, 0, 0) };
+            status.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             for (int i = 0; i < 5; i++) status.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            device = new Label { AutoSize = true, Font = new Font("Segoe UI Semibold", 10.5f), Margin = new Padding(0, 0, 0, 4) };
+            device = new Label { AutoSize = true, MaximumSize = new Size(680, 0), Font = new Font("Segoe UI Semibold", 10.5f), Margin = new Padding(0, 0, 0, 4) };
             message = new Label { AutoSize = true, MaximumSize = new Size(680, 0), Font = new Font("Segoe UI", 10.5f), Margin = new Padding(0, 2, 0, 6) };
             bar = new ProgressBar { Width = 660, Height = 18, Minimum = 0, Maximum = 100, Margin = new Padding(0, 4, 0, 2) };
-            stage = new Label { AutoSize = true, ForeColor = Muted };
+            // Подпись хода — постоянной ширины во всю строку, а не по тексту (10.11.2026 на плате «Стирание раздела
+            // прошивки» показалось как «Стирание разде»: ширина по тексту не успевала за частой сменой текста)
+            stage = new Label { AutoSize = false, Anchor = AnchorStyles.Left | AnchorStyles.Right, ForeColor = Muted,
+                                AutoEllipsis = true, Margin = new Padding(0, 0, 0, 2), Font = new Font("Segoe UI", 10f) };
+            stage.Height = stage.PreferredHeight + 4;      // шрифт задан явно: высота — по нему, а не по шрифту по умолчанию
             status.Controls.Add(device, 0, 0);
             status.Controls.Add(message, 0, 1);
             status.Controls.Add(bar, 0, 2);
@@ -176,7 +187,7 @@ namespace Vdac4Flasher
             // ширина текста — по окну (узкое окно — переносы, а не обрезка), не шире 680
             content.Resize += (s, e) => {
                 int w = Math.Max(300, Math.Min(680, content.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4));
-                pageText.MaximumSize = warn.MaximumSize = message.MaximumSize = new Size(w, 0);
+                pageText.MaximumSize = warn.MaximumSize = message.MaximumSize = device.MaximumSize = new Size(w, 0);
                 bar.Width = Math.Min(660, w);
             };
 
