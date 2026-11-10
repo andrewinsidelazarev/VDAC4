@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "zifi/net_client.hpp"
+#include "zifi/online_manifest.hpp"
 
 namespace zifi {
 
@@ -16,13 +17,6 @@ enum OnlineUpdateStage : uint8_t {
 
 using OnlineUpdateProgress = bool (*)(void* context, uint8_t stage,
                                       uint8_t percent);
-
-constexpr size_t kOnlineUpdateVersionCapacity = 32;
-
-struct OnlineUpdateManifest {
-  uint8_t sha256[32];
-  char version[kOnlineUpdateVersionCapacity];
-};
 
 // Загружает firmware.sha256 и firmware.bin из опубликованной ветки GitHub.
 // Образ пишется только в неактивный OTA-раздел, а загрузочным становится после
@@ -40,15 +34,20 @@ class OnlineUpdater {
                OnlineUpdateProgress progress, void* progressContext,
                char* error, size_t errorSize);
 
+  // Образ firmwarePath (путь на raw.githubusercontent.com, %-заменами) в
+  // свободный OTA-раздел; загрузочным он становится, только если SHA-256
+  // совпал с expectedSha. Опись читает и сверяет вызывающий: обновлятор
+  // VDAC4 берёт её и образ из одного коммита (vdac4_updater).
+  bool installImage(const char* firmwarePath, uint8_t* scratch,
+                    size_t scratchSize, const uint8_t expectedSha[32],
+                    uint8_t digest[32], OnlineUpdateProgress progress,
+                    void* progressContext, char* error, size_t errorSize);
+
  private:
   bool loadManifest(uint8_t* scratch, size_t scratchSize,
                     OnlineUpdateManifest& manifest,
                     OnlineUpdateProgress progress, void* progressContext,
                     char* error, size_t errorSize);
-  bool installFirmware(uint8_t* scratch, size_t scratchSize,
-                       const uint8_t expectedSha[32], uint8_t digest[32],
-                       OnlineUpdateProgress progress, void* progressContext,
-                       char* error, size_t errorSize);
 
   NetClient& client_;
 };

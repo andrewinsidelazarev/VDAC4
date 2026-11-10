@@ -30,8 +30,9 @@
 - Погода для заставок WC: город из `zifi.ini` → координаты → прогноз Open-Meteo.
 - WC Update: сверка файлов Wild Commander Improved на SD с GitHub по git-SHA и
   обновление отличающихся.
-- Online Update: прошивка ESP с GitHub (этот репозиторий) — проверка версии,
-  загрузка и проверка SHA-256 на самой ESP, без ПК.
+- Online Update 2: вся плата с GitHub (этот репозиторий) — прошивки ESP и BL616,
+  ядра во flash Tang, `CORES` карты Tang, плагины и модули ESP карты Evo; сверка
+  по git-SHA, загрузка и проверка на самой ESP, без ПК.
 - Утилиты для `/zifi/tools`: проверка связи с ESP, порт обновления прошивки по
   сети, проверка DMA и ЦАП.
 
@@ -56,7 +57,7 @@
 | [`SMB Server/build/vdac4/VDAC4SMB.WMF`](SMB%20Server/build/vdac4/VDAC4SMB.WMF) | `/WC` | SMB-сервер |
 | [`NTP Time Sync/build/vdac4/VDAC4NTP.WMF`](NTP%20Time%20Sync/build/vdac4/VDAC4NTP.WMF) | `/WC` | часы RTC по NTP |
 | [`WC Update/build/vdac4/VDAC4WCU.WMF`](WC%20Update/build/vdac4/VDAC4WCU.WMF) | `/WC` | проверка и обновление Wild Commander с GitHub |
-| [`Online Update/build/vdac4/VDAC4UPD.WMF`](Online%20Update/build/vdac4/VDAC4UPD.WMF) | `/WC` | обновление прошивки ESP с GitHub ([README](Online%20Update/README.md)) |
+| [`Online Update/build/vdac4/VDAC4UPD.WMF`](Online%20Update/build/vdac4/VDAC4UPD.WMF) | `/WC` | обновление всей платы с GitHub: ESP, BL616, ядра во flash Tang, `CORES` карты Tang, плагины и модули ESP карты Evo; нужна прошивка ESP 0.1.124+ ([README](Online%20Update/README.md)) |
 | [`Video Settings/build/vdac4/VDAC4VID.WMF`](Video%20Settings/build/vdac4/VDAC4VID.WMF) | `/WC` | настройки видеотракта Tang: экранное меню Tang с клавиатуры Evo ([README](Video%20Settings/README.md)) |
 | [`Weather screensaver/build/vdac4/VDAC4WTH.WMF`](Weather%20screensaver/build/vdac4/VDAC4WTH.WMF) | `/WC` | заставка: часы, календарь, погода |
 | [`Weather screensaver VDAC2/build/vdac4/VDAC4WT2.WMF`](Weather%20screensaver%20VDAC2/build/vdac4/VDAC4WT2.WMF) | `/WC` | та же заставка в 1024×768 на FT812 |

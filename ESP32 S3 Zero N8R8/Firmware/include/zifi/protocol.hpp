@@ -63,6 +63,15 @@ enum Command : uint8_t {
   kVdiskReset = 0x17,
   kVdiskWrite = 0x18,  // [lba LE32][данные 512]: только SD2 = карта Tang
   kVdiskMode = 0x19,   // [0 — том VFS, 1 — карта Tang посекторно]
+  // Обновление всей платы VDAC4 с GitHub (плагин VDAC4 Online Update 2, VDAC4UPD.WMF; устройство —
+  // Network/Online Update/DESIGN.md): прошивки ESP и BL616, слоты flash ПЛИС, CORES на карте Tang,
+  // плагины и модули ESP на карте Evo. START: [флаги] (бит 0 — и карта Evo); APPLY: номера строк
+  // по байту; STOP; SYNC — список и последнее состояние заново. События — коды kEventWcuState и
+  // kEventWcuEntry с форматом строки обновлятора платы (Docs/PROTOCOL.md): сеанс у ESP один.
+  kVupStart = 0x1A,
+  kVupApply = 0x1B,
+  kVupStop = 0x1C,
+  kVupSync = 0x1D,
   kNetPing = 0x20,
   kNetIpConfig = 0x21,
   kNetNtp = 0x22,
@@ -217,6 +226,10 @@ enum Command : uint8_t {
   kRespVdiskReset = 0x97,  // [итог][поколение LE32]
   kRespVdiskWrite = 0x98,  // [итог]
   kRespVdiskMode = 0x99,   // [итог][флаги][секторов LE32]
+  kRespVupStart = 0x9A,    // [1 — сеанс запущен]
+  kRespVupApply = 0x9B,    // [1 — принято]
+  kRespVupStop = 0x9C,     // [1 — сеанс остановлен]
+  kRespVupSync = 0x9D,     // [1 — повтор списка поставлен в очередь]
   kRespTangRead = 0xC5,  // [1 — прочитано / 0 — LINK к Tang не работает][слова LE32]
   kRespTangWrite = 0xC6, // [1 — записано / 0 — нет LINK или регистр не настройка]
   kRespWcuSync = 0xA8,   // [1 — повтор списка поставлен в очередь]

@@ -51,7 +51,8 @@ void WcUpdateApp::processNetwork(IntercoreExchange& exchange) {
         return;
       }
       host_.netClient().close();
-      if (!host_.stopFileServers() || !service_.stop(kStopTimeoutMs)) {
+      if (!host_.stopFileServers() || (peer_ != nullptr && !peer_->stopForFileServer()) ||
+          !service_.stop(kStopTimeoutMs)) {
         exchange.setError("wcu:previous stopping");
         return;
       }

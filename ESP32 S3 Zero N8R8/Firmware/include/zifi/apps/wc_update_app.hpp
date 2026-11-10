@@ -16,6 +16,9 @@ class WcUpdateApp : public App {
   WcUpdateApp(AppHost& host, VfsBridge& bridge)
       : host_(host), service_(bridge, eventEntry, this) {}
 
+  // Второе приложение с мостом VFS (обновление платы VDAC4): сеанс у ESP один.
+  void setPeer(App* peer) { peer_ = peer; }
+
   const char* name() const override { return "wc update"; }
   bool networkCommand(uint8_t command, NetworkCommand& how) const override;
   void sendNetworkFailure(uint8_t command) override;
@@ -36,6 +39,7 @@ class WcUpdateApp : public App {
 
   AppHost& host_;
   WcUpdateService service_;
+  App* peer_ = nullptr;
 };
 
 }  // namespace zifi

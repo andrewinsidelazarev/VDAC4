@@ -1,13 +1,17 @@
-; VDAC4 Online Update для ZX Evolution / TS-Config — обновление прошивки ESP32-S3
-; платы VDAC4 с GitHub (репозиторий VDAC4, Firmware/firmware/vdac4). Образ качает и
-; проверяет сама ESP; через Z80 идут только команды и индикатор. Канал до ESP —
+; VDAC4 Online Update 2 для ZX Evolution / TS-Config — обновление всей платы VDAC4
+; с GitHub: прошивки ESP и BL616, flash ПЛИС Tang, CORES на карте Tang, плагины и
+; модули ESP на карте Evo (DESIGN.md). Основа — плагин WC Update. Канал до ESP —
 ; SPI платы VDAC4 (zifi_link.asm → zifi_spi.asm, сборка с -DZIFI_SPI, без DMA).
-; Перенос плагина ZIFIUPD.WMF переходника ZiFi (UART) на канал SPI.
 ;
 ; Файл задаёт физическую компоновку WMF. Первые 512 байтов — заголовок формата
-; #0A, код собирается с логическим адресом #8000 и занимает одну страницу.
+; #0A, код собирается с логическим адресом #8000. Файловые запросы ESP
+; обслуживают те же модули, что у FTP-плагина (vfs.asm, fs.asm из FTP Server),
+; поэтому их страница 1 — окно записи 16 КиБ. Таблица списка — страница 2.
 
         DEVICE ZXSPECTRUM128
+        ; OPEN на запись занятое имя не берёт (vfs.asm): остаток прошлой
+        ; замены не удаляется, даже если опись его не увидела.
+        DEFINE VFS_WRITE_NEW_ONLY
         INCLUDE "wc_api.inc"
 
 startCode:
@@ -17,11 +21,8 @@ startCode:
         ALIGN 512                         ; код начинается после сектора заголовка
         DISP #8000
 mainStart:
-        INCLUDE "updater.asm"
-        ; zifi.ini передаётся целиком, до 1024 байтов (а не один сектор).
-        DEFINE CONFIG_FULL_INI
+        INCLUDE "vdac4upd.asm"
         INCLUDE "config.asm"
-        INCLUDE "proto.asm"
         INCLUDE "zifi_link.asm"
 
 ; Переходники API Wild Commander. Номер функции передаётся в A и выполняется
@@ -33,14 +34,58 @@ WC_PRWOW:
 WC_RRESB:
         ld a,FN_RRESB
         jp WC_API
-WC_TXTPR:
-        ld a,FN_TXTPR
+WC_PRSRW:
+        ld a,FN_PRSRW
+        jp WC_API
+WC_PRIAT:
+        ex af,af'
+        ld a,FN_PRIAT
         jp WC_API
 WC_GEDPL:
         ld a,FN_GEDPL
         jp WC_API
+WC_TURBOPL:
+        ld a,FN_TURBOPL
+        jp WC_API
 WC_ESC:
         ld a,FN_ESC
+        jp WC_API
+WC_SPACE:
+        ld a,FN_SPACE
+        jp WC_API
+WC_UP:
+        ld a,FN_UP
+        jp WC_API
+WC_DOWN:
+        ld a,FN_DOWN
+        jp WC_API
+WC_ENTER:
+        ld a,FN_ENTER
+        jp WC_API
+WC_PGUP:
+        ld a,FN_PGUP
+        jp WC_API
+WC_PGDN:
+        ld a,FN_PGDN
+        jp WC_API
+WC_HOME:
+        ld a,FN_HOME
+        jp WC_API
+WC_END:
+        ld a,FN_END
+        jp WC_API
+WC_TXTPR:
+        ld a,FN_TXTPR
+        jp WC_API
+WC_KBSCN:
+        ex af,af'
+        ld a,FN_KBSCN
+        jp WC_API
+WC_LOAD512:
+        ld a,FN_LOAD512
+        jp WC_API
+WC_SAVE512:
+        ld a,FN_SAVE512
         jp WC_API
 WC_STREAM:
         ld a,FN_STREAM
@@ -48,14 +93,32 @@ WC_STREAM:
 WC_FENTRY:
         ld a,FN_FENTRY
         jp WC_API
+WC_TENTRY:
+        ld a,FN_TENTRY
+        jp WC_API
 WC_GFILE:
         ld a,FN_GFILE
         jp WC_API
 WC_GDIR:
         ld a,FN_GDIR
         jp WC_API
-WC_LOAD512:
-        ld a,FN_LOAD512
+WC_MKFILE:
+        ld a,FN_MKFILE
+        jp WC_API
+WC_MKDIR:
+        ld a,FN_MKDIR
+        jp WC_API
+WC_RENAME:
+        ld a,FN_RENAME
+        jp WC_API
+WC_DELETE:
+        ld a,FN_DELETE
+        jp WC_API
+WC_APPEND:
+        ld a,FN_APPEND
+        jp WC_API
+WC_FILEX:
+        ld a,FN_FILEX
         jp WC_API
 WC_ADIR:
         ex af,af'
@@ -65,10 +128,24 @@ WC_FINDNEXT:
         ex af,af'
         ld a,FN_FINDNEXT
         jp WC_API
+WC_MNGC_PL:
+        ex af,af'
+        ld a,FN_MNGC_PL
+        jp WC_API
+WC_MNG8_PL:
+        ex af,af'
+        ld a,FN_MNG8_PL
+        jp WC_API
 WC_INT_PL:
         ex af,af'
         ld a,FN_INT_PL
         jp WC_API
+
+; Таблицы табличного CRC16 для vfs.asm. Выравнивание на 256 обязательно:
+; индекс кладётся прямо в L. Заполняет их Vfs_Crc16Init при старте.
+        ALIGN 256
+VfsCrcHi:       ds 256
+VfsCrcLo:       ds 256
 
 mainEnd:
         ; Код и постоянные данные обязаны поместиться в окно #8000..#BFFF.

@@ -29,4 +29,18 @@ bool parseGitRefCommit(const char* json, size_t length, char commit[41]);
 bool parseGitTree(const char* json, size_t length, GitTreeEntry* entries,
                   size_t capacity, size_t& count, bool& truncated);
 
+// Отбор записей дерева: true — запись нужна. Дерево всего репозитория (тысячи
+// записей) не помещается в таблицу, а нужна из него горстка путей.
+using GitTreeFilter = bool (*)(void* context, const char* path,
+                               bool directory);
+
+// То же с отбором. Ненужные записи пропускаются, не занимая таблицы, и их
+// пути и SHA не проверяются: странное имя в чужой части репозитория не
+// должно ломать эталон. Синтаксис JSON проверяется весь, а отобранные
+// записи — так же строго, как без отбора; отобранный путь длиннее
+// GitTreeEntry::kPathSize — отказ целиком. filter == nullptr — как без отбора.
+bool parseGitTree(const char* json, size_t length, GitTreeEntry* entries,
+                  size_t capacity, size_t& count, bool& truncated,
+                  GitTreeFilter filter, void* context);
+
 }  // namespace zifi

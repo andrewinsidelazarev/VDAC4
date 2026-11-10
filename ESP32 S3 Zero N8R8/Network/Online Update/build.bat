@@ -7,6 +7,8 @@ chcp 65001
 rem Put all generated files under build.
 if not exist "%HERE%build" mkdir "%HERE%build"
 set "SHARED_Z80=%HERE%..\shared\z80"
+rem File requests are served by the FTP plugin modules (vfs.asm, fs.asm), as in WC Update.
+set "FTP_SRC=%HERE%..\FTP Server\src"
 if not exist "%SHARED_Z80%\proto.asm" (
   echo Error: shared sources were not found: %SHARED_Z80%
   exit /b 1
@@ -28,7 +30,7 @@ if not defined SJASM (
 
 rem The plugin is built for the VDAC4 board only (SPI link, no DMA).
 if not exist "%HERE%build\vdac4" mkdir "%HERE%build\vdac4"
-"%SJASM%" -DZIFI_SPI --inc="%SHARED_Z80%" --sym=..\build\vdac4\VDAC4UPD.sym --lst=..\build\vdac4\VDAC4UPD.lst main.asm
+"%SJASM%" -DZIFI_SPI --inc="%SHARED_Z80%" --inc="%FTP_SRC%" --sym=..\build\vdac4\VDAC4UPD.sym --lst=..\build\vdac4\VDAC4UPD.lst main.asm
 if errorlevel 1 exit /b 1
 
 echo Built: %HERE%build\vdac4\VDAC4UPD.WMF

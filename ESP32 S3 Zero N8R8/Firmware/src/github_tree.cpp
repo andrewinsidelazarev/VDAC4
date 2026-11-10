@@ -34,12 +34,30 @@ class JsonCursor {
   }
 
   // Строка в output (UTF-8, с нулём). output == nullptr — только пропустить.
-  // Не поместилась — отказ.
-  bool string(char* output, size_t capacity) {
+  // Не поместилась — отказ; с overflow — не отказ: в output остаётся начало
+  // строки, *overflow = true, а сама строка дочитывается до конца (путь
+  // записи, которую отбор всё равно пропустит, может быть любой длины).
+  bool string(char* output, size_t capacity, bool* overflow = nullptr) {
     if (!take('"')) {
       return false;
     }
+    if (overflow != nullptr) {
+      *overflow = false;
+    }
     size_t used = 0;
+    // Место кончилось: дальше символы только пропускаются.
+    bool full = false;
+    auto keep = [&](bool fits) {
+      if (fits) {
+        return true;
+      }
+      if (overflow == nullptr) {
+        return false;
+      }
+      *overflow = true;
+      full = true;
+      return true;
+    };
     while (position_ < end_) {
       char symbol = *position_++;
       if (symbol == '"') {
@@ -52,7 +70,7 @@ class JsonCursor {
         return false;
       }
       if (symbol != '\\') {
-        if (!put(output, capacity, used, symbol)) {
+        if (!full && !keep(put(output, capacity, used, symbol))) {
           return false;
         }
         continue;
@@ -102,7 +120,7 @@ class JsonCursor {
           } else if (code >= 0xDC00 && code <= 0xDFFF) {
             return false;
           }
-          if (!putUtf8(output, capacity, used, code)) {
+          if (!full && !keep(putUtf8(output, capacity, used, code))) {
             return false;
           }
           continue;
@@ -110,7 +128,7 @@ class JsonCursor {
         default:
           return false;
       }
-      if (!put(output, capacity, used, symbol)) {
+      if (!full && !keep(put(output, capacity, used, symbol))) {
         return false;
       }
     }
@@ -405,6 +423,13 @@ bool parseGitRefCommit(const char* json, size_t length, char commit[41]) {
 
 bool parseGitTree(const char* json, size_t length, GitTreeEntry* entries,
                   size_t capacity, size_t& count, bool& truncated) {
+  return parseGitTree(json, length, entries, capacity, count, truncated,
+                      nullptr, nullptr);
+}
+
+bool parseGitTree(const char* json, size_t length, GitTreeEntry* entries,
+                  size_t capacity, size_t& count, bool& truncated,
+                  GitTreeFilter filter, void* context) {
   count = 0;
   truncated = true;
   if (json == nullptr || entries == nullptr) {
@@ -455,23 +480,39 @@ bool parseGitTree(const char* json, size_t length, GitTreeEntry* entries,
         char sha[48] = {};
         bool haveSize = false;
         bool havePath = false;
+        // Путь не поместился в запись: с отбором это ещё не отказ.
+        bool longPath = false;
         if (!cursor.peek('}')) {
           do {
             if (!readKey(cursor, key, sizeof(key))) {
               return false;
             }
             if (strcmp(key, "path") == 0) {
-              if (!cursor.string(entry.path, sizeof(entry.path))) {
+              if (!cursor.string(entry.path, sizeof(entry.path),
+                                 filter != nullptr ? &longPath : nullptr)) {
                 return false;
               }
               havePath = true;
             } else if (strcmp(key, "type") == 0) {
-              if (!cursor.string(type, sizeof(type))) {
+              // Тип и SHA чужих записей при отборе не нужны: длинное
+              // значение не отказ, а запись всё равно проверяется ниже,
+              // если её отберут.
+              bool longType = false;
+              if (!cursor.string(type, sizeof(type),
+                                 filter != nullptr ? &longType : nullptr)) {
                 return false;
               }
+              if (longType) {
+                type[0] = 0;
+              }
             } else if (strcmp(key, "sha") == 0) {
-              if (!cursor.string(sha, sizeof(sha))) {
+              bool longSha = false;
+              if (!cursor.string(sha, sizeof(sha),
+                                 filter != nullptr ? &longSha : nullptr)) {
                 return false;
+              }
+              if (longSha) {
+                sha[0] = 0;
               }
             } else if (strcmp(key, "size") == 0) {
               uint64_t size = 0;
@@ -492,6 +533,16 @@ bool parseGitTree(const char* json, size_t length, GitTreeEntry* entries,
           continue;  // подмодуль: у него нет содержимого в этом дереве
         }
         const bool blob = strcmp(type, "blob") == 0;
+        if (filter != nullptr) {
+          // Отбор смотрит и на обрезанный путь: если начала хватило, чтобы
+          // запись подошла, — нужный путь не поместился, и это отказ.
+          if (!havePath || !filter(context, entry.path, !blob)) {
+            continue;
+          }
+          if (longPath) {
+            return false;
+          }
+        }
         if ((!blob && strcmp(type, "tree") != 0) || !havePath ||
             !pathIsSafe(entry.path) || !isHex40(sha) ||
             (blob && !haveSize)) {

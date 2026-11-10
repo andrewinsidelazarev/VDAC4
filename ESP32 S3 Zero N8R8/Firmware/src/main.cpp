@@ -28,6 +28,7 @@
 #include "zifi/apps/audio_app.hpp"
 #include "zifi/apps/info_apps.hpp"
 #include "zifi/apps/module_app.hpp"
+#include "zifi/apps/vdac4_update_app.hpp"
 #include "zifi/apps/wc_update_app.hpp"
 #include "zifi/board.hpp"
 #include "zifi/config.hpp"
@@ -166,47 +167,12 @@ void copyIp(uint8_t* output, const IPAddress& address) {
   }
 }
 
-bool parseReleaseVersion(const char* text, unsigned& major, unsigned& minor,
-                         unsigned& patch) {
-  if (text == nullptr) {
-    return false;
-  }
-  int consumed = 0;
-  return sscanf(text, board::kReleaseVersionFormat, &major, &minor, &patch,
-                &consumed) == 3 && text[consumed] == 0;
-}
-
+// Отношение опубликованной версии к установленной — по формату номера этой платы
+// (общий разбор — online_manifest.cpp: тем же сравнивает обновлятор VDAC4).
 uint8_t comparePublishedVersion(const char* installed,
                                 const char* published) {
-  if (installed != nullptr && published != nullptr &&
-      strcmp(installed, published) == 0) {
-    return kOnlineUpdateSame;
-  }
-  unsigned installedMajor = 0;
-  unsigned installedMinor = 0;
-  unsigned installedPatch = 0;
-  unsigned publishedMajor = 0;
-  unsigned publishedMinor = 0;
-  unsigned publishedPatch = 0;
-  if (!parseReleaseVersion(installed, installedMajor, installedMinor,
-                           installedPatch) ||
-      !parseReleaseVersion(published, publishedMajor, publishedMinor,
-                           publishedPatch)) {
-    return kOnlineUpdateDifferent;
-  }
-  if (publishedMajor != installedMajor) {
-    return publishedMajor > installedMajor ? kOnlineUpdateNewer
-                                            : kOnlineUpdateOlder;
-  }
-  if (publishedMinor != installedMinor) {
-    return publishedMinor > installedMinor ? kOnlineUpdateNewer
-                                            : kOnlineUpdateOlder;
-  }
-  if (publishedPatch != installedPatch) {
-    return publishedPatch > installedPatch ? kOnlineUpdateNewer
-                                            : kOnlineUpdateOlder;
-  }
-  return kOnlineUpdateDifferent;
+  return compareReleaseVersion(installed, published,
+                               board::kReleaseVersionFormat);
 }
 
 // Тела команд и ответов сетевого ядра — в IntercoreExchange (app.hpp).
@@ -330,7 +296,11 @@ class Application : private AppHost {
   TimeApp timeApp_;
   WeatherApp weatherApp_;
   WcUpdateApp wcuApp_;
-  static constexpr size_t kAppCount = 3 + (ZIFI_HAS_AUDIO ? 2 : 0);
+#if ZIFI_HAS_SPI_LINK
+  // Обновление всей платы VDAC4 (плагин VDAC4 Online Update 2): с WC Update — один сеанс.
+  Vdac4UpdateApp vupApp_;
+#endif
+  static constexpr size_t kAppCount = 3 + (ZIFI_HAS_AUDIO ? 2 : 0) + (ZIFI_HAS_SPI_LINK ? 1 : 0);
   App* apps_[kAppCount];
   IntercoreExchange* exchange_;
   QueueHandle_t requestQueue_;
@@ -384,12 +354,19 @@ Application::Application()
       timeApp_(*this),
       weatherApp_(*this, netClient_),
       wcuApp_(*this, vfsBridge_),
+#if ZIFI_HAS_SPI_LINK
+      vupApp_(*this, vfsBridge_),
+#endif
       apps_{
 #if ZIFI_HAS_AUDIO
           &moduleApp_,
           &audioApp_,
 #endif
-          &timeApp_, &weatherApp_, &wcuApp_},
+          &timeApp_, &weatherApp_, &wcuApp_,
+#if ZIFI_HAS_SPI_LINK
+          &vupApp_,
+#endif
+      },
       exchange_(nullptr),
       requestQueue_(nullptr),
       responseQueue_(nullptr),
@@ -413,7 +390,12 @@ Application::Application()
       wifiAwake_(false),
       wifiHot_(false),
       configCache_{},
-      response_{} {}
+      response_{} {
+#if ZIFI_HAS_SPI_LINK
+  wcuApp_.setPeer(&vupApp_);
+  vupApp_.setPeer(&wcuApp_);
+#endif
+}
 
 void Application::clearError() {
   lastError_[0] = 0;
