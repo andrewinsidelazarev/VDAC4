@@ -1,0 +1,5 @@
+# Что программа создаёт рядом с собой при запуске из этой папки: прошивки, бэкапы, журнал
+firmware/
+firmware.download/
+Backup/
+VDAC4Flasher.log

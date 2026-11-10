@@ -19,6 +19,7 @@ ESP32-S3-Zero-N8R8 и ЦАП PCM5102. ESP32-S3 подключена к Evo по 
 | [`Tang Nano 20k/Firmware`](Tang%20Nano%2020k/Firmware) | прошивка Tang (GW2AR-18): RTL, тестбенчи, сборка в Gowin; готовые ядра flash Tang — TS-Config [`firmware/ts_fb_hdmi_top.fs`](Tang%20Nano%2020k/Firmware/firmware/ts_fb_hdmi_top.fs) (слот 0) и FT812 [`firmware/ts_fb_slot1.fs`](Tang%20Nano%2020k/Firmware/firmware/ts_fb_slot1.fs) (слот 1) |
 | [`Tang Nano 20k/BL616`](Tang%20Nano%2020k/BL616) | прошивка BL616 модуля Tang: сопроцессор FT812, 3D-команды VDAC4, кэш ядер карты Tang, обновление по сети; готовый образ — прошивка 24 [`firmware/vdac4_copro_bl616.bin`](Tang%20Nano%2020k/BL616/firmware/vdac4_copro_bl616.bin) |
 | [`Tang Nano 20k/FTVIEW4`](Tang%20Nano%2020k/FTVIEW4) | плагин Wild Commander FTVIEW4 для VDAC4: картинки и ролики через FT812 и BL616, MJPEG AVI — через ядро видео Tang (слот 3) и VIDEO.ELF на ESP; сборка — [`build/FTVIEW4.WMF`](Tang%20Nano%2020k/FTVIEW4/build/FTVIEW4.WMF) |
+| [`Flasher`](Flasher) | первая прошивка платы по USB: программа для Windows [`VDAC4Flasher.exe`](Flasher/VDAC4Flasher.exe) шьёт ESP32-S3, BL616 и flash ПЛИС Tang прошивками с GitHub, перед записью сохраняя прежние в `Backup` |
 | [`Tang Nano 20k/Cores`](Tang%20Nano%2020k/Cores) | все ядра Tang и их установка; ядра для карты Tang — ZX Spectrum Next и NES / Денди со слоями ESP, их исходники (GPL-3.0) и правка ROM NextZXOS |
 
 Что нужно на стороне Evo — в
