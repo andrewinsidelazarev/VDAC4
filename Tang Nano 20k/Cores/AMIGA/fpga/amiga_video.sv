@@ -71,6 +71,15 @@ module amiga_video(
     reg [10:0] hx=0;
     reg [9:0] vy=0;
     reg pal_h=1,lace_h=0,bank_h=0,frame_valid=0;
+    // 11 ноября 2026 (0.13.9): interlace — показ последнего поля (бит 2 регистра картинки, F11 -> SETUP -> INTERLACE).
+    // Склейка обоих полей (по умолчанию) на анимации даёт гребёнку, а в hires-lace под нагрузкой блиттера чтения
+    // вдвое больше, чем без interlace: «9 Fingers» — пропуски захвата (штрихи в правой половине строки). В режиме
+    // «последнее поле» вывод берёт только строки поля, записанного последним (field_h), каждую дважды: чтений вдвое
+    // меньше, гребёнки нет, а захват следующего поля пишет другие строки буфера — разрыва нет. Цена: статичная
+    // картинка в interlace мерцает мелкими деталями, как на ЭЛТ. Бит 2 прежде был форматом 16:9 (не используется
+    // с 0.13.3, слой его не пишет).
+    reg field_h=0,bob_h=0;
+    reg [1:0] bob_s=0;
     reg [1:0] pal_switches=0; // 8.11.2026: смены развёртки 50/60 Гц (до 3)
     // 8 ноября 2026 (0.13.0): 576p50 (CEA-861 VIC 17/18): 864 x 625, активно 720 x 576, строка — 12 тактов
     // до HSYNC, HSYNC 64, 68 после; кадр — 5 строк до VSYNC, VSYNC 5, 39 после. 480p60 (VIC 2/3): 858 x 525,
@@ -86,7 +95,7 @@ module amiga_video(
     wire new_frame=hx==0 && vy==v_active;
     always @(posedge hclk) begin
         info_s<={info_s[1:0],published};pal_s<={pal_s[1:0],pal};
-        ahead_s<={ahead_s[0],cap_ahead};cbank_s<={cbank_s[0],cap_bank};
+        ahead_s<={ahead_s[0],cap_ahead};cbank_s<={cbank_s[0],cap_bank};bob_s<={bob_s[0],picture[2]};
         if(hreset)begin hx<=0;vy<=0;info_s<=0;info_seen<=0;have_frame<=0;frame_valid<=0;pal_h<=1;end
         else begin
             if(line_end)begin hx<=0;vy<=vy==(pal_h ? 10'd624:10'd524) ? 10'd0:vy+1'b1;end
@@ -105,7 +114,7 @@ module amiga_video(
             // впереди. Иначе — последний готовый: следующий кадр в его буфер начнётся не раньше чем через кадр.
             // Interlace — один буфер на оба поля, там cap_ahead не ставится.
             if(new_frame)begin frame_valid<=have_frame;bank_h<=ahead_s[1] && !latest_info[40] ? cbank_s[1]:latest_info[41];
-                lace_h<=latest_info[40];end
+                lace_h<=latest_info[40];field_h<=latest_info[42];bob_h<=bob_s[1];end
         end
     end
     wire active,advance_y;
@@ -125,6 +134,7 @@ module amiga_video(
         .sample_x(sample_x),.sample_y(sample_y),.sample_y_next(sample_y_next),.advance_y(advance_y),
         .left(left),.width(width),.top(top),.height(height),.right(right),.bottom(bottom),.source_y(sy0),.source_x(sx0),.source_width(sw),
         .active(active),.frame_valid(frame_valid),.new_frame(new_frame),.lace(lace_h),.bank(bank_h),
+        .bob(lace_h && bob_h),.field(field_h),
         .dma_clk(clk85),.cache_we(cache_we),.cache_address(cache_address),.cache_data(cache_data),
         .request_toggle(request_toggle),.request_info(request_info),.request_done(request_done),
         .rgb(picture_rgb),.pixel_valid(pixel_valid),.misses(misses));

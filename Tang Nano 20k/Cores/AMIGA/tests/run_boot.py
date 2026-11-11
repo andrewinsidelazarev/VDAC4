@@ -13,14 +13,24 @@ ap.add_argument('--hdf',type=Path)
 ap.add_argument('--hdf1',type=Path,help='второй диск IDE (unit 5), только чтение; нужен и --hdf')
 ap.add_argument('--rom',type=Path,help='свой образ ROM 512 КБ вместо Kickstart (run_ide_write.py)')
 ap.add_argument('--video',action='store_true',help='Run framebuffer DMA beside the actual CPU/chipset')
+ap.add_argument('--compat',action='store_true',help='режим совместимости (F11 -> SETUP): 68000, без fast RAM и турбо, как compat_req=1 у AMIGA.ELF')
+ap.add_argument('--slot-stats',action='store_true',help='с --video: кто занимает слоты SDRAM в момент пропуска захвата HDMI')
+ap.add_argument('--stage',help='своя папка сборки в tests/ (два прогона одновременно)')
+ap.add_argument('--hdmi-dump',help='с --video: «С,N» — кадры вывода 576p/480p (то, что уходит в TMDS) в hdmi_NNNNN.ppm с секунды С, каждый N-й')
+ap.add_argument('--threads',type=int,default=0,help='Verilator --threads N (быстрее на многоядерном ПК)')
+ap.add_argument('--lace-field',action='store_true',help='с --video: бит 2 регистра картинки — interlace, показ последнего поля (0.13.9)')
 ap.add_argument('--no-build',action='store_true');args=ap.parse_args()
 root=Path(__file__).resolve().parents[1]
-stage=root/('tests/boot-video-build' if args.video else 'tests/boot-build');stage.mkdir(exist_ok=True)
+stage=root/('tests/'+args.stage if args.stage else 'tests/boot-video-build' if args.video else 'tests/boot-build');stage.mkdir(exist_ok=True)
 top=(root/'fpga/amiga_vdac4.sv').read_text(encoding='utf-8')
 defines='\n'.join(re.findall(r'^`define .+$',top,re.M))+'\n`define INFER_DPRAM\n`define AMIGA_DEBUG\n'
 config=top.split('wire [1:0] osd_cpu=',1)[1].split('reg [1:0] button_reset_sync=',1)[0]
 config='wire [1:0] osd_cpu='+config
 config=config.replace('wire hs_n, vs_n; wire [7:0] red, green, blue;','')
+if args.compat:
+    # 11.11.2026: в ядре режим приходит по LINK (0x6B) и защёлкивается в сбросе; у стенда LINK нет — константа
+    assert config.count('wire compat_req;')==1
+    config=config.replace('wire compat_req;',"wire compat_req=1'b1;")
 reset=re.search(r'reg \[1:0\] button_reset_sync=0;.*?wire nanomig_reset=.*?;',top,re.S)[0]
 memory=top.split('// Minimig ram/rom interface',1)[1].split('// 720p renderer',1)[0]
 memory=memory.replace('assign O_sdram_clk = clk_85m_shifted;','')
@@ -30,14 +40,78 @@ video='''
 amiga_video video(.clk28(clk_28m),.clk85(clk_85m),.hclk(hclk),.hclk5(hclk),
  .reset28(rst_28m),.reset85(por||!sdram_ready),.hreset(por),
  .hs(hs_n),.vs(vs_n),.lace(video_lace),.field(video_field),.window_in(video_window),
- .rgb_in({red,green,blue}),.picture(4'd0),
+ .rgb_in({red,green,blue}),.picture(PICTURE),
  .osd_wr(1'b0),.osd_addr(9'd0),.osd_data(32'd0),.osd_show(1'b0),.osd_sel(6'd63),
  .osd_band(30'd0),.osd_rule(30'd0),
- .ram_cs(video_cs),.ram_we(video_we),.ram_address(video_address),.ram_din(video_din),
- .ram_dout(video_dout),.ram_ack(video_ack),.ram_read_valid(video_read_valid),.ram_fetch_index(video_fetch_index),
- .diagnostic(video_diagnostic),.tmds_clock(),.tmds());
+ .ram_cs(video_cs),.ram_we(video_we),.ram_double(video_double),.ram_address(video_address),.ram_din(video_din),
+ .ram_dout(video_dout),.ram_ack(video_ack),.ram_read_valid(video_read_valid),.ram_single(video_single),.ram_fetch_index(video_fetch_index),
+ .diagnostic(video_diagnostic),.steal(video_steal),.raster_debug(),.tmds_clock(),.tmds());
 assign video_diag=video_diagnostic;
+// 11.11.2026: окно DIW кадра на захвате (координаты захвата: x — точки 14 МГц, y — логические строки) при каждой смене
+reg [40:0] fi_seen=0;reg [31:0] fi_t=0;
+always @(posedge clk_28m) begin
+  fi_t<=fi_t+1;
+  if (video.capture.frame_info[40:0]!=fi_seen) begin
+    fi_seen<=video.capture.frame_info[40:0];
+    $display("FRAMEINFO %0d.%03d s x %0d y %0d w %0d h %0d lace %b",fi_t/28500000,(fi_t%28500000)/28500,
+      video.capture.frame_info[39:30],video.capture.frame_info[29:20],video.capture.frame_info[19:10],
+      video.capture.frame_info[9:0],video.capture.frame_info[40]);
+  end
+end
 ''' if args.video else 'assign video_diag=0;\n'
+# 11.11.2026 (0.13.9): --lace-field — бит 2 регистра картинки: interlace, показ последнего поля
+video=video.replace('PICTURE',"4'd4" if args.lace_field else "4'd0")
+# 11.11.2026: ram_double, ram_single и steal — как в amiga_vdac4.sv. Прежде стенд их не подключал: steal был 0 (CPU и
+# блиттер никогда не уступали отстающему видео), сдвоенного чтения не было — пропуски захвата стенда завышены.
+if args.video and args.hdmi_dump:
+    # 11.11.2026: кадр вывода из регистров перед кодером TMDS (tx_rgb/tx_de) — без OSD, как видит телевизор
+    dump_from,dump_step=args.hdmi_dump.split(',')
+    video+=f'''
+integer hd_f=0;reg hd_on=0;reg [15:0] hd_frame=0;reg [31:0] hd_t=0;
+always @(posedge hclk) begin
+  hd_t<=hd_t+1;
+  if (video.new_frame) begin
+    if (hd_on) $fclose(hd_f);
+    hd_on=0;hd_frame<=hd_frame+1'b1;
+    if (hd_t>=32'd{int(float(dump_from)*27000000)} && hd_frame%{int(dump_step)}==0) begin
+      hd_f=$fopen($sformatf("hdmi_%05d.ppm",hd_frame),"wb");$fwrite(hd_f,"P6\\n720 %0d\\n255\\n",video.v_active);hd_on=1;
+    end
+  end else if (hd_on && video.tx_de) $fwrite(hd_f,"%c%c%c",video.tx_rgb[23:16],video.tx_rgb[15:8],video.tx_rgb[7:0]);
+end
+'''
+if args.video and args.slot_stats:
+    # Кто занимает слоты SDRAM (такт 7 МГц, одно обращение): чипсет (DMA Agnus / CPU на шине chip), регенерация,
+    # видео, CPU порта 2 (турбо), пусто; vwait — видео хотело, но слот ушёл другому. Окно — 457 слотов (строка
+    # Amiga, 64 мкс). На каждый пропуск захвата (overruns) — прошлое окно, текущее и адрес CPU.
+    video+='''
+reg [8:0] sl_n=0;reg [8:0] s_dma=0,s_cpu=0,s_ref=0,s_vid=0,s_p2=0,s_idle=0,s_vw=0;
+reg [8:0] p_dma=0,p_cpu=0,p_ref=0,p_vid=0,p_p2=0,p_idle=0,p_vw=0;
+wire sl_go=sdram.state==sdram.STATE_RAS && sdram.sync_i;
+wire sl_chip=sdram.cs && !sdram.refresh, sl_dmab=nanomig.minimig.dbr;
+wire sl_ref=!sl_chip && (sdram.refreshcnt==0 || (sdram.cs && sdram.refresh));
+wire sl_vid=!sl_chip && !sl_ref && sdram.video_grant;
+wire sl_p2=!sl_chip && !sl_ref && !sl_vid && sdram.p2_cs;
+wire sl_vw=sdram.video_cs && !sl_vid;
+always @(negedge clk_85m) if (sl_go) begin
+  if (sl_n==9'd456) begin
+    p_dma<=s_dma;p_cpu<=s_cpu;p_ref<=s_ref;p_vid<=s_vid;p_p2<=s_p2;p_idle<=s_idle;p_vw<=s_vw;sl_n<=0;
+    s_dma<=sl_chip&&sl_dmab;s_cpu<=sl_chip&&!sl_dmab;s_ref<=sl_ref;s_vid<=sl_vid;s_p2<=sl_p2;
+    s_idle<=!sl_chip&&!sl_ref&&!sl_vid&&!sl_p2;s_vw<=sl_vw;
+  end else begin
+    sl_n<=sl_n+1'b1;
+    s_dma<=s_dma+(sl_chip&&sl_dmab);s_cpu<=s_cpu+(sl_chip&&!sl_dmab);s_ref<=s_ref+sl_ref;s_vid<=s_vid+sl_vid;
+    s_p2<=s_p2+sl_p2;s_idle<=s_idle+(!sl_chip&&!sl_ref&&!sl_vid&&!sl_p2);s_vw<=s_vw+sl_vw;
+  end
+end
+reg [7:0] ov_seen=0;reg [31:0] t28=0;
+always @(posedge clk_28m) begin
+  t28<=t28+1;ov_seen<=video.capture.overruns;
+  if (video.capture.overruns!=ov_seen)
+    $display("OVR %0d.%06d s y %0d | прошл: dma %0d cpu %0d ref %0d vid %0d p2 %0d idle %0d vwait %0d | тек %0d: dma %0d cpu %0d vid %0d p2 %0d vwait %0d | steal %b cpu %h",
+      t28/28500000,(t28%28500000)*10/285,video.capture.cy,p_dma,p_cpu,p_ref,p_vid,p_p2,p_idle,p_vw,sl_n,s_dma,s_cpu,s_vid,s_p2,s_vw,
+      video_steal,cpu_debug[2]);
+end
+'''
 wrapper=defines+'''module boot_top(input clk_28m,clk_85m,hclk,por,rom_done,input [8:0] trace_index,
 output hs_n,vs_n,output [7:0] red,green,blue,
 output [31:0] video_diag,
@@ -115,7 +189,8 @@ sources=[]
 for name in re.findall(r'^add_file (.+)$',(root/'build.tcl').read_text(),re.M):
     if name.startswith('upstream/src/minimig-aga/') or name in (
         'fpga/minimig.v','fpga/nanomig.v','fpga/cpu_wrapper.v','fpga/amiga_debug.sv','fpga/amiga_disk.sv','fpga/Amber.v','fpga/hid.v',
-        'upstream/src/misc/amiga_keymap.v','fpga/sdram.sv','fpga/agnus.v','fpga/agnus_bitplanedma.v','fpga/denise.v'):
+        'upstream/src/misc/amiga_keymap.v','fpga/sdram.sv','fpga/agnus.v','fpga/agnus_bitplanedma.v','fpga/denise.v',
+        'fpga/paula_floppy.v'):
         sources.append(name)
 sources+=['upstream/sim/TG68KdotC_Kernel.v']
 if args.video:
@@ -137,7 +212,7 @@ def run(cmd,name,timeout=900):
     if p.returncode:raise RuntimeError((stage/name).read_text(encoding='utf-8',errors='replace')[-6000:])
 if not args.no_build:
     run([tool/'bin/verilator_bin.exe','--cc','--Wno-fatal','-Wno-BLKANDNBLK','--no-timing',
-        '--top-module','boot_top','--Mdir','obj',stage/'boot_top.sv',stage/'sdr_chip_model.v',
+        *(['--threads',str(args.threads)] if args.threads else []),'--top-module','boot_top','--Mdir','obj',stage/'boot_top.sv',stage/'sdr_chip_model.v',
         *[stage/'cpu_wrapper_sim.v' if p=='fpga/cpu_wrapper.v' else root/p for p in sources]],'verilator.log')
     inc=tool/'share/verilator/include'
     command=['/nologo','/EHsc','/std:c++20','/utf-8','/O2','/MD','/DVL_TIME_CONTEXT','/MP4',

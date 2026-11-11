@@ -226,6 +226,7 @@ module amiga_link (
             13'h6a: rd_data=video_diagnostic;
             13'h6b: rd_data={31'd0,compat};
             13'h6c: rd_data=32'h414D4331; // AMC1: есть режим совместимости (0x6B)
+            13'h6d: rd_data=32'h414C4631; // ALF1 (0.13.9): бит 2 регистра картинки 0x68 — interlace, последнее поле
             13'h40: rd_data=sd_ctrl_rd;
             13'h41: rd_data=sd_ptr_rd;
             13'h42: rd_data=sd_stat;

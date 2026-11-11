@@ -24,7 +24,7 @@ add_file upstream/src/minimig-aga/paula_audio_mixer.v
 add_file upstream/src/minimig-aga/paula_audio.v
 add_file upstream/src/minimig-aga/paula_audio_volume.v
 add_file upstream/src/minimig-aga/paula_floppy_fifo.v
-add_file upstream/src/minimig-aga/paula_floppy.v
+add_file fpga/paula_floppy.v
 add_file upstream/src/minimig-aga/paula_intcontroller.v
 add_file fpga/agnus.v
 add_file upstream/src/minimig-aga/agnus_audiodma.v

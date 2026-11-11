@@ -8,6 +8,9 @@ module amiga_video_cache(
     input wire [10:0] left,width,right,
     input wire [9:0] top,height,bottom,source_y,source_x,source_width,
     input wire active,frame_valid,new_frame,lace,bank,advance_y,
+    // 11.11.2026 (0.13.9): bob — interlace, показ одного поля: строки считаются, как без interlace (строка Amiga —
+    // две логические), а в запросе к SDRAM строка поля k превращается в строку буфера 2k+field.
+    input wire bob,field,
     input wire dma_clk,cache_we,
     input wire [10:0] cache_address, // физический: слот*276 + слово (считает DMA)
     input wire [31:0] cache_data,
@@ -79,8 +82,8 @@ module amiga_video_cache(
     always @(posedge clk)in_y<=vy>=top && vy<bottom;
     wire [9:0] logical_y=in_y ? sample_y:source_y;
     reg [9:0] row=0;
-    always @(posedge clk)row<=lace ? logical_y : (bank ? 10'd288:10'd0)+(logical_y>>1);
-    wire final_repeat=in_y && advance_y && (lace || sample_y[0]);
+    always @(posedge clk)row<=(lace && !bob) ? logical_y : (bank && !lace ? 10'd288:10'd0)+(logical_y>>1);
+    wire final_repeat=in_y && advance_y && ((lace && !bob) || sample_y[0]);
     wire [10:0] consumer_id={row,1'b0}+
         ((final_repeat && hx>=right) ? 11'd2 :
          (final_repeat && hx>=left && half) ? 11'd1:11'd0);
@@ -100,7 +103,7 @@ module amiga_video_cache(
     // noninterlace bank offset (288 rows) is even, so only logical bit 1
     // is needed. Keeping this separate from the registered scheduler row
     // also preserves the first straddling RGB888 pixel at the left edge.
-    always @* pixel_slot={lace ? logical_y[0]:logical_y[1],half};
+    always @* pixel_slot={(lace && !bob) ? logical_y[0]:logical_y[1],half};
     // A half-line has exactly 23 groups of 16 pixels. Compute the
     // clipped range in group coordinates; subtracting 368 pixels is
     // subtracting 23 groups, and the low four bits never change.
@@ -114,6 +117,9 @@ module amiga_video_cache(
         (crop_end<368 ? end_group:6'd23);
     wire [5:0] groups_raw=last_group-{1'b0,first_group};
     wire [4:0] group_count=groups_raw==0 || groups_raw>23 ? 5'd1:groups_raw[4:0];
+    // Строка кэша для метки: в bob запрос нёс строку буфера 2k+field — метка k (режим меняется только на new_frame,
+    // а запрос, начатый до него, помечен pending_stale).
+    wire [9:0] done_row=bob ? {1'b0,request_info[10:2]}:request_info[10:1];
     reg [1:0] bank_q=0;
     reg [1:0] phase_q=0;
     reg active_q=0;
@@ -145,15 +151,16 @@ module amiga_video_cache(
                 pending<=0;
                 if(!pending_stale && !new_frame) begin
                     case(request_info[12:11])
-                        0:tag_row0<=request_info[10:1];1:tag_row1<=request_info[10:1];
-                        2:tag_row2<=request_info[10:1];3:tag_row3<=request_info[10:1];
+                        0:tag_row0<=done_row;1:tag_row1<=done_row;
+                        2:tag_row2<=done_row;3:tag_row3<=done_row;
                     endcase
                     valid[request_info[12:11]]<=1;fetch_id<=fetch_id+1'b1;
                 end
             end else if(!pending && !new_frame && !refill && frame_valid && hx<total_width-2) begin
                 if(fetch_id<consumer_q)fetch_id<=consumer_q;
                 else if(fetch_id<limit_id && fetch_id<1152)begin
-                    request_info<={first_group,group_count,victim,wanted_row,wanted_half};request_toggle<=~request_toggle;
+                    request_info<={first_group,group_count,victim,bob ? {wanted_row[8:0],field}:wanted_row,wanted_half};
+                    request_toggle<=~request_toggle;
                     pending<=1;pending_stale<=0;valid[victim]<=0;
                 end
             end

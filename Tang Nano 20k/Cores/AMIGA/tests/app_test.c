@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #define CHECK(x) do { if (!(x)) { printf("FAIL %d: %s\n",__LINE__,#x); exit(1); } } while(0)
-static uint32_t video_register,video_capability=0x41565331u;
+static uint32_t video_register,video_capability=0x41565331u,lace_capability=0x414C4631u;
 static int video_write_failed;
 static uint32_t mode_register,mode_capability=0x414D4331u;static int mode_write_failed;   // режим совместимости (слой 0.25)
 static uint32_t ticks, expected, seq, delivered, mask_lo, mask_hi;
@@ -93,6 +93,7 @@ static int read_mock(uint32_t a,uint32_t *v,uint32_t n) {
     if(a>=0x5000 && a<0x5200){for(unsigned i=0;i<n;i++)v[i]=0xa5000000u+(a-0x5000)/4+i;return ZM_OK;}
     CHECK(n==1); *v=0;
     if(a==R_VIDEO_CAP)*v=video_capability;
+    if(a==R_LACE_CAP)*v=lace_capability;
     if(a==R_VIDEO)*v=video_register;
     if(a==R_MODE_CAP)*v=mode_capability;
     if(a==R_MODE)*v=mode_register;
@@ -614,8 +615,9 @@ int main(int argc,char **argv) {
             const unsigned before=hid_count;tap(&parser,0x0b);tap(&parser,0x83); // F6/F7, ordinary Amiga keys
             CHECK(video_config==0);CHECK(video_register==0);CHECK(hid_count==before+4);
             tap(&parser,0x78);CHECK(menu_open);for(unsigned i=0;i<5;i++)tap(&parser,0x0d);
-            CHECK(menu_card==CARD_VIDEO);CHECK(menu_item_n==2);CHECK(menu_cursor==0);
+            CHECK(menu_card==CARD_VIDEO);CHECK(menu_item_n==3);CHECK(menu_cursor==0);
             CHECK(!strcmp(menu_items[0].name,"PICTURE SIZE"));CHECK(!strcmp(menu_items[1].name,"COMPATIBILITY"));
+            CHECK(!strcmp(menu_items[2].name,"INTERLACE"));
             CHECK(!strcmp(video_value(1),"OFF"));
             tap(&parser,0x5a);CHECK(video_config==1);CHECK(video_register==1);CHECK(!strcmp(video_value(0),"95%"));
             tap(&parser,0x5a);CHECK(video_config==2);tap(&parser,0x5a);CHECK(video_config==0);tap(&parser,0x5a);CHECK(video_config==1);
@@ -650,6 +652,21 @@ int main(int argc,char **argv) {
             {const char bad[]="AMIGA-VIDEO 1 1 2 trailing";CHECK(!video_parse((const uint8_t*)bad,sizeof bad-1));}
             {const char bad[]="AMIGA-VIDEO 1 1 3\n";CHECK(!video_parse((const uint8_t*)bad,sizeof bad-1));}
             mode_compat=0;CHECK(mode_apply());
+            // INTERLACE (слой 0.28, ядро 0.13.9): строка 2 — бит 2 R_VIDEO, сразу и на карту (AMIGA-VIDEO 2), без сброса;
+            // размер бит не сбрасывает; прежний формат VIDEO.CFG (версия 1) — поле не включает.
+            video_config=1;CHECK(video_apply());CHECK(lace_supported);CHECK(!strcmp(video_value(2),"BOTH FIELDS"));
+            menu_cursor=2;resets_before=resets;tap(&parser,0x5a);CHECK(video_config==5);CHECK(video_register==5);
+            CHECK(!strcmp(video_value(2),"LAST FIELD"));CHECK(menu_mode==MODE_LIST);CHECK(resets==resets_before);
+            menu_cursor=0;tap(&parser,0x5a);CHECK(video_config==6);CHECK(video_register==6);
+            video_config=0;CHECK(video_read_config());CHECK(video_config==6);CHECK(video_register==6);
+            {const char v2[]="AMIGA-VIDEO 2 1 0\n";CHECK(video_parse((const uint8_t*)v2,sizeof v2-1));CHECK(video_config==4);}
+            {const char v1[]="AMIGA-VIDEO 1 1 0\n";CHECK(video_parse((const uint8_t*)v1,sizeof v1-1));CHECK(video_config==0);}
+            {const char bad[]="AMIGA-VIDEO 2 2 0\n";CHECK(!video_parse((const uint8_t*)bad,sizeof bad-1));}
+            // Ядро без бита 2 (до 0.13.9): пункт N/A, в регистр — только размер, Enter не меняет.
+            lace_capability=0;video_config=6;CHECK(video_apply());CHECK(!lace_supported);CHECK(video_register==2);
+            CHECK(!strcmp(video_value(2),"N/A"));
+            menu_cursor=2;tap(&parser,0x5a);CHECK(video_config==6);CHECK(strstr(menu_status,"UPDATE AMIGA.BIN"));
+            lace_capability=0x414C4631u;tap_ext(&parser,0x71);CHECK(video_config==0);CHECK(video_register==0);   // Del
             tap(&parser,0x76);CHECK(!menu_open);mem_remove(VIDEO_CFG);mem_remove(MODE_CFG);menu_items_free();menu_card=CARD_TANG;
         }
         // Самый большой диск: карта занятости не влезает в корень, цепочка дополнительных блоков.

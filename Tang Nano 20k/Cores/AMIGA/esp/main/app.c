@@ -755,7 +755,7 @@ static void stop(void) {
 #ifndef AMIGA_HOST_TEST
 int main(int argc,char **argv) {
     static const zm_app_t app={sizeof(zm_app_t),ZM_APP_ABI_MAJOR,ZM_APP_ABI_MINOR,
-        "amiga","0.27",0x6E,0x7A,start,stop,command,NULL,NULL,NULL};   /* 0.24: разделы NET; 0.25: SETUP, режим совместимости; 0.26: смена режима — перезапуск сеанса; 0.27: #7A [1] — .adf у экрана ядер */
+        "amiga","0.28",0x6E,0x7A,start,stop,command,NULL,NULL,NULL};   /* 0.24: разделы NET; 0.25: SETUP, режим совместимости; 0.26: смена режима — перезапуск сеанса; 0.27: #7A [1] — .adf у экрана ядер; 0.28: SETUP -> INTERLACE (ядро 0.13.9) */
     if (argc!=3) return 0;
     *(const zm_app_t **)argv[2]=&app;
     return ZM_APP_ABI_MAJOR;

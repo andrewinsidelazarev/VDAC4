@@ -38,7 +38,7 @@ struct Disk {
 int main(int argc,char **argv) {
     const double duration=argc>1?atof(argv[1]):.12;
     const int clock_order=argc>2?atoi(argv[2]):0;
-    if(duration<=0 || duration>30)return 2;
+    if(duration<=0 || duration>120)return 2;   // 11.11.2026: 120 с — сцены демо после загрузки
     std::vector<uint8_t> adf;
     if(argc>3 && argv[3][0]!='-'){std::ifstream disk(argv[3],std::ios::binary);adf.assign(std::istreambuf_iterator<char>(disk),{});if(adf.size()!=901120)return 3;}
     Disk hdf;
@@ -65,6 +65,8 @@ int main(int argc,char **argv) {
     // DIV3 uses CLKOUTP at 180 degrees; its rise aligns with CLKOUT rise.
     q.clk_28m=0;q.clk_85m=1;q.hclk=0;q.por=1;q.rom_done=0;q.trace_index=0;q.eval();
     unsigned pixel_phase=0;
+    // 11.11.2026: такт вывода 27 МГц (576p50/480p60, ядро 0.13.0+): 6/19 фронтов 85,5 МГц. Прежде 33/38 — 74,25 МГц (720p),
+    // вывод читал кадровый буфер в 2,75 раза чаще, чем на плате.
     const uint64_t cycles=uint64_t(duration*28500000);
     uint64_t color=0;unsigned frames=0,x=0,y=0,width=0,height=0;
     bool hs=q.hs_n,vs=q.vs_n,clock85=1,trace_printed=false;
@@ -135,7 +137,7 @@ int main(int argc,char **argv) {
             auto fast_edge=[&](){
                 bool publish=clock85 && q.timing_publish;
                 clock85=!clock85;q.clk_85m=clock85;
-                pixel_phase+=33;if(pixel_phase>=38){pixel_phase-=38;q.hclk=!q.hclk;}
+                pixel_phase+=6;if(pixel_phase>=19){pixel_phase-=19;q.hclk=!q.hclk;}
                 ctx.timeInc(1);q.eval();
                 if(publish)publish_time=ctx.time();
             };
@@ -147,7 +149,7 @@ int main(int argc,char **argv) {
             if(clock_order==2){
                 bool publish=clock85 && q.timing_publish;
                 clock85=!clock85;q.clk_85m=clock85;ctx.timeInc(1);
-                pixel_phase+=33;if(pixel_phase>=38){pixel_phase-=38;q.hclk=!q.hclk;}
+                pixel_phase+=6;if(pixel_phase>=19){pixel_phase-=19;q.hclk=!q.hclk;}
                 if(publish)publish_time=ctx.time();
             }
             q.eval();
@@ -171,8 +173,9 @@ int main(int argc,char **argv) {
         }
         if(n && n%2850000==0){
             double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-            printf("sim %.2f s, wall %.1f s, CPU status %08X steps %u addr %08X RGB clocks %llu frames %u\n",
-                double(n)/28500000,wall,q.cpu_debug[0],q.cpu_debug[1],q.cpu_debug[2],(unsigned long long)color,frames);
+            // 11.11.2026: диагностика видео (amiga_video.sv: старший байт — пропуски захвата, overruns) — с --video
+            printf("sim %.2f s, wall %.1f s, CPU status %08X steps %u addr %08X RGB clocks %llu frames %u video %08X\n",
+                double(n)/28500000,wall,q.cpu_debug[0],q.cpu_debug[1],q.cpu_debug[2],(unsigned long long)color,frames,q.video_diag);
             fflush(stdout);
         }
     }
