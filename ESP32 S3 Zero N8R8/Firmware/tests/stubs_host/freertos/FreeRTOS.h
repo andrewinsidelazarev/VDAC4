@@ -49,3 +49,13 @@ inline BaseType_t xTaskCreatePinnedToCore(TaskFunction_t task, const char*,
 inline void vTaskDelete(TaskHandle_t) {
   // На хосте задача — обычный поток; он завершится сам по возврату из функции.
 }
+
+// Задача со стеком в заданной памяти (сервер SMB кладёт стек в PSRAM): на ПК — обычный поток.
+inline BaseType_t xTaskCreatePinnedToCoreWithCaps(TaskFunction_t task, const char* name,
+                                                  uint32_t stack, void* parameters,
+                                                  UBaseType_t priority, TaskHandle_t* handle,
+                                                  BaseType_t core, uint32_t) {
+  return xTaskCreatePinnedToCore(task, name, stack, parameters, priority, handle, core);
+}
+
+inline void vTaskDeleteWithCaps(TaskHandle_t task) { vTaskDelete(task); }

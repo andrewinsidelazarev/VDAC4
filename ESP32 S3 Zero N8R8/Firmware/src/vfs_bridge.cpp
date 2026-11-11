@@ -270,20 +270,43 @@ size_t VfsBridge::readForNetwork(uint8_t* output, size_t capacity) {
   return vfsToNetwork_.read(output, capacity);
 }
 
+void VfsBridge::attachLocal(const char* root, VfsBackend* backend) {
+  snprintf(localRoot_, sizeof(localRoot_), "%s", root == nullptr ? "" : root);
+  localRootLength_ = strlen(localRoot_);
+  local_ = localRootLength_ != 0 ? backend : nullptr;
+}
+
+bool VfsBridge::isLocalPath(const char* path) const {
+  return local_ != nullptr && path != nullptr &&
+         strncmp(path, localRoot_, localRootLength_) == 0 &&
+         (path[localRootLength_] == 0 || path[localRootLength_] == '/');
+}
+
+VfsBackend& VfsBridge::route(const char* path, const char*& routed) {
+  routed = path;
+  if (!isLocalPath(path)) {
+    return vfs_;
+  }
+  routed = path[localRootLength_] == 0 ? "/" : path + localRootLength_;
+  return *local_;
+}
+
 void VfsBridge::finish(bool success, const char* error) {
+  VfsBackend& backend = active_ != nullptr ? *active_ : vfs_;
   exchange_->result.success = success;
-  exchange_->result.status = error == nullptr ? vfs_.lastStatus() : 0xFF;
+  exchange_->result.status = error == nullptr ? backend.lastStatus() : 0xFF;
   if (success) {
     snprintf(exchange_->result.error, sizeof(exchange_->result.error), "none");
     return;
   }
-  const char* text = error == nullptr ? vfs_.lastError() : error;
+  const char* text = error == nullptr ? backend.lastError() : error;
   snprintf(exchange_->result.error, sizeof(exchange_->result.error), "%s", text);
 }
 
 void VfsBridge::processRead() {
+  VfsBackend& file = *active_;
   const size_t room = vfsToNetwork_.freeSpace();
-  const size_t maxWindow = vfs_.openMode() == 3
+  const size_t maxWindow = file.openMode() == 3
                                ? VfsClient::kFilexTransferWindowSize
                                : VfsClient::kTransferWindowSize;
   const size_t pumpLimit = exchange_->request.operation == VfsOperation::kReadAt
@@ -299,7 +322,7 @@ void VfsBridge::processRead() {
     return;
   }
   size_t received = 0;
-  if (!vfs_.readFileWindow(wanted, writeNetworkWindow, this, received)) {
+  if (!file.readFileWindow(wanted, writeNetworkWindow, this, received)) {
     finish(false);
     return;
   }
@@ -309,7 +332,8 @@ void VfsBridge::processRead() {
 }
 
 void VfsBridge::processWrite() {
-  const size_t maxWindow = vfs_.openMode() == 3
+  VfsBackend& file = *active_;
+  const size_t maxWindow = file.openMode() == 3
                                ? VfsClient::kFilexTransferWindowSize
                                : VfsClient::kTransferWindowSize;
   const size_t pumpLimit = exchange_->request.operation == VfsOperation::kWriteAt
@@ -327,7 +351,7 @@ void VfsBridge::processWrite() {
   size_t transferred = 0;
   while (transferred < requested) {
     const size_t window = minimum(requested - transferred, pumpLimit);
-    if (!vfs_.writeFileWindow(window, readNetworkWindow, this)) {
+    if (!file.writeFileWindow(window, readNetworkWindow, this)) {
       exchange_->result.transferred = static_cast<uint32_t>(transferred);
       finish(false);
       return;
@@ -372,6 +396,57 @@ void VfsBridge::processCore1() {
   memset(&exchange_->result, 0, sizeof(exchange_->result));
   VfsEntry entry;
   bool atEnd = false;
+  // Источник запроса: по пути — свой; без пути — тот, где открыт текущий файл или каталог.
+  if (current_ == nullptr) {
+    current_ = &vfs_;
+  }
+  const char* path = exchange_->request.path;
+  VfsBackend* target = current_;
+  switch (exchange_->request.operation) {
+    case VfsOperation::kStat:
+    case VfsOperation::kOpenDirectory:
+    case VfsOperation::kOpenRead:
+    case VfsOperation::kOpenWrite:
+    case VfsOperation::kOpenAppend:
+    case VfsOperation::kOpenRandom:
+    case VfsOperation::kDelete:
+    case VfsOperation::kMkdir:
+    case VfsOperation::kRename:
+    case VfsOperation::kMoveRename:
+      target = &route(exchange_->request.path, path);
+      break;
+    case VfsOperation::kGetFsInfo:
+    case VfsOperation::kInvalidateFsInfo:
+    case VfsOperation::kNoteResize:
+      // сведения о томе: путь — корень шары; без пути — том WC (как прежде)
+      target = exchange_->request.path[0] != 0 ? &route(exchange_->request.path, path) : &vfs_;
+      break;
+    default:
+      break;
+  }
+  switch (exchange_->request.operation) {
+    case VfsOperation::kOpenDirectory:
+    case VfsOperation::kOpenRead:
+    case VfsOperation::kOpenWrite:
+    case VfsOperation::kOpenAppend:
+    case VfsOperation::kOpenRandom:
+      // Прежний файл другого источника сервер уже закрыл (closeActive перед открытием):
+      // мост только запоминает, кому теперь идут операции без пути.
+      current_ = target;
+      break;
+    default:
+      break;
+  }
+  active_ = target;
+  VfsBackend& vfs = *target;
+  const char* movedTo = exchange_->request.path2;
+  if (exchange_->request.operation == VfsOperation::kMoveRename) {
+    VfsBackend& other = route(exchange_->request.path2, movedTo);
+    if (&other != target) {
+      finish(false, "move-across-shares");
+      return;
+    }
+  }
   switch (exchange_->request.operation) {
     case VfsOperation::kResetBuffers:
       // Инициатор обязан остановить запись и чтение кольца до этого запроса.
@@ -382,7 +457,7 @@ void VfsBridge::processCore1() {
       finish(true);
       break;
     case VfsOperation::kStat:
-      if (vfs_.stat(exchange_->request.path, entry)) {
+      if (vfs.stat(path, entry)) {
         exchange_->result.isDirectory = entry.isDirectory;
         exchange_->result.size = entry.size;
         copyDates(entry, exchange_->result);
@@ -392,10 +467,10 @@ void VfsBridge::processCore1() {
       }
       break;
     case VfsOperation::kOpenDirectory:
-      finish(vfs_.openDirectory(exchange_->request.path));
+      finish(vfs.openDirectory(path));
       break;
     case VfsOperation::kReadDirectory:
-      if (vfs_.readDirectory(entry, atEnd)) {
+      if (vfs.readDirectory(entry, atEnd)) {
         exchange_->result.atEnd = atEnd;
         exchange_->result.isDirectory = entry.isDirectory;
         exchange_->result.size = entry.size;
@@ -410,7 +485,7 @@ void VfsBridge::processCore1() {
       }
       break;
     case VfsOperation::kOpenRead:
-      if (vfs_.openFile(exchange_->request.path, false)) {
+      if (vfs.openFile(path, false)) {
         writeSession_ = false;
         finish(true);
       } else {
@@ -418,19 +493,19 @@ void VfsBridge::processCore1() {
       }
       break;
     case VfsOperation::kOpenWrite: {
-      const bool opened = vfs_.openFile(exchange_->request.path, true);
+      const bool opened = vfs.openFile(path, true);
       writeSession_ = opened;
       finish(opened);
       break;
     }
     case VfsOperation::kOpenAppend: {
-      const bool opened = vfs_.openFileAppend(exchange_->request.path);
+      const bool opened = vfs.openFileAppend(path);
       writeSession_ = opened;
       finish(opened);
       break;
     }
     case VfsOperation::kOpenRandom: {
-      const bool opened = vfs_.openFileRandom(exchange_->request.path);
+      const bool opened = vfs.openFileRandom(path);
       writeSession_ = opened;
       finish(opened);
       break;
@@ -442,8 +517,8 @@ void VfsBridge::processCore1() {
       processWrite();
       break;
     case VfsOperation::kReadAt:
-      if (vfs_.openMode() == 3) {
-        if (vfs_.seekFile(exchange_->request.offset)) {
+      if (vfs.openMode() == 3) {
+        if (vfs.seekFile(exchange_->request.offset)) {
           processRead();
         } else {
           finish(false);
@@ -453,8 +528,8 @@ void VfsBridge::processCore1() {
       }
       break;
     case VfsOperation::kWriteAt:
-      if (vfs_.openMode() == 3) {
-        if (vfs_.seekFile(exchange_->request.offset)) {
+      if (vfs.openMode() == 3) {
+        if (vfs.seekFile(exchange_->request.offset)) {
           processWrite();
         } else {
           finish(false);
@@ -464,7 +539,7 @@ void VfsBridge::processCore1() {
       }
       break;
     case VfsOperation::kExtend:
-      if (vfs_.extendFile(exchange_->request.value)) {
+      if (vfs.extendFile(exchange_->request.value)) {
         exchange_->result.transferred = exchange_->request.value;
         finish(true);
       } else {
@@ -473,7 +548,7 @@ void VfsBridge::processCore1() {
       break;
     case VfsOperation::kSetEof: {
       uint32_t actual = 0;
-      if (vfs_.setFileSize(exchange_->request.value, actual)) {
+      if (vfs.setFileSize(exchange_->request.value, actual)) {
         exchange_->result.size = actual;
         finish(true);
       } else {
@@ -484,7 +559,7 @@ void VfsBridge::processCore1() {
     case VfsOperation::kGetFsInfo:
       // value: 0 — обычный запрос, 1 — разрешено достроить карту FAT,
       // 2 — только готовый ответ, без обращения к Z80.
-      if (vfs_.getFsInfo(exchange_->result.fsInfo,
+      if (vfs.getFsInfo(exchange_->result.fsInfo,
                          exchange_->request.value == 1,
                          exchange_->request.value == 2)) {
         finish(true);
@@ -495,47 +570,46 @@ void VfsBridge::processCore1() {
     case VfsOperation::kNoteResize:
       // Верхний слой знает прежнюю и новую длину файла, владелец счётчика —
       // нижний. Это единственный обмен между ними.
-      vfs_.noteFileResized(exchange_->request.offset, exchange_->request.value);
+      vfs.noteFileResized(exchange_->request.offset, exchange_->request.value);
       finish(true);
       break;
     case VfsOperation::kInvalidateFsInfo:
-      vfs_.invalidateFsCache();
+      vfs.invalidateFsCache();
       finish(true);
       break;
     case VfsOperation::kCloseCommit:
       if (writeSession_ && networkToVfs_.available() != 0) {
         finish(false, "ingress-pending");
       } else {
-        const bool closed = vfs_.closeFile(true);
+        const bool closed = vfs.closeFile(true);
         writeSession_ = false;
         finish(closed);
       }
       break;
     case VfsOperation::kCloseAbort: {
-      const bool closed = vfs_.closeFile(false);
+      const bool closed = vfs.closeFile(false);
       writeSession_ = false;
       networkToVfs_.reset();
       finish(closed);
       break;
     }
     case VfsOperation::kDelete:
-      finish(vfs_.remove(exchange_->request.path));
+      finish(vfs.remove(path));
       break;
     case VfsOperation::kMkdir:
-      finish(vfs_.makeDirectory(exchange_->request.path));
+      finish(vfs.makeDirectory(path));
       break;
     case VfsOperation::kRename:
-      finish(vfs_.rename(exchange_->request.path, exchange_->request.path2,
+      finish(vfs.rename(path, exchange_->request.path2,
                          exchange_->request.value != 0));
       break;
     case VfsOperation::kMoveRename:
-      finish(vfs_.moveRename(exchange_->request.path,
-                             exchange_->request.path2,
+      finish(vfs.moveRename(path, movedTo,
                              (exchange_->request.flags & 1) != 0,
                              (exchange_->request.flags & 2) != 0));
       break;
     case VfsOperation::kSetMetadata:
-      if (vfs_.setMetadata(exchange_->request.metadata,
+      if (vfs.setMetadata(exchange_->request.metadata,
                            exchange_->result.appliedAttributes)) {
         finish(true);
       } else {

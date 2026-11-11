@@ -28,7 +28,9 @@
 #include "zifi/z80_transport.hpp"
 #include "host_serial_link.hpp"
 #include "zifi/vfs_bridge.hpp"
+#include "zifi/tang_vfs.hpp"
 
+#include "host_fatfs.hpp"
 #include "z80_sim.hpp"
 
 // timeBeginPeriod живёт в winmm; сборочный скрипт её не перечисляет.
@@ -122,6 +124,24 @@ int main(int argc, char** argv) {
   }
 
   zifi::SmbServer server(bridge, printEvent, nullptr);
+  // Шара «TANG» — microSD Tang: образ FatFs в памяти, содержимое — копия папки
+  // ZIFI_HOST_TANG («-» — пустая карта); ZIFI_HOST_TANG_ABSENT=1 — карты нет.
+  if (const char* tang = std::getenv("ZIFI_HOST_TANG")) {
+    const char* size = std::getenv("ZIFI_HOST_TANG_MB");
+    std::string problem;
+    if (!zifi::host::createTangCard(std::strcmp(tang, "-") == 0 ? "" : tang,
+                                    size != nullptr ? static_cast<uint32_t>(std::atoi(size)) : 64,
+                                    problem)) {
+      std::printf("Карта Tang не создана: %s\n", problem.c_str());
+      return 1;
+    }
+    static zifi::TangVfs tangVfs(zifi::host::tangVolume());
+    bridge.attachLocal(zifi::SmbServer::kTangRoot, &tangVfs);
+    server.setTangShare([](void*) { return zifi::host::tangCardPresent(); }, nullptr);
+    if (std::getenv("ZIFI_HOST_TANG_ABSENT") != nullptr) {
+      zifi::host::setTangCardPresent(false);
+    }
+  }
   // Пояс ESP из zifi.ini (time:). В FAT эмулятор хранит поля как есть, а SMB
   // передаёт UTC, поэтому пояс сдвигает время в обе стороны.
   if (const char* timezone = std::getenv("ZIFI_HOST_TZ_HOURS")) {

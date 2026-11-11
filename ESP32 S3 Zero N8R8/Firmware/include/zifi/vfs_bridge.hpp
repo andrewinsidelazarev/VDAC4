@@ -77,6 +77,14 @@ class VfsBridge {
   bool begin(bool psramAvailable);
   bool ready() const { return ready_; }
 
+  // Второй источник файлов (шара SMB «TANG»: microSD Tang через FatFs ESP). Запросы с путём
+  // под root ("/\x01TANG" — такого первого имени у пути WC не бывает: SMB-сервер отвергает
+  // управляющие знаки) уходят ему с путём от его корня; операции без пути — тому источнику,
+  // где открыт текущий файл или каталог; GET_FS_INFO без пути — тому WC. Вызывать до первых
+  // запросов, с ядра 1 или до запуска задач.
+  void attachLocal(const char* root, VfsBackend* backend);
+  bool isLocalPath(const char* path) const;
+
   // Интерфейс ядра 0. Допускается ровно один управляющий VFS-запрос.
   bool submit(VfsOperation operation, const char* path = nullptr,
               uint32_t value = 0);
@@ -145,6 +153,8 @@ class VfsBridge {
   };
 
   bool allocateRings(bool psramAvailable);
+  // Источник для пути и путь от его корня (в том же буфере или "/").
+  VfsBackend& route(const char* path, const char*& routed);
   static void copyDates(const VfsEntry& entry, VfsResult& result);
   void processCore1();
   void processRead();
@@ -156,6 +166,11 @@ class VfsBridge {
                                  size_t length);
 
   VfsClient vfs_;
+  VfsBackend* local_ = nullptr;
+  char localRoot_[16] = {};
+  size_t localRootLength_ = 0;
+  VfsBackend* current_ = nullptr;   // где открыт текущий файл или каталог
+  VfsBackend* active_ = nullptr;    // кто исполняет текущий запрос (для finish)
   Exchange* exchange_;
   QueueHandle_t requestQueue_;
   QueueHandle_t responseQueue_;

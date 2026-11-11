@@ -26,6 +26,16 @@ class SmbServer {
              bool& netbiosActive, char* error, size_t errorSize);
   bool stop();
 
+  // Вторая шара «TANG» — microSD Tang через FatFs ESP (TangVfs, подключённый к мосту VFS
+  // attachLocal с корнем SmbServer::kTangRoot). probe — есть ли она сейчас: Tang на связи, карта
+  // вставлена и не отдана WC (SD2). Без вызова шары нет.
+  static constexpr const char* kTangRoot = "/\x01TANG";
+  static constexpr const char* kTangShare = "TANG";
+  using SharePresence = bool (*)(void* context);
+  void setTangShare(SharePresence probe, void* context);
+  // Шара TANG сейчас есть (для окна плагина: ответ SMB_START).
+  bool tangShareAvailable() const;
+
   // Пояс из zifi.ini (time:, целые часы). В FAT хранится местное время, а SMB
   // передаёт FILETIME в UTC: пояс нужен для перевода в обе стороны.
   void setTimezoneHours(int8_t hours);

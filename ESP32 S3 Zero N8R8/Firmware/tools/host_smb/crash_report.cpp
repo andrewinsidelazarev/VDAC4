@@ -11,6 +11,7 @@
 
 #include <windows.h>
 
+#include <crtdbg.h>
 #include <dbghelp.h>
 #include <stdio.h>
 
@@ -104,6 +105,19 @@ LONG WINAPI crashHandler(EXCEPTION_POINTERS* info) {
   return EXCEPTION_EXECUTE_HANDLER;
 }
 
+// Проверки отладочной CRT (испорченная куча и т. п.): вместо модального окна, которое молча
+// держит стенд, — текст и стек вызовов через тот же перехватчик исключений.
+int crtReportHook(int type, char* message, int* returnValue) {
+  if (type == _CRT_WARN) {
+    return FALSE;
+  }
+  printf("\n=========== ПРОВЕРКА CRT ===========\n%s\n", message != NULL ? message : "");
+  fflush(stdout);
+  *returnValue = 0;
+  RaiseException(0xE0435254, EXCEPTION_NONCONTINUABLE, 0, NULL);   // 'CRT'
+  return TRUE;
+}
+
 }  // namespace
 
 namespace zifi {
@@ -111,6 +125,8 @@ namespace host {
 
 void installCrashReporter() {
   SetUnhandledExceptionFilter(crashHandler);
+  _CrtSetReportHook(crtReportHook);
+  SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 }
 
 }  // namespace host

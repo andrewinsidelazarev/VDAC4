@@ -51,6 +51,7 @@
 #include "zifi/path_table.hpp"
 #include "zifi/protocol.hpp"
 #include "zifi/smb_server.hpp"
+#include "zifi/tang_vfs_esp.hpp"
 #include "zifi/z80_transport.hpp"
 #include "zifi/vfs_bridge.hpp"
 #if ZIFI_HAS_SPI_LINK
@@ -528,6 +529,10 @@ void Application::begin() {
     startupHealthy = false;
   }
 #if ZIFI_HAS_SPI_LINK
+  // Шара SMB «TANG»: microSD Tang через FatFs ESP, без Z80 (мост VFS отдаёт её пути TangVfs).
+  // Есть, пока Tang на связи, карта вставлена и WC её не держит (SD2).
+  vfsBridge_.attachLocal(SmbServer::kTangRoot, &tang_sd::vfs());
+  smb_.setTangShare([](void*) { return tang_sd::shareReady(); }, nullptr);
   // Сторож обмена: встала задача обмена — запись в журнал и перезапуск ESP.
   startLinkWatchdog(link_, vfsBridge_);
   // LINK к Tang: ждёт питания Tang, выбирает частоту, следит за состоянием Tang
@@ -1035,11 +1040,12 @@ void Application::processFtpRamStats() {
 }
 
 void Application::processSmbStart() {
-  // Ответ: [успех][порт LE16][NBNS 0/1]. Последний байт позволяет плагину
-  // честно показать, удалось ли занять UDP/137 для заданного имени SMB.
+  // Ответ: [успех][порт LE16][NBNS 0/1][TANG 0/1]. NBNS — удалось ли занять UDP/137
+  // для заданного имени SMB; TANG (0.1.125) — открыта ли шара microSD Tang (окно
+  // плагина, строка UNC2). Старый плагин читает первые четыре байта.
   exchange_->responseCommand = kRespSmbStart;
-  exchange_->responseLength = 4;
-  memset(exchange_->response, 0, 4);
+  exchange_->responseLength = 5;
+  memset(exchange_->response, 0, 5);
   if (ota_.running()) {
     setNetworkError("smb:ota active");
     return;
@@ -1067,6 +1073,15 @@ void Application::processSmbStart() {
   exchange_->response[0] = 1;
   writeLe16(exchange_->response + 1, port);
   exchange_->response[3] = netbios ? 1 : 0;
+#if ZIFI_HAS_SPI_LINK
+  // Плагин SMB перезапускает ESP и шлёт SMB_START раньше, чем поднимется связь с Tang (не
+  // раньше 10 с после старта): подождать её, иначе строка UNC2 окна покажет, что шары TANG
+  // нет. Плагин тем временем ждёт ответа, а на PING отвечает ядро 1.
+  for (uint32_t waited = 0; tang::starting() && waited < 15000; waited += 100) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+#endif
+  exchange_->response[4] = smb_.tangShareAvailable() ? 1 : 0;
 }
 
 void Application::processSmbStop() {

@@ -36,6 +36,18 @@ int smb2_dcerpc_srvsvc_reply(struct smb2_context *smb2,
                             size_t *response_length,
                             struct smb2_dcerpc_request_info *request_info);
 
+/* То же со второй дисковой шарой (VDAC4: «TANG» — microSD Tang): extra_disk_share
+ * NULL или пустая строка — её нет, ответы как у smb2_dcerpc_srvsvc_reply. */
+int smb2_dcerpc_srvsvc_reply2(struct smb2_context *smb2,
+                             const uint8_t *request, size_t request_length,
+                             const char *disk_share,
+                             const char *extra_disk_share,
+                             const char *server_name,
+                             uint16_t *presentation_context,
+                             uint8_t *response, size_t response_capacity,
+                             size_t *response_length,
+                             struct smb2_dcerpc_request_info *request_info);
+
 #ifdef __cplusplus
 }
 #endif

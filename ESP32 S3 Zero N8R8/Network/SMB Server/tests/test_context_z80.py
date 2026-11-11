@@ -212,5 +212,27 @@ class VolumeTests(unittest.TestCase):
         self.assertEqual(cpu.sp, STACK + 4)
 
 
+class VfsGuardTests(unittest.TestCase):
+    """С включённым VDAC4 VFS (SD2 — карта Tang или том VFS через ESP) SMB не запускается.
+    Признак — заплатка переключателя в WC v1.11i: «JP #4FE8» по #501C и переходник по #4FE8."""
+
+    def carry_after(self, patch):
+        wc = Commander(0, {0: files()}, {0: [0]})
+        for address, data in patch.items():
+            wc.cpu.memory[address:address + len(data)] = data
+        wc.call('Vfs4_Active')
+        return bool(wc.cpu.f & 0x01)
+
+    def test_clean_wc_is_not_vfs(self):
+        self.assertFalse(self.carry_after({}))
+
+    def test_vfs_patch_is_detected(self):
+        self.assertTrue(self.carry_after({0x501C: bytes([0xC3, 0xE8, 0x4F]),
+                                          0x4FE8: bytes([0xED, 0x57, 0xF3, 0xF5])}))
+
+    def test_jump_without_trampoline_is_not_vfs(self):
+        self.assertFalse(self.carry_after({0x501C: bytes([0xC3, 0xE8, 0x4F])}))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

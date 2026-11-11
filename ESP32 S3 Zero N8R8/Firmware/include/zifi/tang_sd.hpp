@@ -42,6 +42,9 @@ constexpr const char* kBusy = "the Tang SD is busy (a core is being loaded), try
 const char* mount();
 void unmount();
 bool mounted();
+// Буква диска FatFs смонтированной карты ("0:") для прямых вызовов f_* (TangVfs — шара SMB
+// «TANG»); "" — не смонтирована. Вызывающий держит Session.
+const char* fatDrive();
 
 // Сырые блоки по 512 байт (консоль: проверка скорости); карта должна быть смонтирована.
 bool readBlocks(uint32_t lba, uint8_t* data, uint32_t count);

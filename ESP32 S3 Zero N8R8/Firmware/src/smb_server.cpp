@@ -398,12 +398,29 @@ bool asciiEqualNoCase(const char* left, const char* right) {
   return *left == 0 && *right == 0;
 }
 
+// Шара «TANG» (microSD Tang через FatFs ESP): её пути у сервера и моста VFS начинаются с корня
+// kTangRoot — первого имени с управляющим знаком, которого у пути шары WC не бывает (normalizePath
+// такие отвергает). Мост по нему отдаёт запрос TangVfs.
+constexpr const char* kTangRoot = SmbServer::kTangRoot;
+constexpr size_t kTangRootLength = 6;
+static_assert(kTangRootLength == sizeof("/\x01TANG") - 1, "kTangRoot length");
+
+bool isTangPath(const char* path) {
+  return path != nullptr && strncmp(path, kTangRoot, kTangRootLength) == 0 &&
+         (path[kTangRootLength] == 0 || path[kTangRootLength] == '/');
+}
+
+// Корень любой шары: "/" — том WC, kTangRoot — карта Tang.
+bool isShareRoot(const char* path) {
+  return path != nullptr && (strcmp(path, "/") == 0 || strcmp(path, kTangRoot) == 0);
+}
+
 bool asciiPathBelongsTo(const char* value, const char* root) {
   if (value == nullptr || root == nullptr) {
     return false;
   }
   if (root[0] == '/' && root[1] == 0) {
-    return value[0] == '/';
+    return value[0] == '/' && !isTangPath(value);   // корень WC — без шары TANG
   }
   size_t index = 0;
   while (root[index] != 0 && value[index] != 0) {
@@ -873,6 +890,7 @@ struct SmbServer::Impl {
   struct Tree {
     bool used = false;
     bool ipc = false;
+    bool tang = false;                // шара «TANG»: пути под kTangRoot
     uint32_t id = 0;
     smb2_context* owner = nullptr;
     uint32_t ownerId = 0;
@@ -1359,6 +1377,17 @@ struct SmbServer::Impl {
   // свободное место, но не эту величину.
   bool fsInfoRefreshRequired;
   uint32_t allocationUnitBytes;
+  // Те же сведения второй шары (WC или TANG — та, что сейчас не выбрана selectFsShare).
+  struct FsShareState {
+    VfsFsInfo info;
+    bool valid = false;
+    bool refreshRequired = true;
+    uint32_t allocationUnit = 0;
+  };
+  FsShareState otherFsState;
+  bool fsStateTang = false;
+  SmbServer::SharePresence tangProbe = nullptr;
+  void* tangProbeContext = nullptr;
   smb2_file_fs_volume_info volumeInfo;
   smb2_file_fs_size_info sizeInfo;
   smb2_file_fs_full_size_info fullSizeInfo;
@@ -1506,6 +1535,7 @@ struct SmbServer::Impl {
   uint64_t reportedAllocationSize(uint32_t size,
                                   bool directory) const;
   void invalidateFsInfo();
+  void invalidateFsInfo(const char* path);
   void dropFileCache();
   void beginFileCache(const char* path, uint32_t size);
   void appendFileCache(uint32_t offset, const uint8_t* data, uint32_t length);
@@ -1602,7 +1632,14 @@ struct SmbServer::Impl {
                      const uint8_t fileId[SMB2_FD_SIZE],
                      int* slot = nullptr);
   void releaseHandle(int slot);
-  uint32_t allocateTree(bool ipc, smb2_context* owner);
+  uint32_t allocateTree(bool ipc, smb2_context* owner, bool tang = false);
+  // Шара TANG сейчас есть (проба владельца и TangVfs у моста).
+  bool tangShareAvailable();
+  // "/путь" -> kTangRoot + "/путь" на месте; false — не помещается.
+  bool prefixTangPath(char path[kMaxPath + 1]) const;
+  // Сведения о томе своей шары: живые поля описывают шару fsStateTang, вторая — в otherFsState.
+  void selectFsShare(bool tang);
+  void selectFsShareFor(const char* path) { selectFsShare(isTangPath(path)); }
   const Tree* findTree(uint32_t id) const;
   void releaseTree(uint32_t id);
   uint32_t visibleSize(const Handle& handle) const;
@@ -1773,6 +1810,8 @@ bool SmbServer::Impl::start(const uint8_t* payload, uint16_t length,
   fsInfoValid = false;
   fsInfoRefreshRequired = true;
   allocationUnitBytes = 0;
+  otherFsState = FsShareState();
+  fsStateTang = false;
   memset(&server, 0, sizeof(server));
   server.fd = -1;
   server.port = portValue;
@@ -3475,7 +3514,7 @@ void SmbServer::Impl::releaseDirectoryBatch() {
 }
 
 
-uint32_t SmbServer::Impl::allocateTree(bool ipc, smb2_context* owner) {
+uint32_t SmbServer::Impl::allocateTree(bool ipc, smb2_context* owner, bool tang) {
   const uint32_t ownerId = contextOwnerId(owner);
   const uint64_t sessionId = contextSessionId(owner);
   if (owner == nullptr || ownerId == 0 || sessionId == 0) {
@@ -3502,6 +3541,7 @@ uint32_t SmbServer::Impl::allocateTree(bool ipc, smb2_context* owner) {
 
   trees[slot].used = true;
   trees[slot].ipc = ipc;
+  trees[slot].tang = tang;
   trees[slot].id = id;
   trees[slot].owner = owner;
   trees[slot].ownerId = ownerId;
@@ -3667,7 +3707,7 @@ void SmbServer::Impl::releaseClientHandles(smb2_context* owner,
       cancelNotifiesForHandle(handle.owner, static_cast<int>(index),
                               handle.generation, SMB2_STATUS_CANCELLED);
     }
-    if (handle.deletePending && strcmp(handle.path, "/") != 0) {
+    if (handle.deletePending && !isShareRoot(handle.path)) {
       removePath(handle.path);
     } else if (handle.metadataDirty) {
       invalidateParent(handle.path);
@@ -3839,7 +3879,7 @@ bool SmbServer::Impl::releaseTreeHandles(smb2_context* owner,
     }
     const bool shouldDelete =
         handle.deletePending || (handle.failed && handle.createdNew);
-    if (shouldDelete && strcmp(handle.path, "/") != 0) {
+    if (shouldDelete && !isShareRoot(handle.path)) {
       removePath(handle.path);
     } else if (handle.metadataDirty) {
       invalidateParent(handle.path);
@@ -3870,6 +3910,16 @@ void SmbServer::Impl::sendOperation(const char* operation, const char* path) {
   }
   if (path != nullptr && *path != 0 && used + 1 < sizeof(shown)) {
     shown[used++] = ' ';
+    if (isTangPath(path)) {
+      // шара TANG — «TANG:/путь», без внутреннего корня
+      for (const char* tag = "TANG:"; *tag != 0 && used + 1 < sizeof(shown); ++tag) {
+        shown[used++] = *tag;
+      }
+      path += kTangRootLength;
+      if (*path == 0) {
+        path = "/";
+      }
+    }
     while (*path != 0 && used + 1 < sizeof(shown)) {
       shown[used++] = *path++;
     }
@@ -4635,7 +4685,7 @@ bool SmbServer::Impl::createEmptyFile(const char* path) {
   const bool created = requestVfs(VfsOperation::kCloseCommit, nullptr, 0,
                                   result, kMutateVfsTimeoutMs);
   if (created) {
-    invalidateFsInfo();
+    invalidateFsInfo(path);
     invalidateParent(path);
   }
   return created;
@@ -4667,7 +4717,7 @@ bool SmbServer::Impl::removePath(const char* path) {
                                   kMutateVfsTimeoutMs);
   if (removed) {
     forgetMetadata(path);
-    invalidateFsInfo();
+    invalidateFsInfo(path);
     invalidateParent(path);
     invalidateSubtree(path);
     notifyChange(path, SMB2_NOTIFY_CHANGE_FILE_ACTION_REMOVED,
@@ -4952,6 +5002,11 @@ void SmbServer::Impl::refreshCachedStamp(const char* path, FatStamp stamp) {
 
 void SmbServer::Impl::invalidateFsInfo() { fsInfoValid = false; }
 
+void SmbServer::Impl::invalidateFsInfo(const char* path) {
+  selectFsShareFor(path);
+  fsInfoValid = false;
+}
+
 void SmbServer::Impl::dropFileCache() {
   if (cachedFileData != nullptr) {
     heap_caps_free(cachedFileData);
@@ -5057,6 +5112,7 @@ void SmbServer::Impl::updateSharedPhysicalSize(const char* path,
   if (!found) {
     return;
   }
+  selectFsShareFor(path);
   noteFileGrowth(oldSize, newSize);
   uint32_t directorySize = newSize;
   for (size_t index = 0; index < kHandleCount; ++index) {
@@ -5083,12 +5139,49 @@ void SmbServer::Impl::updateSharedPhysicalSize(const char* path,
   refreshCachedSize(path, directorySize);
 }
 
+void SmbServer::Impl::selectFsShare(bool tang) {
+  if (tang == fsStateTang) {
+    return;
+  }
+  FsShareState live;
+  live.info = cachedFsInfo;
+  live.valid = fsInfoValid;
+  live.refreshRequired = fsInfoRefreshRequired;
+  live.allocationUnit = allocationUnitBytes;
+  cachedFsInfo = otherFsState.info;
+  fsInfoValid = otherFsState.valid;
+  fsInfoRefreshRequired = otherFsState.refreshRequired;
+  allocationUnitBytes = otherFsState.allocationUnit;
+  otherFsState = live;
+  fsStateTang = tang;
+}
+
+bool SmbServer::Impl::tangShareAvailable() {
+  return tangProbe != nullptr && bridge.isLocalPath(kTangRoot) && tangProbe(tangProbeContext);
+}
+
+bool SmbServer::Impl::prefixTangPath(char path[kMaxPath + 1]) const {
+  const size_t length = strlen(path);
+  if (strcmp(path, "/") == 0) {
+    memcpy(path, kTangRoot, kTangRootLength + 1);
+    return true;
+  }
+  if (length + kTangRootLength > kMaxPath) {
+    return false;
+  }
+  memmove(path + kTangRootLength, path, length + 1);
+  memcpy(path, kTangRoot, kTangRootLength);
+  return true;
+}
+
 bool SmbServer::Impl::loadFsInfo(VfsFsInfo& info, uint8_t& status) {
   status = 0;
+  // запрос о томе — корнем своей шары: мост отдаёт TANG её источнику
+  const char* shareRoot = fsStateTang ? kTangRoot : nullptr;
   if (fsInfoRefreshRequired) {
     VfsResult invalidateResult = {};
     if (!closeActive(true) ||
-        !requestVfs(VfsOperation::kInvalidateFsInfo, nullptr, 0,
+        !requestVfs(VfsOperation::kInvalidateFsInfo, shareRoot, 0,
                     invalidateResult, kNormalVfsTimeoutMs)) {
       status = invalidateResult.status;
       return false;
@@ -5102,7 +5195,7 @@ bool SmbServer::Impl::loadFsInfo(VfsFsInfo& info, uint8_t& status) {
   }
   VfsResult result = {};
   if (!closeActive(true) ||
-      !requestVfs(VfsOperation::kGetFsInfo, nullptr, 0, result,
+      !requestVfs(VfsOperation::kGetFsInfo, shareRoot, 0, result,
                   kNormalVfsTimeoutMs)) {
     status = result.status;
     return false;
@@ -5213,7 +5306,7 @@ bool SmbServer::Impl::normalizePath(
 bool SmbServer::Impl::splitParent(const char* path,
                                   char parent[kMaxPath + 1],
                                   char name[kMaxPath + 1]) const {
-  if (path == nullptr || strcmp(path, "/") == 0) {
+  if (path == nullptr || isShareRoot(path)) {
     return false;
   }
   const char* slash = strrchr(path, '/');
@@ -5257,17 +5350,19 @@ bool SmbServer::Impl::parseShare(const smb2_tree_connect_request* request,
 }
 
 bool SmbServer::Impl::makeInfoName(const Handle& handle) {
-  size_t length = strlen(handle.path);
+  // имя от корня своей шары: у TANG — без kTangRoot
+  const char* shown = isTangPath(handle.path) ? handle.path + kTangRootLength : handle.path;
+  size_t length = strlen(shown);
   if (length + 1 > sizeof(infoName)) {
     return false;
   }
-  if (strcmp(handle.path, "/") == 0) {
+  if (length == 0 || strcmp(shown, "/") == 0) {
     infoName[0] = '\\';
     infoName[1] = 0;
     return true;
   }
   for (size_t index = 0; index <= length; ++index) {
-    infoName[index] = handle.path[index] == '/' ? '\\' : handle.path[index];
+    infoName[index] = shown[index] == '/' ? '\\' : shown[index];
   }
   return true;
 }
@@ -5332,6 +5427,9 @@ SmbServer::Impl::Handle* SmbServer::Impl::findHandle(
   }
   if (slot != nullptr) {
     *slot = found;
+  }
+  if (!handles[found].pipe) {
+    selectFsShareFor(handles[found].path);
   }
   return &handles[found];
 }
@@ -6094,7 +6192,7 @@ bool SmbServer::Impl::commitReservedSize(int slot) {
     return false;
   }
 
-  invalidateFsInfo();
+  invalidateFsInfo(handle.path);
   updateSharedPhysicalSize(handle.path, target);
   handle.reservedSize = target;
   handle.sizeReserved = false;
@@ -7152,7 +7250,7 @@ void SmbServer::Impl::pollAsyncCreate() {
         completeAsyncCreate(index, status);
         return;
       }
-      invalidateFsInfo();
+      invalidateFsInfo(pending.path);
       invalidateParent(pending.path);
       if (pending.context == nullptr) {
         discardDetached();
@@ -7695,7 +7793,7 @@ void SmbServer::Impl::pollAsyncClose() {
           completeResize(status);
           return;
         }
-        invalidateFsInfo();
+        invalidateFsInfo(handle.path);
         updateSharedPhysicalSize(handle.path, pending.requestedSize);
         for (Handle& shared : handles) {
           if (shared.used && asciiEqualNoCase(shared.path, handle.path)) {
@@ -8305,10 +8403,17 @@ int SmbServer::Impl::treeConnectHandler(
   }
   diagnosticLogEvent("SMB tree-request share=%s", requestedShare);
   const bool ipc = asciiEqualNoCase(requestedShare, "IPC$");
+  bool tang = false;
   if (ipc) {
     reply->share_type = SMB2_SHARE_TYPE_PIPE;
     reply->maximal_access = 0x001F00A9;
   } else if (asciiEqualNoCase(requestedShare, self->share)) {
+    reply->share_type = SMB2_SHARE_TYPE_DISK;
+    reply->maximal_access = 0x001F01FF;
+  } else if (asciiEqualNoCase(requestedShare, SmbServer::kTangShare) &&
+             self->tangShareAvailable()) {
+    // microSD Tang: есть Tang, в нём карта, и WC её не держит (SD2)
+    tang = true;
     reply->share_type = SMB2_SHARE_TYPE_DISK;
     reply->maximal_access = 0x001F01FF;
   } else {
@@ -8319,7 +8424,7 @@ int SmbServer::Impl::treeConnectHandler(
   // TREE_CONNECT собственный TreeId и запоминаем тип именно этого дерева.
   // Глобальный флаг здесь недопустим: служебный запрос IPC$ от Windows/Linux
   // иначе превращал последующие обращения к SD в OBJECT_NAME_NOT_FOUND.
-  reply->tree_id = self->allocateTree(ipc, smb2);
+  reply->tree_id = self->allocateTree(ipc, smb2, tang);
   if (reply->tree_id == 0) {
     return replyStatus(smb2, SMB2_TREE_CONNECT,
                        SMB2_STATUS_INSUFFICIENT_RESOURCES);
@@ -8407,9 +8512,11 @@ int SmbServer::Impl::createHandler(smb2_server* serverValue,
   char path[kMaxPath + 1];
   if (!self->normalizePath(request->name == nullptr ? "" : request->name,
                            path) ||
-      request->create_disposition > SMB2_FILE_OVERWRITE_IF) {
+      request->create_disposition > SMB2_FILE_OVERWRITE_IF ||
+      (tree->tang && !self->prefixTangPath(path))) {
     return createStatus(smb2, request, SMB2_STATUS_OBJECT_NAME_INVALID);
   }
+  self->selectFsShare(tree->tang);
   const uint32_t shareRelevantAccessMask =
       SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
       SMB2_FILE_EXECUTE | SMB2_DELETE | SMB2_FILE_WRITE_ATTRIBUTES |
@@ -8478,7 +8585,7 @@ int SmbServer::Impl::createHandler(smb2_server* serverValue,
   // У корня ресурса нет записи в родительском каталоге FAT. Реальный FILEX
   // поэтому закономерно отвергает STAT("/"), хотя для SMB корень существует
   // всегда. Синтезируем его метаданные и не посылаем невозможный STAT на Z80.
-  const bool root = strcmp(path, "/") == 0;
+  const bool root = isShareRoot(path);
   VfsResult statResult{};
   bool exists = root;
   if (root) {
@@ -8608,7 +8715,7 @@ int SmbServer::Impl::createHandler(smb2_server* serverValue,
       if (!created) {
         return createStatus(smb2, request, SMB2_STATUS_ACCESS_DENIED);
       }
-      self->invalidateFsInfo();
+      self->invalidateFsInfo(path);
       self->invalidateParent(path);
     } else if (!self->createEmptyFile(path)) {
       // CREATE должен материализовать файл до успешного ответа. Иначе другой
@@ -8839,7 +8946,7 @@ uint32_t SmbServer::Impl::finalizeClose(int slot, uint32_t generation,
   bool removed = true;
   const bool shouldDelete =
       handle.deletePending || (handle.failed && handle.createdNew);
-  if (shouldDelete && strcmp(handle.path, "/") != 0) {
+  if (shouldDelete && !isShareRoot(handle.path)) {
     removed = removePath(handle.path);
   } else if (handle.metadataDirty) {
     // Снимок родителя во время записи обновлялся точечно, но окончательную
@@ -9122,8 +9229,9 @@ int SmbServer::Impl::writeHandler(smb2_server* serverValue,
 
     size_t responseLength = 0;
     smb2_dcerpc_request_info rpcInfo = {};
-    const int rpcResult = smb2_dcerpc_srvsvc_reply(
-        smb2, request->buf, request->length, self->share, self->hostname,
+    const int rpcResult = smb2_dcerpc_srvsvc_reply2(
+        smb2, request->buf, request->length, self->share,
+        self->tangShareAvailable() ? SmbServer::kTangShare : nullptr, self->hostname,
         &handle->rpcContextId, handle->pipeResponse,
         sizeof(handle->pipeResponse), &responseLength, &rpcInfo);
     logRpcExchange("WRITE", rpcInfo, rpcResult, responseLength);
@@ -9472,9 +9580,10 @@ int SmbServer::Impl::ioctlHandler(smb2_server* serverValue,
       handle->pipeResponseOffset = 0;
       size_t responseLength = 0;
       smb2_dcerpc_request_info rpcInfo = {};
-      const int rpcResult = smb2_dcerpc_srvsvc_reply(
+      const int rpcResult = smb2_dcerpc_srvsvc_reply2(
           smb2, static_cast<const uint8_t*>(request->input),
-          request->input_count, self->share, self->hostname,
+          request->input_count, self->share,
+          self->tangShareAvailable() ? SmbServer::kTangShare : nullptr, self->hostname,
           &handle->rpcContextId,
           handle->pipeResponse, sizeof(handle->pipeResponse),
           &responseLength, &rpcInfo);
@@ -10247,7 +10356,7 @@ int SmbServer::Impl::setInfoHandler(smb2_server* serverValue,
     case SMB2_FILE_DISPOSITION_INFORMATION:
         // Копия файла в PSRAM после правки недостоверна.
         self->dropFileCache();
-      if (request->buffer_length < 1 || strcmp(handle->path, "/") == 0) {
+      if (request->buffer_length < 1 || isShareRoot(handle->path)) {
         return replyStatus(smb2, SMB2_SET_INFO,
                            SMB2_STATUS_INVALID_PARAMETER);
       }
@@ -10359,7 +10468,7 @@ int SmbServer::Impl::setInfoHandler(smb2_server* serverValue,
     case SMB2_FILE_RENAME_INFORMATION: {
         // Копия файла в PSRAM после правки недостоверна.
         self->dropFileCache();
-      if (!handle->writable || strcmp(handle->path, "/") == 0 ||
+      if (!handle->writable || isShareRoot(handle->path) ||
           request->buffer_length < 20) {
         return replyStatus(smb2, SMB2_SET_INFO,
                            SMB2_STATUS_INVALID_PARAMETER);
@@ -10379,7 +10488,8 @@ int SmbServer::Impl::setInfoHandler(smb2_server* serverValue,
       char target[kMaxPath + 1];
       const bool normalized = self->normalizePath(converted, target);
       free(const_cast<char*>(converted));
-      if (!normalized) {
+      if (!normalized ||
+          (isTangPath(handle->path) && !self->prefixTangPath(target))) {
         return replyStatus(smb2, SMB2_SET_INFO,
                            SMB2_STATUS_OBJECT_NAME_INVALID);
       }
@@ -10473,6 +10583,15 @@ bool SmbServer::start(const uint8_t* payload, uint16_t length,
 
 void SmbServer::setTimezoneHours(int8_t hours) {
   impl_->timezoneSeconds = static_cast<int32_t>(hours) * 3600;
+}
+
+void SmbServer::setTangShare(SharePresence probe, void* context) {
+  impl_->tangProbe = probe;
+  impl_->tangProbeContext = context;
+}
+
+bool SmbServer::tangShareAvailable() const {
+  return impl_ != nullptr && impl_->tangShareAvailable();
 }
 
 bool SmbServer::stop() {

@@ -36,7 +36,10 @@ $includes = @(
   '/Iinclude',
   '/Ilib\libsmb2\include',
   '/Ilib\libsmb2\include\smb2',
-  '/Itools\host_smb'
+  '/Itools\host_smb',
+  # шара «TANG»: FatFs прошивки и её настройки для ПК (sdkconfig.h, sys/param.h)
+  '/Icomponents\fatfs\src',
+  '/Itools\host_smb\fatfs_host'
 ) -join ' '
 
 $sources = @(
@@ -46,6 +49,8 @@ $sources = @(
   'src\smb_server.cpp',
   'src\vfs_bridge.cpp',
   'src\vfs_client.cpp',
+  'src\tang_vfs.cpp',
+  'tools\host_smb\host_fatfs.cpp',
   'src\directory_cache.cpp',
   'src\fat_time.cpp',
   'src\fat_allocation_cache.cpp',
@@ -77,6 +82,19 @@ $command = "cl.exe /nologo /std:c++17 /EHsc /utf-8 /Zi /MDd /W3 " +
            "$includes $sources $libsmb2 " +
            "/Fo$out\ /Fd$out\host_smb.pdb " +
            "/Fe$out\host_smb.exe /link ws2_32.lib /MAP:$out\host_smb.map"
+
+# FatFs (ff.c, язык C) — отдельным проходом: её ffconf.h берёт FreeRTOS, а заглушки
+# tests/stubs_host — C++; для C есть свои в fatfs_host\c.
+$fatfsOut = "$out\fatfs"
+if (-not (Test-Path $fatfsOut)) { New-Item -ItemType Directory -Force $fatfsOut | Out-Null }
+$fatfsCommand = "cl.exe /nologo /c /TC /utf-8 /Zi /MDd /W3 /D_CRT_SECURE_NO_WARNINGS " +
+                "/Itools\host_smb\fatfs_host\c /Itools\host_smb\fatfs_host /Icomponents\fatfs\src " +
+                "components\fatfs\src\ff.c components\fatfs\src\ffunicode.c " +
+                "/Fo$fatfsOut\ /Fd$fatfsOut\fatfs.pdb"
+Write-Output 'Сборка FatFs...'
+cmd /c ('"' + $vcvars + '" >nul && ' + $fatfsCommand)
+if ($LASTEXITCODE -ne 0) { throw "Сборка FatFs не удалась ($LASTEXITCODE)" }
+$command = $command.Replace("$includes $sources ", "$includes $sources $fatfsOut\ff.obj $fatfsOut\ffunicode.obj ")
 
 Write-Output 'Сборка симулятора...'
 cmd /c ('"' + $vcvars + '" >nul && ' + $command)

@@ -675,6 +675,12 @@ void start() {
 
 bool ready() { return g_state == State::kReady; }
 
+bool starting() {
+  // Запуск длится около 2 с после kStartDelayMs; позже kOff — модуля нет или запуск запрещён.
+  constexpr uint32_t kStartWindowMs = 10000;
+  return g_lock != nullptr && g_state == State::kOff && nowMs() < kStartDelayMs + kStartWindowMs;
+}
+
 void claimCore() { g_coreClaimed = true; }
 
 void releaseCore() { g_coreClaimed = false; }

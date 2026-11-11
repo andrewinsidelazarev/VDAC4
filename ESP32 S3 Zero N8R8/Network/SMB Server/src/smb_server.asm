@@ -18,7 +18,6 @@ PLUGIN:
 .device_digit:
         add a,'0'
         ld (UiVolumeDevice),a
-        ld (UiShareDevice),a
         ld (UiUncDevice),a
         ld (LinkSmbShare),a               ; имя шары совпадает с номером устройства WC
         ; Страница плагина живёт между запусками: возможности FILEX
@@ -31,6 +30,19 @@ PLUGIN:
         call Vfs_Crc16Init               ; таблицы CRC — до первого файлового обмена
         ENDIF
         call WC_GEDPL
+
+        ; VDAC4 VFS включён (на SD2 — карта Tang или том VFS через ESP): SMB не запускаем.
+        ; Перезапуск ESP снял бы режим SD2, а сектора SD2 WC берёт у той же ESP, пока она
+        ; ждёт ответа на файловый запрос SMB. Карту Tang сервер отдаёт сам — шарой TANG.
+        ; Окно сервера не открываем: только своё окно с причиной; ESP не трогаем.
+        call Vfs4_Active
+        jr nc,.no_vfs
+        call Ui_VfsRefuse                ; окно с причиной, закрывается любой клавишей
+        call WC_GEDPL
+        xor a                            ; на картах ничего не менялось: панели не перечитывать
+        pop ix
+        ret
+.no_vfs:
         call Ui_Open
 
         ld hl,UiStageConfig
@@ -113,6 +125,39 @@ PLUGIN:
         ; При возврате Wild Commander сам восстанавливает настройки прерываний.
         ld a,3                           ; WC 1.10i от 08.09.2026 перечитает обе панели
         pop ix
+        ret
+
+; VDAC4 VFS включён: VDAC4VFS.WMF ставит в WC v1.11i «JP #4FE8» на место «LD HL,DR2» ветки
+; SD2 (#501C) и переходник к резиденту по #4FE8 (LD A,I; DI; PUSH AF …). Те же признаки
+; проверяет сам переключатель. Код WC при работе плагина — в окне #4000.
+; Выход: CF=1 — включён.
+VFS4_SD2_JP     equ #501C
+VFS4_TRAMP      equ #4FE8
+Vfs4_Active:
+        ld hl,VFS4_SD2_JP
+        ld a,(hl)
+        cp #C3                           ; JP
+        jr nz,.off
+        inc hl
+        ld a,(hl)
+        cp low VFS4_TRAMP
+        jr nz,.off
+        inc hl
+        ld a,(hl)
+        cp high VFS4_TRAMP
+        jr nz,.off
+        ld hl,VFS4_TRAMP
+        ld a,(hl)
+        cp #ED                           ; LD A,I
+        jr nz,.off
+        inc hl
+        ld a,(hl)
+        cp #57
+        jr nz,.off
+        scf
+        ret
+.off:
+        or a
         ret
 
 ; --- запуск и остановка обмена ----------------------------------------------
@@ -252,8 +297,24 @@ Link_Start:
         ld (LinkSmbPort),hl
         ld a,(ProtoBuf+3)
         ld (LinkNetbios),a
+        ; С прошивки 0.1.125 пятый байт — есть шара TANG (microSD Tang). Старая
+        ; прошивка отвечает четырьмя байтами: шары нет.
+        xor a
+        ld (LinkTang),a
+        ld hl,(ProtoRxLen)
+        ld a,h
+        or a
+        jr nz,.tang_flag
+        ld a,l
+        cp 5
+        jr c,.tang_done
+.tang_flag:
+        ld a,(ProtoBuf+4)
+        ld (LinkTang),a
+.tang_done:
         call Ui_BuildPort
         call Ui_BuildNetbios
+        call Ui_BuildTang
         or a
         ret
 
@@ -524,6 +585,7 @@ LinkSmbShare:   db "?",0                  ; номер устройства по
                 db "zx",0                ; пароль
 LinkSmbStartLen equ $-LinkSmbStart
 LinkNetbios:    db 0                     ; 1, если ESP заняла UDP-порт 137
+LinkTang:       db 0                     ; 1, если ESP открыла шару TANG (microSD Tang)
 LinkIniMsg:     db "ini=",0
 LinkNoReply:    db "no ESP reply",0
 LinkNativePrefix: db "Native C++ ",0

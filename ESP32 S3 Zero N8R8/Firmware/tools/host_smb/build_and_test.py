@@ -158,14 +158,21 @@ def main():
     out = Path('.test-build/host_smb')
     out.mkdir(parents=True, exist_ok=True)
     (out / 'probe4').mkdir(parents=True, exist_ok=True)
+    (out / 'fatfs').mkdir(parents=True, exist_ok=True)
 
-    includes = r'/Itests\stubs_host /Iinclude /Ilib\libsmb2\include /Ilib\libsmb2\include\smb2 /Itools\host_smb'
-    sources = r'tools\host_smb\main.cpp tools\host_smb\z80_sim.cpp tools\host_smb\crash_report.cpp src\smb_server.cpp src\vfs_bridge.cpp src\vfs_client.cpp src\directory_cache.cpp src\fat_time.cpp src\fat_allocation_cache.cpp src\spsc_ring.cpp src\protocol.cpp src\z80_transport.cpp src\ws_discovery.cpp src\ws_discovery_xml.cpp src\diagnostic_log.cpp src\flash_fs.cpp'
+    includes = r'/Itests\stubs_host /Iinclude /Ilib\libsmb2\include /Ilib\libsmb2\include\smb2 /Itools\host_smb /Icomponents\fatfs\src /Itools\host_smb\fatfs_host'
+    sources = r'tools\host_smb\main.cpp tools\host_smb\z80_sim.cpp tools\host_smb\crash_report.cpp src\smb_server.cpp src\vfs_bridge.cpp src\vfs_client.cpp src\tang_vfs.cpp tools\host_smb\host_fatfs.cpp .test-build\host_smb\fatfs\ff.obj .test-build\host_smb\fatfs\ffunicode.obj src\directory_cache.cpp src\fat_time.cpp src\fat_allocation_cache.cpp src\spsc_ring.cpp src\protocol.cpp src\z80_transport.cpp src\ws_discovery.cpp src\ws_discovery_xml.cpp src\diagnostic_log.cpp src\flash_fs.cpp'
 
     libsmb2_files = [str(p) for p in Path('lib/libsmb2/lib').glob('*.c') if not any(k in p.name for k in ['krb5', 'aes_apple', 'dreamcast'])]
     libsmb2 = ' '.join(libsmb2_files)
 
     cmd_host = f'cl.exe /nologo /std:c++17 /EHsc /utf-8 /Zi /MDd /W3 /D_CRT_SECURE_NO_WARNINGS /DZIFI_DIAGNOSTIC_LOG=1 /DZIFI_HOST_BUILD /D_WINDOWS /DHAVE_LINGER /FIzifi_msvc_prelude.h {includes} {sources} {libsmb2} /Fo.test-build\\host_smb\\ /Fd.test-build\\host_smb\\host_smb.pdb /Fe.test-build\\host_smb\\host_smb.exe /link ws2_32.lib'
+
+    # FatFs (ff.c, язык C) — отдельным проходом: заглушки FreeRTOS для C — в fatfs_host\c.
+    cmd_fatfs = (r'cl.exe /nologo /c /TC /utf-8 /Zi /MDd /W3 /D_CRT_SECURE_NO_WARNINGS '
+                 r'/Itools\host_smb\fatfs_host\c /Itools\host_smb\fatfs_host /Icomponents\fatfs\src '
+                 r'components\fatfs\src\ff.c components\fatfs\src\ffunicode.c '
+                 r'/Fo.test-build\host_smb\fatfs\ /Fd.test-build\host_smb\fatfs\fatfs.pdb')
 
     cmd_reproduce = f'cl.exe /nologo /TC /utf-8 /Zi /MDd /W3 /D_CRT_SECURE_NO_WARNINGS /D_WINDOWS /DHAVE_LINGER /FIzifi_msvc_prelude.h /Itests\\stubs_host /Ilib\\libsmb2\\include /Ilib\\libsmb2\\include\\smb2 tools\\host_smb\\smb_reproduce_test.c {libsmb2} /Fo.test-build\\host_smb\\probe4\\ /Fd.test-build\\host_smb\\smb_reproduce_test.pdb /Fe.test-build\\host_smb\\smb_reproduce_test.exe /link ws2_32.lib'
 
@@ -174,6 +181,9 @@ call "{vcvars}" >nul
 rem Keep debug records in OBJ files; concurrent compilers must not share a PDB.
 set "CL_MPCount=1"
 set "_CL_=/Z7 /MP1 /FS %_CL_%"
+echo Compiling FatFs...
+{cmd_fatfs}
+if errorlevel 1 exit /b 1
 echo Compiling host_smb.exe...
 {cmd_host}
 if errorlevel 1 exit /b 1
@@ -883,7 +893,73 @@ echo Compilation SUCCESS!
             for offset, value in enumerate(progress_data)):
         raise RuntimeError('Out-of-order WRITE data verification failed')
     print('Out-of-order progress: unique coverage 320.0K/320.0K verified')
+
+    run_tang_share(out)
     print("Test finished!")
+
+
+def run_tang_share(out):
+    """Шара «TANG» (microSD Tang, прошивка 0.1.125): настоящая FatFs прошивки над образом в
+    памяти (ZIFI_HOST_TANG). Весь основной набор — по ней, перечень шар с ней (test50), и без
+    карты подключение к ней отвергается, а SD работает."""
+    tang_port = 14449
+    sd_share = Path('.test-build/test_share_tang_sd')
+    card = Path('.test-build/test_share_tang_card')
+    for folder in (sd_share, card):
+        if folder.exists():
+            shutil.rmtree(folder)
+        folder.mkdir(parents=True)
+        (folder / 'sample.txt').write_text("Hello World Sample Text", encoding='utf-8')
+    (card / 'CORES').mkdir()
+    (card / 'CORES' / 'NES.BIN').write_bytes(bytes(range(256)) * 400)
+
+    for absent in (False, True):
+        env = dict(os.environ)
+        env['ZIFI_HOST_TANG'] = str(card)
+        if absent:
+            env['ZIFI_HOST_TANG_ABSENT'] = '1'
+        log_path = out / ('host_smb_tang_absent.log' if absent else 'host_smb_tang.log')
+        with log_path.open('w', encoding='utf-8') as log:
+            server = subprocess.Popen(
+                ['.test-build\\host_smb\\host_smb.exe', str(sd_share), str(tang_port)],
+                stdout=log, stderr=subprocess.STDOUT, text=True, env=env)
+            try:
+                time.sleep(3.0)
+                if absent:
+                    print('Running TANG share absence check...')
+                    gone = subprocess.run(
+                        ['.test-build\\host_smb\\smb_reproduce_test.exe',
+                         f'127.0.0.1:{tang_port}', 'TANG', 'basic'],
+                        capture_output=True, text=True, timeout=120)
+                    still = subprocess.run(
+                        ['.test-build\\host_smb\\smb_reproduce_test.exe',
+                         f'127.0.0.1:{tang_port}', 'SD', 'basic'],
+                        capture_output=True, text=True, timeout=120)
+                    if gone.returncode == 0 or 'FAIL: Connect' not in gone.stdout:
+                        raise RuntimeError('TANG share stayed without a card:\n' + gone.stdout[-2000:])
+                    if still.returncode != 0:
+                        raise RuntimeError('SD share broke without a Tang card:\n' + still.stdout[-2000:])
+                    print('TANG share absent without a card, SD works: PASS')
+                    continue
+                for mode in ('all', 'test50'):
+                    print(f'Running TANG share {mode}...')
+                    result = subprocess.run(
+                        ['.test-build\\host_smb\\smb_reproduce_test.exe',
+                         f'127.0.0.1:{tang_port}', 'TANG', mode],
+                        capture_output=True, text=True, timeout=600)
+                    print(f'TANG {mode} OUTPUT TAIL:\n' + result.stdout[-1500:])
+                    if result.returncode != 0:
+                        raise RuntimeError(f'TANG share {mode} failed')
+            finally:
+                server.terminate()
+                try:
+                    server.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=2)
+        text = log_path.read_text(encoding='utf-8', errors='replace')
+        if 'АВАРИЙНОЕ' in text or 'ПРОВЕРКА CRT' in text:
+            raise RuntimeError('host_smb crashed on the TANG share:\n' + text[-3000:])
 
 if __name__ == '__main__':
     main()

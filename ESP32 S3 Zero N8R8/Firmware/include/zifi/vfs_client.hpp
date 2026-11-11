@@ -4,65 +4,15 @@
 #include <stdint.h>
 
 #include "zifi/fat_allocation_cache.hpp"
+#include "zifi/vfs_backend.hpp"
 #include "zifi/z80_transport.hpp"
 
 namespace zifi {
 
-struct VfsEntry {
-  bool isDirectory = false;
-  uint32_t size = 0;
-  // Штамп изменения записи FAT — местное время, как его пишут WC и Windows.
-  // Дата 0 — неизвестен: старый плагин или старое ядро WC.
-  uint16_t writeDate = 0;
-  uint16_t writeTime = 0;
-  // Остальные времена и атрибут есть только в ответе STAT нового плагина
-  // (FILEX GET_METADATA). В листинге каталога их нет.
-  bool hasMetadata = false;
-  uint8_t attributes = 0;
-  uint8_t createTenth = 0;
-  uint16_t createTime = 0;
-  uint16_t createDate = 0;
-  uint16_t accessDate = 0;
-  char name[256] = {};
-};
-
-struct VfsFsInfo {
-  uint8_t flags = 0;
-  uint8_t sectorsPerCluster = 0;
-  uint16_t bytesPerSector = 0;
-  uint32_t totalClusters = 0;
-  uint32_t freeClusters = 0xFFFFFFFFUL;
-  uint32_t serial = 0;
-  char label[12] = {};
-  uint32_t totalSectors = 0;
-  uint32_t nextFree = 0xFFFFFFFFUL;
-  uint8_t fatCount = 0;
-  uint8_t activeFat = 0;
-  uint8_t fatFlags = 0;
-  uint8_t mediaState = 0;
-  uint32_t fatSectors = 0;
-};
-
-struct VfsMetadata {
-  uint8_t attrMask = 0;
-  uint8_t attrValue = 0;
-  uint8_t timeMask = 0;
-  uint8_t createTenth = 0;
-  uint16_t createTime = 0;
-  uint16_t createDate = 0;
-  uint16_t accessDate = 0;
-  uint16_t writeTime = 0;
-  uint16_t writeDate = 0;
-  // Эти значения нужны только SMB-серверу для согласованного QUERY_INFO.
-  // В пакет FILEX по-прежнему уходят первые 16 байт в формате FAT.
-  uint64_t createFileTime = 0;
-  uint64_t accessFileTime = 0;
-  uint64_t writeFileTime = 0;
-};
-
 // Синхронный клиент файлового API Wild Commander. Вызывать его разрешено
 // только с ядра 1: он отправляет VFS-команды в канал и ждёт ответы Z80.
-class VfsClient {
+// Источник моста VFS — том WC (vfs_backend.hpp).
+class VfsClient : public VfsBackend {
  public:
   static constexpr size_t kTransferWindowSize = 16 * 1024;
   // FILEX needs a 32-byte parameter block in the same 16 KiB page as data.
@@ -77,55 +27,50 @@ class VfsClient {
   static constexpr size_t kFilexSectorWindowSize =
       (kFilexTransferWindowSize / 512) * 512;
 
-  using WindowSource = size_t (*)(void* context, size_t offset,
-                                  uint8_t* output, size_t capacity);
-  using WindowSink = bool (*)(void* context, const uint8_t* data,
-                              size_t length);
-
   explicit VfsClient(Z80Transport& transport);
 
   void beginFatCache(bool psramAvailable);
 
-  bool stat(const char* path, VfsEntry& entry);
-  bool openDirectory(const char* path);
-  bool readDirectory(VfsEntry& entry, bool& atEnd);
+  bool stat(const char* path, VfsEntry& entry) override;
+  bool openDirectory(const char* path) override;
+  bool readDirectory(VfsEntry& entry, bool& atEnd) override;
 
-  bool openFile(const char* path, bool forWrite);
-  bool openFileAppend(const char* path);
-  bool openFileRandom(const char* path);
-  bool seekFile(uint32_t offset);
+  bool openFile(const char* path, bool forWrite) override;
+  bool openFileAppend(const char* path) override;
+  bool openFileRandom(const char* path) override;
+  bool seekFile(uint32_t offset) override;
   bool readFile(uint8_t* output, size_t capacity, size_t wanted,
                 size_t& received);
   bool readFileWindow(size_t wanted, WindowSink sink, void* sinkContext,
-                      size_t& received);
+                      size_t& received) override;
   bool writeFile(const uint8_t* data, size_t length);
   bool writeFileWindow(size_t length, WindowSource source,
-                       void* sourceContext);
-  bool extendFile(uint32_t length);
-  bool setFileSize(uint32_t size, uint32_t& actualSize);
-  bool closeFile(bool commit = true);
+                       void* sourceContext) override;
+  bool extendFile(uint32_t length) override;
+  bool setFileSize(uint32_t size, uint32_t& actualSize) override;
+  bool closeFile(bool commit = true) override;
 
   // cacheOnly — вернуть ответ, только если он уже есть: вызывающий ещё не
   // закрывал активный файл и по отказу поймёт, что закрыть придётся.
   bool getFsInfo(VfsFsInfo& info, bool refreshFree = false,
-                 bool cacheOnly = false);
+                 bool cacheOnly = false) override;
   // Изменение длины файла: единственный способ сообщить владельцу счётчика,
   // сколько кластеров занято или освобождено, без обхода FAT.
-  void noteFileResized(uint32_t oldSize, uint32_t newSize);
+  void noteFileResized(uint32_t oldSize, uint32_t newSize) override;
   // Полный сброс сведений о томе — для операций, объём которых неизвестен.
-  void invalidateFsCache();
+  void invalidateFsCache() override;
   bool moveRename(const char* oldPath, const char* newPath, bool directory,
-                  bool replace);
-  bool setMetadata(const VfsMetadata& metadata, uint8_t& appliedAttributes);
+                  bool replace) override;
+  bool setMetadata(const VfsMetadata& metadata, uint8_t& appliedAttributes) override;
 
-  bool remove(const char* path);
-  bool makeDirectory(const char* path);
-  bool rename(const char* oldPath, const char* newName, bool directory);
+  bool remove(const char* path) override;
+  bool makeDirectory(const char* path) override;
+  bool rename(const char* oldPath, const char* newName, bool directory) override;
 
-  const char* lastError() const { return lastError_; }
-  uint8_t lastStatus() const { return lastStatus_; }
+  const char* lastError() const override { return lastError_; }
+  uint8_t lastStatus() const override { return lastStatus_; }
   uint8_t filexCapabilities() const { return filexCapabilities_; }
-  uint8_t openMode() const { return openMode_; }
+  uint8_t openMode() const override { return openMode_; }
 
  private:
   static constexpr size_t kBlockSize = 512;

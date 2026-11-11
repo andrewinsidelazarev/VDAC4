@@ -15,6 +15,7 @@ UI_FIELD_CLIENT equ 30
 UI_FIELD_LAST   equ 30
 UI_FIELD_PORT   equ 5
 UI_FIELD_NBNS   equ 30
+UI_FIELD_UNC2   equ 30                  ; вторая шара: «\\ZX-Evo\TANG  (Tang microSD)» или прочерк
 UI_FIELD_PROGRESS equ 30
 
 ; Создать окно, сохранить закрываемую им область экрана и заполнить динамические
@@ -55,6 +56,32 @@ Ui_Draw:
         ld hl,UiText
         ld de,#0101
         jp WC_TXTPR
+
+; Отказ запуска: включён VDAC4 VFS. Своё окно — только причина и что сделать; полей сервера
+; нет, ESP не трогали. Закрывается любой клавишей (фон восстанавливает RRESB).
+Ui_VfsRefuse:
+        ld ix,VfsWindow
+        ld (ix+2),#FF                    ; центр текущего режима, как Ui_Open
+        ld (ix+3),#FF
+        ld (ix+8),0
+        ld (ix+9),0
+        call WC_PRWOW
+        ld ix,VfsWindow
+        ld hl,UiVfsText
+        ld de,#0101
+        call WC_TXTPR
+        call WC_WAITUP                   ; клавиша запуска плагина ещё может быть нажата
+.wait:
+        ei
+        halt
+        call WC_ESC
+        jr nz,.done
+        call WC_ANYK                     ; любая клавиша (KBSCN с обычной таблицей её не видит)
+        jr z,.wait
+.done:
+        call WC_WAITUP                   ; отпущена — WC её не примет за свою команду
+        ld ix,VfsWindow
+        jp WC_RRESB
 
 ; HL — нуль-терминированная строка нового состояния. Поле очищается целиком,
 ; вместе с местом под коды цвета шкалы Wi-Fi.
@@ -153,6 +180,19 @@ Ui_BuildNetbios:
 .show:
         jp Ui_SetNetbios
 
+; Строка UNC2: шара TANG (microSD Tang), если ESP её открыла (пятый байт ответа
+; SMB_START), иначе прочерк: Tang не на связи, карты нет или старая прошивка.
+Ui_BuildTang:
+        ld a,(LinkTang)
+        or a
+        ld hl,UiTangNone
+        jr z,.show
+        ld hl,UiTangShare
+.show:
+        ld de,UiUnc2Field
+        ld b,UI_FIELD_UNC2
+        jp Ui_CopyField
+
 ; Собрать отображаемый IPv4 без схемы и порта. Поле предварительно очищается
 ; пробелами, чтобы короткий новый адрес не оставил хвост старого.
 ;
@@ -203,6 +243,27 @@ SmbWindow:
         dw 0
         dw 0                           ; содержимое выводится через TXTPR
 
+VfsWindow:
+        db #81                         ; тень и рамка стиля 1
+        db 0
+        db #FF,#FF                     ; X,Y: центр, см. Ui_VfsRefuse
+        db 40,9                        ; ширина и высота: 7 строк текста
+        db #2F                         ; окно ошибки: ярко-белые символы по красному
+        db 0
+        dw 0
+        db 0,0
+        dw UiHeader
+        dw 0
+        dw 0
+
+UiVfsText:                             ; #0E — строка по центру окна
+        db #0E,"SMB cannot start: VDAC4 VFS is on.",#0D
+        db #0E,"SD2 is the Tang microSD or the VFS",#0D
+        db #0E,"volume, both served by the ESP.",#0D,#0D
+        db #0E,"Turn it off: F10 - VDAC4 VFS,",#0D
+        db #0E,"then start SMB again.",#0D
+        db #0E,"Any key - return to WC",0
+
 UiHeader:
         IFDEF ZIFI_SPI
         db #0E,9," VDAC4 SMB Server ",0
@@ -228,14 +289,16 @@ UiPortField:
 UiFirmwareField:
         ds UI_FIELD_FW,' '
         db #0D,#0D
-        db "Share  : "
-UiShareDevice:
+        ; Две шары — две строки: том панели WC и microSD Tang (прошивка ESP 0.1.125+).
+        db "UNC1   : \\\\ZX-Evo\\"
+UiUncDevice:
         db "?","  (volume "
 UiVolumeDevice:
         db "?",":",#5C,")",#0D
-        db "UNC    : \\\\ZX-Evo\\"
-UiUncDevice:
-        db "?",#0D
+        db "UNC2   : "
+UiUnc2Field:
+        ds UI_FIELD_UNC2,' '
+        db #0D
         db "Login  : zx / zx; SMB signing",#0D
         db "NetBIOS: "
 UiNetbiosField:
@@ -292,3 +355,5 @@ UiNetbiosUnknown:  db "checking UDP/137...",0
 UiNetbiosActive:   db "ZX-Evo active",0
 UiNetbiosUnavailable:
                      db "unavailable; use IP",0
+UiTangShare:       db "\\\\ZX-Evo\\TANG  (Tang microSD)",0
+UiTangNone:        db "-  (no Tang microSD)",0

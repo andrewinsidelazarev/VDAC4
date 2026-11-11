@@ -26,9 +26,9 @@
 
 .plugin_name
         IFDEF ZIFI_SPI
-        db "VDAC4 SMB Server v0.5.10"       ; сборка для SPI платы VDAC4
+        db "VDAC4 SMB Server v0.5.17"       ; сборка для SPI платы VDAC4
         ELSE
-        db "ZiFi SMB Server v0.5.10"
+        db "ZiFi SMB Server v0.5.17"
         ENDIF
         ds 32-($-.plugin_name),' '
         db #03                        ; запуск из меню плагинов

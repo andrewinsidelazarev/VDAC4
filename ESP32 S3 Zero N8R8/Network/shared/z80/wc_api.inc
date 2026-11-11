@@ -29,6 +29,7 @@ FN_PGDN     equ #1A
 FN_HOME     equ #1B
 FN_END      equ #1C
 FN_KBSCN    equ #2A                    ; символ клавиши; A'=1 — сырая таблица
+FN_ANYK     equ #2D                    ; любая клавиша: NZ — нажата
 FN_WAITUP   equ #2E                    ; ждать отпускания всех клавиш
 FN_LOAD512  equ #30                    ; прочитать сектор открытого файла
 FN_SAVE512  equ #31                    ; записать сектор открытого файла

@@ -137,6 +137,8 @@ Session::~Session() {
 
 bool mounted() { return g_mounted && sameCore(); }
 
+const char* fatDrive() { return g_mounted ? g_drive : ""; }
+
 const char* mount() {
   Session session;
   if (heldByWc()) {

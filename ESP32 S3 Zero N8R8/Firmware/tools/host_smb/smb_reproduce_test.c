@@ -2390,6 +2390,7 @@ int main(int argc, char **argv) {
     if (strcmp(only_test, "test47") == 0) goto test_47;
     if (strcmp(only_test, "test48") == 0) goto test_48;
     if (strcmp(only_test, "test49") == 0) goto test_49;
+    if (strcmp(only_test, "test50") == 0) goto test_50;
   }
 
   /* TEST 1: Sequential & Multiple Reads check */
@@ -3397,7 +3398,8 @@ test_18:
   /* TEST 18: MS-FSCC требует, чтобы AllocationSize был кратен размеру
    * кластера тома. Эталонный случай повторяет реальный зависший CopyFile:
    * EOF=262147, FAT32 cluster=32768, значит AllocationSize=294912, а не
-   * прежние 262656 (округление до сектора 512). */
+   * прежние 262656 (округление до сектора 512). Кластер берётся у самой
+   * шары: у тома WC эмулятора он 32768, у шары TANG (образ FatFs) — свой. */
   printf("\n--- TEST 18: AllocationSize follows FAT32 cluster geometry ---\n");
   {
     static const uint8_t classes[] = {
@@ -3406,7 +3408,7 @@ test_18:
         SMB2_FILE_NETWORK_OPEN_INFORMATION,
         SMB2_FILE_STREAM_INFORMATION};
     const uint32_t file_size = 262147;
-    const uint64_t expected_allocation = 294912;
+    uint64_t expected_allocation = 0;
     uint8_t *buffer = (uint8_t*)calloc(1, 65536);
     struct smb2fh *handle = NULL;
     struct smb2_statvfs statvfs;
@@ -3416,9 +3418,16 @@ test_18:
     memset(&statvfs, 0, sizeof(statvfs));
     if (test_ok) {
       test_ok = smb2_statvfs(smb2, test_directory, &statvfs) == 0 &&
-                statvfs.f_frsize == 32768;
-      printf("  Filesystem allocation unit=%lu expected=32768\n",
-             (unsigned long)statvfs.f_frsize);
+                statvfs.f_frsize >= 512 &&
+                (statvfs.f_frsize & (statvfs.f_frsize - 1)) == 0;
+      if (test_ok) {
+        expected_allocation =
+            ((uint64_t)file_size + statvfs.f_frsize - 1) /
+            statvfs.f_frsize * statvfs.f_frsize;
+      }
+      printf("  Filesystem allocation unit=%lu expected AllocationSize=%llu\n",
+             (unsigned long)statvfs.f_frsize,
+             (unsigned long long)expected_allocation);
     }
     if (test_ok) {
       handle = smb2_open(smb2, test_path("allocation_262147.bin"),
@@ -6785,6 +6794,63 @@ test_49:
     printf("  hint size=%llu final size=%llu\n",
            (unsigned long long)hint_size, (unsigned long long)st.smb2_size);
     printf("RESULT TEST 49: %s\n", test_ok ? "PASS" : "FAIL");
+    failures += !test_ok;
+  }
+
+  if (only_test != NULL) goto done;
+
+test_50:
+  /* ТЕСТ 50: вторая шара «TANG» (microSD Tang) в перечне srvsvc. Тот же
+   * запрос Проводника, что в ТЕСТЕ 31: записей три (SD, TANG, IPC$), имя
+   * TANG есть в ответе, ResumeHandle по-прежнему NULL. Без второй шары
+   * ответ прежний — это проверяет ТЕСТ 31. */
+  printf("\n--- TEST 50: NetrShareEnum lists the TANG share ---\n");
+  {
+    static const uint8_t windows_request[] = {
+      0x05, 0x00, 0x00, 0x03, 0x10, 0x00, 0x00, 0x00,
+      0x58, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+      0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x00,
+      0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
+      0x5c, 0x00, 0x5c, 0x00, 0x5a, 0x00, 0x58, 0x00,
+      0x2d, 0x00, 0x45, 0x00, 0x76, 0x00, 0x6f, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00
+    };
+    static const uint8_t tang_utf16[] = {'T', 0, 'A', 0, 'N', 0, 'G', 0};
+    uint8_t response[768];
+    struct smb2_dcerpc_request_info info;
+    uint16_t presentation_context = 0;
+    size_t response_length = 0;
+    int named = 0;
+    int test_ok;
+
+    memset(&info, 0, sizeof(info));
+    test_ok = smb2_dcerpc_srvsvc_reply2(
+                  smb2, windows_request, sizeof(windows_request), "SD", "TANG",
+                  "ZX-Evo", &presentation_context, response, sizeof(response),
+                  &response_length, &info) == 0 &&
+              response_length > 24 && response[2] == 2 &&
+              test_read_le16(response + 8) == response_length &&
+              test_read_le32(response + response_length - 12) == 3 &&
+              test_read_le32(response + response_length - 8) == 0 &&
+              test_read_le32(response + response_length - 4) == 0;
+    for (size_t at = 0; test_ok && at + sizeof(tang_utf16) <= response_length; ++at) {
+      if (memcmp(response + at, tang_utf16, sizeof(tang_utf16)) == 0) {
+        named = 1;
+        break;
+      }
+    }
+    test_ok = test_ok && named;
+    printf("  response=%lu bytes entries=%u TANG named=%d\n",
+           (unsigned long)response_length,
+           response_length >= 12
+               ? (unsigned)test_read_le32(response + response_length - 12)
+               : 0u,
+           named);
+    printf("RESULT TEST 50: %s\n", test_ok ? "PASS" : "FAIL");
     failures += !test_ok;
   }
 
