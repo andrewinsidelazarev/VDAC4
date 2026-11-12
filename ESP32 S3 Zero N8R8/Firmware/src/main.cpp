@@ -91,6 +91,8 @@ constexpr BaseType_t kNetworkCore = 0;
 constexpr uint32_t kWifiSignalIntervalMs = 2000;
 // Сколько файловый сервер может молчать, прежде чем радио снова начнёт спать.
 constexpr uint32_t kWifiAwakeIdleMs = 10UL * 60UL * 1000UL;
+// Команда Z80 дольше — в журнал (0.1.130): всё это время ответа ждут и другие программы Z80.
+constexpr uint32_t kSlowCommandMs = 400;
 // Кристалл ESP горячее kWifiHotTenths — Wi-Fi в энергосбережении при любой работе
 // (радио без него — заметная часть нагрева); снова как обычно — ниже
 // kWifiCoolTenths: запас, чтобы не дёргать режим на границе. Десятые доли °C.
@@ -1927,6 +1929,7 @@ void Application::handle(const PacketView& packet) {
     case kVdiskReset:
     case kVdiskWrite:
     case kVdiskMode:
+    case kVdiskReadN:
       vdisk_service::handle(packet, transport_);
       break;
     case kTangWrite:
@@ -1982,7 +1985,14 @@ void Application::pollLink() {
 #if ZIFI_HAS_SPI_LINK
     coreStep(CoreStep::kCommand, packet.command);
 #endif
+    const uint32_t started = millis();
     handle(packet);
+    // Пока команда идёт, ответа ждут все программы Z80 (сторож плагина видео — 2 с): долгая — в
+    // журнал, только она (запись во flash останавливает кэш, периодических строк здесь нет)
+    const uint32_t took = millis() - started;
+    if (took >= kSlowCommandMs) {
+      bringupLog("zifi-cmd", "Z80 command %02X took %u ms", packet.command, static_cast<unsigned>(took));
+    }
   } else {
     // Та же пауза до 1 мс, что прежний delay(1), но заявка моста будит сразу.
     vfsBridge_.waitForRequest(1);

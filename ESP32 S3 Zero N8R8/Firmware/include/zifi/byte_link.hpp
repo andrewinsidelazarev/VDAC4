@@ -36,6 +36,17 @@ class ByteLink {
   // в буфер кадра через DMA, а DMA TS-Config ходит словами. Байт вне кадра Z80
   // пропускает, пока ищет SYNC, — и прежние программы тоже.
   virtual bool padsFrames() const { return false; }
+
+  // Секторы SD2 для резидента VDAC4 VFS (0.1.128): очередь блоков по 512 байт, которые Z80
+  // забирает своим DMA прямо в буфер WC (SpiLinkCore::kFlagSector). Канал без DMA их не умеет.
+  virtual bool sectorsAvailable() const { return false; }
+  // Номер сеанса Z80: серия идёт в сеансе, начатом перед её запросом.
+  virtual uint32_t sectorSession() const { return 0; }
+  // Положить сектор, дождавшись места. false — Z80 начала новый сеанс (серия отменена) либо
+  // timeoutMs не вела обмен (ушла из серии).
+  virtual bool pushSector(const uint8_t*, uint32_t, uint32_t) { return false; }
+  // Серия кончилась отказом источника: Z80 узнает, забрав уже положенное.
+  virtual void failSectors(uint32_t) {}
 };
 
 }  // namespace zifi

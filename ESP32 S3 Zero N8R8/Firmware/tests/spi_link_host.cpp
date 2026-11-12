@@ -13,6 +13,9 @@
 //   bulkdata                -> "<hex 512 байтов>"; блок, положенный ядром
 //   putavail <0/1>          -> "ok"; можно ли открыть приём блока от Z80
 //   putdata <hex>|-         -> "ok"; что «пришло» через DMA к следующим запросам
+//   secpush <сеанс> <hex 512> -> "1" либо "0"; сектор в очередь секторов
+//   secfail <сеанс>         -> "ok"; серия сеанса кончилась отказом
+//   secsession              -> "<номер сеанса>"
 // и для индикатора (include/zifi/status_led.hpp):
 //   led_reset               -> "ok"; индикатор как после включения
 //   led <мс> <канал 0/1> <обработано> <отвергнуто> <чтений> <тактов SCK> <спадов CS>
@@ -60,6 +63,7 @@ int main() {
   zifi::StatusLedLogic led;
   zifi::SpiLinkCore::BulkState bulk = zifi::SpiLinkCore::kBulkOff;
   static uint8_t bulkBuffer[zifi::SpiLinkCore::kBulkSize];
+  static uint8_t sectorStorage[zifi::SpiLinkCore::kSectorSlots * zifi::SpiLinkCore::kBulkSize];
   zifi::SpiLinkCore::PutInput put;
   std::vector<uint8_t> putData;
 
@@ -85,6 +89,7 @@ int main() {
       toStorage.assign(to, 0);
       const bool ok =
           core->begin(fromStorage.data(), from, toStorage.data(), to);
+      core->attachSectors(sectorStorage);
       printf(ok ? "ok\n" : "fail\n");
     } else if (strcmp(command, "led_reset") == 0) {
       led = zifi::StatusLedLogic();
@@ -136,6 +141,18 @@ int main() {
         put.receivedLength = putData.size();
       }
       printf("ok\n");
+    } else if (strcmp(command, "secpush") == 0) {
+      unsigned session = 0;
+      sscanf(rest, "%u", &session);
+      const char* hex = strchr(rest, ' ');
+      std::vector<uint8_t> data = fromHex(hex != nullptr ? hex + 1 : "");
+      data.resize(zifi::SpiLinkCore::kBulkSize, 0);
+      printf("%d\n", core->pushSector(data.data(), session) ? 1 : 0);
+    } else if (strcmp(command, "secfail") == 0) {
+      core->failSectors(static_cast<uint32_t>(strtoul(rest, nullptr, 10)));
+      printf("ok\n");
+    } else if (strcmp(command, "secsession") == 0) {
+      printf("%u\n", static_cast<unsigned>(core->sectorSession()));
     } else if (strcmp(command, "bulkdata") == 0) {
       printHex(bulkBuffer, sizeof(bulkBuffer));
     } else if (strcmp(command, "write") == 0) {
@@ -152,7 +169,7 @@ int main() {
       printHex(word, sizeof(word));
     } else if (strcmp(command, "stats") == 0) {
       const zifi::SpiLinkCore::Stats stats = core->stats();
-      printf("%u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+      printf("%u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
              static_cast<unsigned>(stats.turns),
              static_cast<unsigned>(stats.repeats),
              static_cast<unsigned>(stats.badRequests),
@@ -165,7 +182,9 @@ int main() {
              static_cast<unsigned>(stats.bulkBad),
              static_cast<unsigned>(stats.bulkGaveUp),
              static_cast<unsigned>(stats.putBlocks),
-             static_cast<unsigned>(stats.putBad));
+             static_cast<unsigned>(stats.putBad),
+             static_cast<unsigned>(stats.sectorBlocks),
+             static_cast<unsigned>(stats.sectorBad));
     } else {
       printf("unknown\n");
     }

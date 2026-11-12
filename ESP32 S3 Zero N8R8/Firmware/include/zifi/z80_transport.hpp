@@ -34,6 +34,8 @@ class Z80Transport {
 
   const FrameParser& parser() const { return parser_; }
   const char* linkName() const { return link_->name(); }
+  // Сам канал: секторы VDAC4 VFS идут мимо кадров (ByteLink::pushSector).
+  ByteLink& link() { return *link_; }
 
  private:
   static constexpr size_t kRxChunkSize = 256;

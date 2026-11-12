@@ -27,6 +27,7 @@ SpiLinkCore::SpiLinkCore()
       lastTid_(0),
       haveLast_(false),
       blockOut_(false),
+      blockSector_(false),
       bulkGaveUp_(false),
       blockTries_(0),
       blockInline_(0),
@@ -48,13 +49,23 @@ SpiLinkCore::SpiLinkCore()
       bulkBad_(0),
       bulkGaveUps_(0),
       putBlocks_(0),
-      putBad_(0) {}
+      putBad_(0),
+      sectorBlocks_(0),
+      sectorBad_(0),
+      sectorSlots_(nullptr),
+      slotSession_{},
+      sectorHead_(0),
+      sectorTail_(0),
+      sectorSession_(1),
+      sectorFailed_(0),
+      sectorWakes_(0) {}
 
 bool SpiLinkCore::begin(uint8_t* fromZ80Storage, size_t fromZ80Capacity,
                         uint8_t* toZ80Storage, size_t toZ80Capacity) {
   haveLast_ = false;
   lastLength_ = 0;
   blockOut_ = false;
+  blockSector_ = false;
   bulkGaveUp_ = false;
   blockTries_ = 0;
   blockInline_.store(0, std::memory_order_relaxed);
@@ -108,10 +119,12 @@ bool SpiLinkCore::handleRequest(const uint8_t* request, uint8_t* response,
   if ((flags & kFlagNewSession) != 0) {
     bulkGaveUp_ = false;
     putArmed_ = false;
+    newSectorSession();
   }
   if ((flags & kFlagDropToZ80) != 0) {
     toZ80_.discard(toZ80_.available());
     blockOut_ = false;
+    blockSector_ = false;
     blockInline_.store(0, std::memory_order_relaxed);
   }
   // Блок от Z80, записанный после прошлого «готова», встаёт в очередь раньше
@@ -188,11 +201,25 @@ bool SpiLinkCore::handleRequest(const uint8_t* request, uint8_t* response,
     }
   }
 
-  const bool wantsBulk = (flags & kFlagBulk) != 0 && bulkBuffer != nullptr;
+  const bool wantsSector = (flags & kFlagSector) != 0 && bulkBuffer != nullptr;
+  if (!wantsSector && length != 0) {
+    // Запрос с данными — не серия секторов: резидент VDAC4 VFS из серии ушёл (отказ, тайм-аут) либо
+    // её и не было. Служба VDISK не должна ждать места под брошенную серию и держать командный цикл
+    // ESP: ответ другой программе ждал бы до тишины Z80 (3 с). 12.11.2026 на плате плагин видео
+    // молчал больше 2 с посреди чтений SD2 — сторож VIDEO.ELF вернул слот 0 (причина не доказана).
+    newSectorSession();
+  }
+  if (blockOut_ && blockSector_ && !wantsSector) {
+    // Сектор так и не подтвердили: программа Z80 вышла из серии. Если его не прочитали, следующий
+    // запрос блока получит его как устаревший.
+    blockOut_ = false;
+    blockSector_ = false;
+  }
+  const bool wantsBulk = !wantsSector && (flags & kFlagBulk) != 0 && bulkBuffer != nullptr;
   size_t inlineLeft = blockInline_.load(std::memory_order_relaxed);
   uint8_t bulkStatus = 0;
   // Блок, отданный раньше и ещё не подтверждённый.
-  if (blockOut_ && inlineLeft == 0) {
+  if (blockOut_ && !blockSector_ && inlineLeft == 0) {
     if (bulk == kBulkEchoed) {
       blockOut_ = false;
     } else if (wantsBulk) {
@@ -229,6 +256,55 @@ bool SpiLinkCore::handleRequest(const uint8_t* request, uint8_t* response,
                             std::memory_order_relaxed);
     }
   }
+  // Сектор (kFlagSector): тот же DMA со сверкой, но из очереди секторов, данных в ответе нет.
+  if (wantsSector) {
+    room = 0;
+    if (blockOut_ && !blockSector_) {
+      // Блок очереди кадров у программы, которая из канала ушла (её сеанс сброшен обычно раньше).
+      blockOut_ = false;
+      inlineLeft = 0;
+    }
+    if (blockOut_) {
+      if (bulk == kBulkEchoed) {
+        blockOut_ = false;
+        blockSector_ = false;
+        sectorBlocks_.fetch_add(1, std::memory_order_relaxed);
+      } else if (bulk == kBulkLoaded) {
+        bulkStatus = kStatusBulk;              // Z80 его ещё не читала
+      } else {
+        sectorBad_.fetch_add(1, std::memory_order_relaxed);
+        ++blockTries_;
+        if (bulk == kBulkFree && blockTries_ < kBulkAttempts) {
+          bulkStatus = kStatusBulk | kStatusEchoBad;
+        } else {
+          blockOut_ = false;                   // DMA не работает: серия оборвана
+          blockSector_ = false;
+          bulkStatus = kStatusEchoBad;
+        }
+      }
+    }
+    if (bulkStatus == 0 && !blockOut_) {
+      if (bulk == kBulkLoaded) {
+        bulkStatus = kStatusBulk | kStatusBulkStale;
+      } else if (bulk == kBulkOff || sectorSlots_ == nullptr) {
+        bulkStatus = kStatusBulkStale;         // DMA нет: серии не будет
+      } else {
+        // Отказ смотрится до взятия: всё положенное раньше отказа отдаётся первым.
+        const bool failed = sectorFailed_.load(std::memory_order_acquire) ==
+                            sectorSession_.load(std::memory_order_relaxed);
+        if (takeSector(bulkBuffer)) {
+          blockOut_ = true;
+          blockSector_ = true;
+          blockTries_ = 0;
+          bulkStatus = kStatusBulk;
+          bytesToZ80_.fetch_add(static_cast<uint32_t>(kBulkSize), std::memory_order_relaxed);
+        } else if (failed) {
+          sectorFailed_.store(0, std::memory_order_relaxed);
+          bulkStatus = kStatusBulkStale;
+        }
+      }
+    }
+  }
   // Данные в ответе: сначала остаток блока, от DMA которого отказались, потом
   // очередь. За неподтверждённым блоком очередь ждёт.
   size_t sent = 0;
@@ -248,10 +324,12 @@ bool SpiLinkCore::handleRequest(const uint8_t* request, uint8_t* response,
 
   response[0] = kResponseMarker;
   response[1] = tid;
-  // Неподтверждённый блок — тоже данные для Z80: о нём она должна спросить.
-  blockPending_.store(blockOut_, std::memory_order_relaxed);
+  // Неподтверждённый блок — тоже данные для Z80: о нём она должна спросить. Сектор — нет: его
+  // забирает только резидент, который о серии знает сам.
+  const bool ringBlock = blockOut_ && !blockSector_;
+  blockPending_.store(ringBlock, std::memory_order_relaxed);
   response[2] = static_cast<uint8_t>(
-      (toZ80_.available() != 0 || blockOut_ ? kStatusMore : 0) | bulkStatus |
+      (toZ80_.available() != 0 || ringBlock ? kStatusMore : 0) | bulkStatus |
       putStatus);
   response[3] = static_cast<uint8_t>(sent);
   response[4] = static_cast<uint8_t>(accepted);
@@ -326,7 +404,73 @@ SpiLinkCore::Stats SpiLinkCore::stats() const {
   result.bulkGaveUp = bulkGaveUps_.load(std::memory_order_relaxed);
   result.putBlocks = putBlocks_.load(std::memory_order_relaxed);
   result.putBad = putBad_.load(std::memory_order_relaxed);
+  result.sectorBlocks = sectorBlocks_.load(std::memory_order_relaxed);
+  result.sectorBad = sectorBad_.load(std::memory_order_relaxed);
   return result;
+}
+
+void SpiLinkCore::attachSectors(uint8_t* storage) {
+  sectorSlots_ = storage;
+}
+
+uint32_t SpiLinkCore::sectorSession() const {
+  return sectorSession_.load(std::memory_order_acquire);
+}
+
+bool SpiLinkCore::pushSector(const uint8_t* data, uint32_t session) {
+  if (data == nullptr || sectorSlots_ == nullptr || session != sectorSession()) {
+    return false;
+  }
+  const uint32_t tail = sectorTail_.load(std::memory_order_relaxed);
+  if (tail - sectorHead_.load(std::memory_order_acquire) >= kSectorSlots) {
+    return false;
+  }
+  const size_t slot = tail % kSectorSlots;
+  memcpy(sectorSlots_ + slot * kBulkSize, data, kBulkSize);
+  slotSession_[slot] = session;
+  sectorTail_.store(tail + 1, std::memory_order_release);
+  return true;
+}
+
+void SpiLinkCore::failSectors(uint32_t session) {
+  sectorFailed_.store(session, std::memory_order_release);
+}
+
+uint32_t SpiLinkCore::sectorWakes() const {
+  return sectorWakes_.load(std::memory_order_relaxed);
+}
+
+bool SpiLinkCore::takeSector(uint8_t* output) {
+  const uint32_t session = sectorSession_.load(std::memory_order_relaxed);
+  uint32_t head = sectorHead_.load(std::memory_order_relaxed);
+  const uint32_t tail = sectorTail_.load(std::memory_order_acquire);
+  bool taken = false;
+  while (head != tail && !taken) {
+    const size_t slot = head % kSectorSlots;
+    ++head;
+    if (slotSession_[slot] == session) {
+      memcpy(output, sectorSlots_ + slot * kBulkSize, kBulkSize);
+      taken = true;
+    }
+  }
+  if (head != sectorHead_.load(std::memory_order_relaxed)) {
+    sectorHead_.store(head, std::memory_order_release);
+    sectorWakes_.fetch_add(1, std::memory_order_relaxed);
+  }
+  return taken;
+}
+
+void SpiLinkCore::newSectorSession() {
+  // Сеанс меняется до сброса очереди: сектор, который служба кладёт прямо сейчас, получит
+  // прежнюю метку и при взятии выбросится.
+  sectorSession_.fetch_add(1, std::memory_order_acq_rel);
+  sectorHead_.store(sectorTail_.load(std::memory_order_acquire), std::memory_order_release);
+  sectorFailed_.store(0, std::memory_order_relaxed);
+  if (blockSector_) {
+    blockOut_ = false;
+    blockSector_ = false;
+  }
+  sectorWakes_.fetch_add(1, std::memory_order_relaxed);
 }
 
 }  // namespace zifi

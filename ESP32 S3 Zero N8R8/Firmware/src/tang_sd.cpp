@@ -33,6 +33,10 @@ constexpr uint32_t kMinNes = 0x0007;
 // мостом прошивка не нужна. 02 (FT812) и 03 (Next: своя карта у NextZXOS) моста не имеют.
 constexpr uint32_t kPersonalityAmiga = 0x05;
 constexpr uint32_t kPersonalityLast = 0x7F;
+// Ядро видео (личность тоже 05, ts_fb_core HAS_VIDEO): с 1.47 — мост по своим адресам
+// (kSdLayoutVideo: 0x100… там звук). Узнаётся по регистру BOOT: [31:20] 0xB01 (0xB00 — TS-Config, FT812).
+constexpr uint32_t kMinVideo = 0x012F;
+constexpr uint32_t kBootTagVideo = 0xB01;
 
 bool linkRead(void*, uint32_t address, uint32_t* words, size_t count) {
   return tang::read(address, words, count);
@@ -62,6 +66,19 @@ uint32_t g_reloads = 0;      // перезагрузок ПЛИС при мон�
 bool g_mounted = false;
 
 bool sameCore() { return tang::ready() && tang::reloads() == g_reloads; }
+
+// Ядро на LINK — ядро видео (BOOT [31:20] = 0xB01)? Версию проверяет вызывающий.
+bool isVideoCore() {
+  uint32_t boot = 0;
+  return (tang::coreVersion() >> 24) == kPersonalityAmiga && tang::read(tang::kRegBoot, &boot, 1) &&
+         (boot >> 20) == kBootTagVideo;
+}
+
+// Раскладка моста ядра на LINK: ядро видео 1.47+ — своя, прочие — прежняя
+void chooseLayout() {
+  const bool video = isVideoCore() && (tang::coreVersion() & 0xFFFF) >= kMinVideo;
+  g_card.setLayout(video ? kSdLayoutVideo : kSdLayoutStd);
+}
 
 DSTATUS diskInit(BYTE) { return g_card.ready() && sameCore() ? 0 : STA_NOINIT; }
 DSTATUS diskStatus(BYTE) { return g_card.ready() && sameCore() ? 0 : STA_NOINIT; }
@@ -164,6 +181,7 @@ const char* mount() {
     bool present = false;
     {
       tang::LinkGuard guard;
+      chooseLayout();
       present = g_card.present();
     }
     if (!present) {
@@ -174,6 +192,9 @@ const char* mount() {
   const char* problem = nullptr;
   {
     tang::LinkGuard guard;
+    if (ts) {
+      g_card.setLayout(kSdLayoutStd);
+    }
     problem = g_card.init();
   }
   if (problem != nullptr) {
@@ -234,14 +255,46 @@ bool readBlocks(uint32_t lba, uint8_t* data, uint32_t count) {
   return g_card.read(lba, data, count);
 }
 
+// Удерживаемая карта после смены ядра: подключиться к мосту нового ядра. Только TS-Config 1.30+ и
+// ядро видео 1.47+ — они карту сами не пишут (их меняет ESP: видео с SD2 и назад); прочие (Next,
+// NES, Amiga …) могли писать её сами — кэш WC уже не про неё, такое удержание не подключается.
+bool attachHeld() {
+  if (sameCore()) {
+    return true;
+  }
+  if (!tang::ready()) {
+    return false;
+  }
+  const uint32_t version = tang::coreVersion();
+  const bool ts = (version >> 24) == kPersonalityTs && (version & 0xFFFF) >= kMinCore;
+  const char* problem = nullptr;
+  {
+    tang::LinkGuard guard;
+    const bool video = !ts && isVideoCore() && (version & 0xFFFF) >= kMinVideo;
+    if (!ts && !video) {
+      return false;
+    }
+    g_card.setLayout(video ? kSdLayoutVideo : kSdLayoutStd);
+    problem = g_card.init();
+  }
+  if (problem != nullptr) {
+    bringupLog(kTag, "card held by WC, core %08X: %s", static_cast<unsigned>(version), problem);
+    return false;
+  }
+  g_reloads = tang::reloads();
+  bringupLog(kTag, "card held by WC: attached to core %08X", static_cast<unsigned>(version));
+  return true;
+}
+
 const char* holdForWc() {
   Session session(kQuickMs);
   if (!session.ok()) {
     return kBusy;
   }
   if (heldByWc()) {
-    // Ядро сменилось под картой: кэш WC уже не про неё — только снять SD2 и подключить заново
-    return sameCore() ? nullptr : "the Tang core changed while WC held the card: switch SD2 off in F10";
+    // Ядро сменилось под картой: в TS-Config и ядре видео — подключиться заново; в прочих кэш WC
+    // уже не про неё — только снять SD2 и подключить заново
+    return attachHeld() ? nullptr : "the Tang core changed while WC held the card: switch SD2 off in F10";
   }
   unmount();                    // FatFs ESP — вон: после записей WC её FAT и каталоги были бы чужими
   if (!tang::ready()) {
@@ -255,6 +308,7 @@ const char* holdForWc() {
   const char* problem = nullptr;
   {
     tang::LinkGuard guard;
+    g_card.setLayout(kSdLayoutStd);
     problem = g_card.init();
   }
   if (problem != nullptr) {
@@ -281,7 +335,7 @@ void releaseFromWc() {
 
 bool rawRead(uint32_t lba, uint8_t* data) {
   Session session(kQuickMs);
-  if (!session.ok() || !heldByWc() || !sameCore()) {
+  if (!session.ok() || !heldByWc() || !attachHeld()) {
     return false;
   }
   tang::LinkGuard guard;
@@ -290,11 +344,29 @@ bool rawRead(uint32_t lba, uint8_t* data) {
 
 bool rawWrite(uint32_t lba, const uint8_t* data) {
   Session session(kQuickMs);
-  if (!session.ok() || !heldByWc() || !sameCore()) {
+  if (!session.ok() || !heldByWc() || !attachHeld()) {
     return false;
   }
   tang::LinkGuard guard;
-  return g_card.write(lba, data, 1);
+  return g_card.write(lba, data, 1);    // ядро видео: TX — только команды, запись — отказ
+}
+
+bool rawStream(uint32_t lba, uint32_t blocks, bool* crcError) {
+  *crcError = false;
+  Session session;
+  if (!heldByWc() || !attachHeld() || g_card.layout().strm == 0) {
+    return false;
+  }
+  return g_card.stream(lba, blocks, crcError);   // LINK — по обмену, не на весь поток
+}
+
+bool videoBridge() {
+  Session session(kQuickMs);
+  if (!session.ok() || !tang::ready()) {
+    return false;
+  }
+  tang::LinkGuard guard;
+  return isVideoCore() && (tang::coreVersion() & 0xFFFF) >= kMinVideo;
 }
 
 // Быстрый поиск FatFs: без таблицы переход назад по большому файлу проходит цепочку кластеров

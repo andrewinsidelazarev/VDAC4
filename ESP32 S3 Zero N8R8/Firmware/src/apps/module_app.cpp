@@ -30,12 +30,14 @@
 #include "zifi/ft_host.hpp"
 #include "zifi/tang_link.hpp"
 #include "zifi/tang_sd.hpp"
+#include "zifi/sd2_files.hpp"
 #include "zifi/tang_files.hpp"
 
 namespace {
 // Файлы-диски приложения (sd_open): вне ModuleApp, у Application бюджет статической памяти ядра 1.
 constexpr size_t kMaxDiskFiles = 4;
 void* g_diskFiles[kMaxDiskFiles] = {};
+void* g_sd2Files[kMaxDiskFiles] = {};       // sd2_open (видео с SD2)
 }  // namespace
 #include "zifi/flash_fs.hpp"
 #include "zifi/http_stream.hpp"
@@ -268,6 +270,12 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.link_media = coreLinkMedia;
   core_.handoff_put = coreHandoffPut;
   core_.handoff_take = coreHandoffTake;
+  core_.sd2_open = coreSd2Open;
+  core_.sd2_read = coreSd2Read;
+  core_.sd2_stream = coreSd2Stream;
+  core_.sd2_close = coreSd2Close;
+  core_.link_burst = coreLinkBurst;
+  core_.pcm_low_latency = corePcmLowLatency;
 }
 
 void ModuleApp::begin() {
@@ -1074,6 +1082,9 @@ void ModuleApp::stopApp() {
     if (g_diskFiles[i] != nullptr) {
       coreSdClose(g_diskFiles[i]);
     }
+    if (g_sd2Files[i] != nullptr) {
+      coreSd2Close(g_sd2Files[i]);
+    }
   }
   // Приложение загрузило ядро из кэша BL616 (ZX Next): Tang — назад в TS-Config. Ядро ещё грузится —
   // вернёт задача загрузки, когда кончит. Возврат не вышел — ядро остаётся без хозяина, и задача
@@ -1105,6 +1116,7 @@ void ModuleApp::stopApp() {
       module = LoadedModule{};
     }
   }
+  player_.pcmLowLatency(false);           // короткий DMA — только этому приложению
   player_.pcmClose();
   freeAllocations();
   unloadElf(appElf_);
@@ -1704,6 +1716,9 @@ int ModuleApp::coreCoreBack(uint32_t timeoutMs) {
     return tang::ready() ? ZM_TIMEOUT : ZM_ERROR;
   }
   instance_->coreLoaded_ = false;
+  if (tang_sd::heldByWc()) {
+    tang_sd::holdForWc();             // карта у WC (видео с SD2): снова к мосту TS-Config
+  }
   return ZM_OK;
 #else
   (void)timeoutMs;
@@ -2099,6 +2114,63 @@ int ModuleApp::coreSdCreate(const char* path, uint32_t sectors) {
 #else
   return ZM_ERROR;
 #endif
+}
+
+int ModuleApp::coreSd2Open(uint32_t cluster, uint32_t size, void** file, int* raw) {
+  if (file == nullptr) return ZM_ERROR;
+  *file = nullptr;
+  if (raw != nullptr) *raw = 0;
+  size_t slot = 0;
+  while (slot < kMaxDiskFiles && g_sd2Files[slot] != nullptr) ++slot;
+  if (slot == kMaxDiskFiles) return ZM_ERROR;
+  sd2_files::File* opened = nullptr;
+  const int result = sd2_files::open(cluster, size, &opened);
+  if (result != 0) return result == 1 ? ZM_NOT_FOUND : ZM_ERROR;
+  g_sd2Files[slot] = opened;
+  *file = opened;
+  if (raw != nullptr) *raw = sd2_files::raw(opened) ? 1 : 0;
+  return ZM_OK;
+}
+
+int ModuleApp::coreSd2Read(void* file, uint32_t offset, uint8_t* data, uint32_t count, uint32_t* got) {
+  uint32_t done = 0;
+  const bool ok = file != nullptr && data != nullptr &&
+                  sd2_files::read(static_cast<sd2_files::File*>(file), offset, data, count, &done);
+  if (got != nullptr) *got = done;
+  return ok ? ZM_OK : ZM_ERROR;
+}
+
+int ModuleApp::coreSd2Stream(void* file, uint32_t offset, uint32_t count, uint32_t* crcErrors) {
+  uint32_t crc = 0;
+  const int r = file == nullptr ? 1 : sd2_files::stream(static_cast<sd2_files::File*>(file), offset, count, &crc);
+  if (crcErrors != nullptr) *crcErrors = crc;
+  return r == 0 ? ZM_OK : r == 1 ? ZM_NOT_FOUND : ZM_ERROR;
+}
+
+void ModuleApp::coreSd2Close(void* file) {
+  if (file == nullptr) return;
+  for (size_t i = 0; i < kMaxDiskFiles; ++i) {
+    if (g_sd2Files[i] == file) {
+      g_sd2Files[i] = nullptr;
+      sd2_files::close(static_cast<sd2_files::File*>(file));
+      return;
+    }
+  }
+}
+
+int ModuleApp::coreLinkBurst(uint32_t address, const uint32_t* words, uint32_t count) {
+#if ZIFI_HAS_SPI_LINK
+  return words != nullptr && (address & 3) == 0 && count > 0 && tang::writeBurst(address, words, count)
+             ? ZM_OK
+             : ZM_ERROR;
+#else
+  (void)address; (void)words; (void)count;
+  return ZM_ERROR;
+#endif
+}
+
+uint32_t ModuleApp::corePcmLowLatency(int on) {
+  return instance_->player_.pcmLowLatency(on != 0);
 }
 
 void ModuleApp::coreAppDone() {

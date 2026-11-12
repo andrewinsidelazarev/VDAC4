@@ -11,7 +11,10 @@ namespace zifi {
 // write; на ПК — модель моста и карты, tests/sd_bridge_host.cpp).
 //
 // Регистры моста (LINK): 0x100 SD_CTRL, 0x104 SD_PTR, 0x108 SD_CMD / SD_STAT; буферы TX и RX —
-// окно 0x2000…0x27FC (запись — TX, чтение — RX), байт 0 — старший байт слова.
+// окно 0x2000…0x27FC (запись — TX, чтение — RX), байт 0 — старший байт слова. В ядре видео 1.47
+// (там 0x100… и окно 0x2000 — звук) — 0x110…, TX в окне 0x2000 (16 слов: только команды), RX — 0x3000,
+// и операция STREAM: блоки CMD18 мимо ESP — в медиа-FIFO ядра (stream). Раскладку выбирает
+// вызывающий (setLayout) по ядру на LINK.
 //
 // Блок — 512 байтов. Чтение — CMD17 на блок, CRC16 сверяется (не сошлось — ещё две попытки),
 // запись — CMD24 с CRC16, ответ данных и ожидание конца записи. SDSC адресуется байтами, SDHC и
@@ -26,6 +29,18 @@ struct SdBridgeIo {
   void (*yield)(void* ctx);
 };
 
+// Раскладка моста в ядре: адреса LINK (байтовые)
+struct SdBridgeLayout {
+  uint32_t ctrl, ptr, cmd;      // SD_CTRL, SD_PTR, SD_CMD / SD_STAT
+  uint32_t strm;                // SD_STRM операции STREAM; 0 — её нет
+  uint32_t txWindow, rxWindow;  // окно TX (запись) и RX (чтение)
+  uint32_t txWords;             // слов TX: меньше 129 — блок не записать (ядро видео)
+};
+// TS-Config 1.30+, NES 0.7+, Amiga, Mega Drive и прочие ядра с мостом по прежним адресам
+extern const SdBridgeLayout kSdLayoutStd;
+// Ядро видео 1.47+ (личность 05, HAS_VIDEO): только чтение и STREAM в медиа-FIFO
+extern const SdBridgeLayout kSdLayoutVideo;
+
 class SdBridgeCard {
  public:
   static constexpr uint32_t kRegCtrl = 0x100;
@@ -36,6 +51,10 @@ class SdBridgeCard {
   static constexpr uint32_t kBlock = 512;
 
   explicit SdBridgeCard(const SdBridgeIo& io) : io_(io) {}
+
+  // Раскладка ядра на LINK (по умолчанию — kSdLayoutStd). Ядро сменилось — снова init().
+  void setLayout(const SdBridgeLayout& layout) { layout_ = &layout; }
+  const SdBridgeLayout& layout() const { return *layout_; }
 
   // Мост есть (SD_STAT[31:16] = 0x5D01; в ядре FT812 и до 1.30 его нет).
   bool present();
@@ -48,7 +67,13 @@ class SdBridgeCard {
   uint32_t sckKhz() const { return sckKhz_; }
 
   bool read(uint32_t lba, uint8_t* data, uint32_t count);
-  bool write(uint32_t lba, const uint8_t* data, uint32_t count);
+  bool write(uint32_t lba, const uint8_t* data, uint32_t count);   // TX мал (ядро видео) — false
+  // Поток (ядро видео 1.47, операция STREAM): CMD18 с блока lba, blocks целых блоков (1…4095) — в
+  // медиа-FIFO ядра, в конце CMD12. Ход операции опрашивается с yield между опросами: LINK не
+  // занят на всё время потока (звук и оверлеи ядра идут). *crcError — в каком-то блоке CRC16 не
+  // сошёлся (данные уже в FIFO: повтора нет). false — STREAM нет, карта не ответила или поток
+  // оборвался (сколько блоков ушло — не известно: поток начинать заново).
+  bool stream(uint32_t lba, uint32_t blocks, bool* crcError);
   // CS неактивен (между сеансами карта не держит шину)
   void release();
 
@@ -57,7 +82,7 @@ class SdBridgeCard {
   uint32_t errors() const { return errors_; }
 
  private:
-  static constexpr uint32_t kXfer = 0, kFill = 1, kWait = 2, kReadOp = 3, kBusy = 4;
+  static constexpr uint32_t kXfer = 0, kFill = 1, kWait = 2, kReadOp = 3, kBusy = 4, kStream = 5;
   uint32_t lastYieldMs_ = 0;            // когда операция моста последний раз отдавала процессор
 
   bool setCtrl(uint32_t div, bool cs);
@@ -72,8 +97,10 @@ class SdBridgeCard {
   bool readBlock(uint32_t lba, uint8_t* data);
   bool writeBlock(uint32_t lba, const uint8_t* data);
   bool readCsd(uint8_t csd[16]);
+  bool stopTransmission();      // CMD12: команда, байт мусора, R1, конец «занята»
 
   const SdBridgeIo& io_;
+  const SdBridgeLayout* layout_ = &kSdLayoutStd;
   uint32_t clk10k_ = 0;
   uint32_t divFast_ = 0;
   uint32_t div_ = 0xFF;      // полупериод SCK − 1, что сейчас в SD_CTRL

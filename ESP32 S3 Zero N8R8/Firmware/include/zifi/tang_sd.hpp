@@ -64,16 +64,27 @@ void describe(char* out, size_t size);
 
 // Карта отдана WC посекторно (VDAC4 VFS, режим «SD2 = карта Tang»): файловую систему ведёт CORE32
 // WC, поэтому FatFs ESP карту не монтирует (mount отвечает kHeldByWc), а ядро Tang не меняется
-// (core_store, переход в ядро FT, tang boot): мост к карте есть только в TS-Config, а чужие записи
-// под кэшем WC испортили бы FAT. Снимает переключатель (F10) и резидент при старте WC.
+// (core_store, переход в ядро FT, tang boot): чужие записи под кэшем WC испортили бы FAT. Одно
+// исключение (1.47, 11.11.2026) — ядро видео из слота 3: карту оно само не трогает, мост в нём
+// есть (только чтение и поток STREAM в медиа-FIFO) — видео с SD2 WC. После смены ядра удержание
+// подключается к мосту нового ядра само, при первом обращении (только TS-Config 1.30+ и ядро
+// видео 1.47+; прочие ядра карту пишут сами — их не ждём). Снимает переключатель (F10) и резидент
+// при старте WC.
 constexpr const char* kHeldByWc = "the Tang SD card is held by WC (SD2): switch SD2 back in F10 VDAC4 VFS";
 bool heldByWc();
 void setHeldByWc(bool held);  // только для tang_sd.cpp (флаг — в tang_sd_hold.cpp)
 const char* holdForWc();      // nullptr — карта готова к секторам WC; повторный вызов — проверка
 void releaseFromWc();
 bool rawRead(uint32_t lba, uint8_t* data);           // один блок 512 байт; false — нет захвата,
-bool rawWrite(uint32_t lba, const uint8_t* data);    // ядро сменилось или карта не ответила
+bool rawWrite(uint32_t lba, const uint8_t* data);    // ядро без моста к ней или карта не ответила
 uint32_t rawSectors();
+// Удерживаемая карта: blocks целых блоков CMD18 с lba мимо ESP — в медиа-FIFO ядра видео 1.47
+// (SdBridgeCard::stream). Session держится всё время потока (обращения WC ждут его конца, kQuickMs),
+// LINK — нет. *crcError — CRC16 какого-то блока не сошёлся. false — не ядро видео 1.47+, нет
+// захвата, отказ карты.
+bool rawStream(uint32_t lba, uint32_t blocks, bool* crcError);
+// Ядро на LINK — ядро видео с мостом и потоком STREAM (1.47+).
+bool videoBridge();
 
 }  // namespace tang_sd
 }  // namespace zifi

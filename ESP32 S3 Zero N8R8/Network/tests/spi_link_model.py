@@ -31,6 +31,8 @@ FLAG_MEDIA = 0x10
 APP_MEDIA_PREFIX = 8
 STATUS_PUT_READY, STATUS_PUT_OK, STATUS_PUT_BAD, STATUS_PUT_CAPABLE = 0x10, 0x20, 0x40, 0x80
 BULK_OFF, BULK_FREE, BULK_LOADED, BULK_ECHOED = 0, 1, 2, 3
+# Секторы SD2 для резидента VDAC4 VFS (0.1.128): флаг запроса и секторов наперёд в очереди.
+FLAG_SECTOR, SECTOR_SLOTS = 0x20, 4
 
 CMD_WRBUF, CMD_RDBUF = 0x01, 0x02
 # Передача блоков через DMA ведомого: ведущий пишет, читает, завершает запись и чтение.
@@ -74,6 +76,28 @@ class LinkCore:
         self.put_command = 0x31
         self.put_prefix = b""
         self.put_blocks = self.put_bad = 0
+        # Очередь секторов (SpiLinkCore::pushSector): (сеанс, 512 байт).
+        self.block_sector = False       # неподтверждённый блок — сектор
+        self.sectors: list[tuple[int, bytes]] = []
+        self.sector_session = 1
+        self.sector_failed = 0
+        self.sector_blocks = self.sector_bad = 0
+
+    def push_sector(self, data: bytes, session: int) -> bool:
+        if session != self.sector_session or len(self.sectors) >= SECTOR_SLOTS:
+            return False
+        self.sectors.append((session, bytes(data)))
+        return True
+
+    def fail_sectors(self, session: int) -> None:
+        self.sector_failed = session
+
+    def _take_sector(self) -> bytes | None:
+        while self.sectors:
+            session, data = self.sectors.pop(0)
+            if session == self.sector_session:
+                return data
+        return None
 
     def handle_request(self, data: bytes, bulk: int = BULK_OFF, *, put_available: bool = False,
                        put_received: bytes | None = None) -> bytes | None:
@@ -90,9 +114,15 @@ class LinkCore:
         if flags & FLAG_SESSION:
             self.gave_up = False
             self.put_armed = False
+            self.sector_session += 1
+            self.sectors.clear()
+            self.sector_failed = 0
+            if self.block_sector:
+                self.block_out = self.block_sector = False
         if flags & FLAG_DROP:
             self.to_z80.clear()
             self.block_out = False
+            self.block_sector = False
             self.block_inline = 0
         put_status = STATUS_PUT_CAPABLE if put_available else 0
         if flags & FLAG_PUT_DONE:
@@ -144,9 +174,19 @@ class LinkCore:
                 self.put_media = False
                 self.put_size = BULK_SIZE
                 put_status |= STATUS_PUT_READY
-        wants = bool(flags & FLAG_BULK)
+        wants_sector = bool(flags & FLAG_SECTOR)
+        if not wants_sector and length:
+            # запрос с данными — не серия: брошенная серия отменяется (SpiLinkCore::newSectorSession)
+            self.sector_session += 1
+            self.sectors.clear()
+            self.sector_failed = 0
+            if self.block_sector:
+                self.block_out = self.block_sector = False
+        if self.block_out and self.block_sector and not wants_sector:
+            self.block_out = self.block_sector = False
+        wants = not wants_sector and bool(flags & FLAG_BULK)
         bulk_status = 0
-        if self.block_out and not self.block_inline:
+        if self.block_out and not self.block_sector and not self.block_inline:
             if bulk == BULK_ECHOED:
                 self.block_out = False
             elif wants:
@@ -172,6 +212,41 @@ class LinkCore:
                 self.block_tries = 0
                 self.bulk_blocks += 1
                 bulk_status = STATUS_BULK
+        if wants_sector:
+            room = 0
+            if self.block_out and not self.block_sector:
+                self.block_out = False
+                self.block_inline = 0
+            if self.block_out:
+                if bulk == BULK_ECHOED:
+                    self.block_out = self.block_sector = False
+                    self.sector_blocks += 1
+                elif bulk == BULK_LOADED:
+                    bulk_status = STATUS_BULK
+                else:
+                    self.sector_bad += 1
+                    self.block_tries += 1
+                    if bulk == BULK_FREE and self.block_tries < BULK_ATTEMPTS:
+                        bulk_status = STATUS_BULK | STATUS_ECHO_BAD
+                    else:
+                        self.block_out = self.block_sector = False
+                        bulk_status = STATUS_ECHO_BAD
+            if not bulk_status and not self.block_out:
+                if bulk == BULK_LOADED:
+                    bulk_status = STATUS_BULK | STATUS_BULK_STALE
+                elif bulk == BULK_OFF:
+                    bulk_status = STATUS_BULK_STALE
+                else:
+                    failed = self.sector_failed == self.sector_session
+                    data_sector = self._take_sector()
+                    if data_sector is not None:
+                        self.bulk_data = data_sector
+                        self.block_out = self.block_sector = True
+                        self.block_tries = 0
+                        bulk_status = STATUS_BULK
+                    elif failed:
+                        self.sector_failed = 0
+                        bulk_status = STATUS_BULK_STALE
         sent = b""
         if room and not bulk_status & STATUS_BULK:
             if self.block_inline:
@@ -183,7 +258,7 @@ class LinkCore:
             elif not self.block_out:
                 sent = bytes(self.to_z80[:room])
                 del self.to_z80[:room]
-        more = STATUS_MORE if self.to_z80 or self.block_out else 0
+        more = STATUS_MORE if self.to_z80 or (self.block_out and not self.block_sector) else 0
         body = bytes([RESPONSE, tid, more | bulk_status | put_status, len(sent), accepted]) + sent
         response = body + bytes([checksum(body)])
         self.last_tid, self.last_response = tid, response
@@ -193,7 +268,7 @@ class LinkCore:
         return response
 
     def state_word(self, nonce: int = 0) -> bytes:
-        pending = self.to_z80 or self.block_out
+        pending = self.to_z80 or (self.block_out and not self.block_sector)
         return bytes([STATE_PENDING if pending else STATE_EMPTY, MAGIC, getattr(self,"version",VERSION), nonce])
 
     def write(self, data: bytes) -> int:
@@ -470,6 +545,9 @@ class SpiPorts:
         # Неисправная линия MISO: ведущий читает только это значение, хотя
         # ведомый по-прежнему слышит всё, что ему передают.
         self.miso_stuck: int | None = None
+        # DMA TS-Config адресует физическую страницу, стоит она в окне или нет. Стенд с полной
+        # моделью страниц (VDAC4 VFS) даёт locate(страница, смещение) -> (буфер, индекс).
+        self.locate = None
 
     def _miso(self, value: int) -> int:
         return value if self.miso_stuck is None else self.miso_stuck
@@ -508,20 +586,26 @@ class SpiPorts:
             return False
         return True
 
-    def _dma_address(self, base: int, count: int) -> int:
-        """Адрес в памяти Z80 по трём регистрам DMA с номера base."""
-        window = self.windows.get(self.dma.get(base + 2))
-        if window is None:
-            raise AssertionError(f"DMA: страница #{self.dma.get(base + 2)} не стоит ни в одном окне")
+    def _dma_place(self, base: int, count: int) -> tuple:
+        """(буфер, индекс) по трём регистрам DMA с номера base."""
+        page = self.dma.get(base + 2)
         if self.dma[base] & 1:
             raise AssertionError("DMA: нечётный адрес — младший разряд теряется")
         offset = (self.dma[base + 1] & 0x3F) << 8 | self.dma[base]
         if offset + count > 0x4000:
             raise AssertionError("DMA выходит за окно")
-        return window + offset
+        if self.locate is not None:
+            return self.locate(page, offset)
+        window = self.windows.get(page)
+        if window is None:
+            raise AssertionError(f"DMA: страница #{page} не стоит ни в одном окне")
+        return self.memory, window + offset
 
-    def _written(self, address: int, count: int) -> None:
-        self.dma_dirty.append((self.dma[0x1F], address & 0x3FFF, (address & 0x3FFF) + count))
+    def _written(self, offset: int, count: int) -> None:
+        self.dma_dirty.append((self.dma[0x1F], offset, offset + count))
+
+    def _offset(self, base: int) -> int:
+        return (self.dma[base + 1] & 0x3F) << 8 | self.dma[base]
 
     def clean(self, start: int, end: int) -> bool:
         """Можно ли Z80 читать [start, end): DMA туда после SpiLink_Sweep не писал."""
@@ -538,27 +622,27 @@ class SpiPorts:
             raise AssertionError(f"DMA: неожиданные разряды режима #{mode:02X}")
         count = 2 * (self.dma[0x26] + 1) * (self.dma[0x28] + 1)
         if mode == 0x01:                # ОЗУ -> ОЗУ: словами вперёд
-            source = self._dma_address(0x1A, count)
-            target = self._dma_address(0x1D, count)
-            if source < target < source + count:
+            src_buf, source = self._dma_place(0x1A, count)
+            dst_buf, target = self._dma_place(0x1D, count)
+            if src_buf is dst_buf and source < target < source + count:
                 raise AssertionError("DMA: приёмник внутри источника")
-            self.memory[target:target + count] = bytes(self.memory[source:source + count])
-            self._written(target, count)
+            dst_buf[target:target + count] = bytes(src_buf[source:source + count])
+            self._written(self._offset(0x1D), count)
             self.dma_runs.append((mode, count))
             return
         if mode & 0x07 != 0x02:
             raise AssertionError(f"DMA: устройство {mode & 7}, а не SPI")
         to_device = bool(mode & 0x80)
-        address = self._dma_address(0x1A if to_device else 0x1D, count)
+        memory, address = self._dma_place(0x1A if to_device else 0x1D, count)
         if not to_device:
-            self._written(address, count)
+            self._written(self._offset(0x1D), count)
         for offset in range(count):
             if to_device:
-                self.received = self._miso(self.slave.exchange(self.memory[address + offset]))
+                self.received = self._miso(self.slave.exchange(memory[address + offset]))
             else:
                 # Как при чтении #57 в опубликованном HDL: в память уходит байт
                 # прошлого обмена, и тут же начинается следующий.
-                self.memory[address + offset] = self.received
+                memory[address + offset] = self.received
                 self.received = self._miso(self.slave.exchange(0xFF))
         self.dma_runs.append((mode, count))
 

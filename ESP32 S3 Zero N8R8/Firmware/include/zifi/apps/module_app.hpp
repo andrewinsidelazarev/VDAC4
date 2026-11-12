@@ -172,6 +172,12 @@ class ModuleApp : public App {
   static int coreSdPwrite(void*, uint32_t, const uint8_t*, uint32_t);
   static void coreSdClose(void*);
   static int coreSdCreate(const char*, uint32_t);
+  static int coreSd2Open(uint32_t, uint32_t, void**, int*);
+  static int coreSd2Read(void*, uint32_t, uint8_t*, uint32_t, uint32_t*);
+  static int coreSd2Stream(void*, uint32_t, uint32_t, uint32_t*);
+  static void coreSd2Close(void*);
+  static int coreLinkBurst(uint32_t, const uint32_t*, uint32_t);
+  static uint32_t corePcmLowLatency(int on);
   bool coreLoaded_ = false;               // приложение загрузило ядро из кэша: при выгрузке — слот 0
   int sockets_[kMaxSockets] = {-1, -1, -1, -1, -1};
   // Сокет с TLS (ABI 1.12): его соединение esp_tls; nullptr — обычный сокет или место свободно.

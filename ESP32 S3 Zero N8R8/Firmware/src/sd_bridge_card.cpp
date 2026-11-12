@@ -19,6 +19,9 @@ uint32_t ceilDiv(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 
 }  // namespace
 
+const SdBridgeLayout kSdLayoutStd = {0x100, 0x104, 0x108, 0, 0x2000, 0x2000, 512};
+const SdBridgeLayout kSdLayoutVideo = {0x110, 0x114, 0x118, 0x11C, 0x2000, 0x3000, 16};
+
 uint16_t sdCrc16(const uint8_t* data, size_t size) {
   uint16_t crc = 0;
   for (size_t i = 0; i < size; ++i) {
@@ -47,23 +50,23 @@ uint8_t sdCrc7(const uint8_t* data, size_t size) {
 
 bool SdBridgeCard::present() {
   uint32_t stat = 0;
-  return io_.read(io_.ctx, kRegCmd, &stat, 1) && (stat >> 16) == kStatMagic;
+  return io_.read(io_.ctx, layout_->cmd, &stat, 1) && (stat >> 16) == kStatMagic;
 }
 
 bool SdBridgeCard::setCtrl(uint32_t div, bool cs) {
   div_ = div & 0xFF;
   const uint32_t v = (cs ? 0x100U : 0U) | div_;
-  return io_.write(io_.ctx, kRegCtrl, &v, 1);
+  return io_.write(io_.ctx, layout_->ctrl, &v, 1);
 }
 
 bool SdBridgeCard::setPtr(uint32_t word, uint32_t blockBytes) {
   const uint32_t v = ((blockBytes & 0x7FF) << 16) | (word & 0x1FF);
-  return io_.write(io_.ctx, kRegPtr, &v, 1);
+  return io_.write(io_.ctx, layout_->ptr, &v, 1);
 }
 
 bool SdBridgeCard::op(uint32_t kind, uint32_t count, uint32_t* stat) {
   const uint32_t v = ((kind & 7) << 20) | (count & 0xFFFFF);
-  if (!io_.write(io_.ctx, kRegCmd, &v, 1)) {
+  if (!io_.write(io_.ctx, layout_->cmd, &v, 1)) {
     return false;
   }
   // Команда доходит до моста раньше, чем следующее чтение LINK выдаёт слово (24 такта SCK)
@@ -74,7 +77,7 @@ bool SdBridgeCard::op(uint32_t kind, uint32_t count, uint32_t* stat) {
   }
   for (;;) {
     uint32_t s = 0;
-    if (!io_.read(io_.ctx, kRegCmd, &s, 1) || (s >> 16) != kStatMagic) {
+    if (!io_.read(io_.ctx, layout_->cmd, &s, 1) || (s >> 16) != kStatMagic) {
       return false;
     }
     if ((s & 1) == 0) {
@@ -105,7 +108,7 @@ bool SdBridgeCard::txPut(const uint8_t* bytes, uint32_t count) {
       }
       words[i] = v;
     }
-    if (!io_.write(io_.ctx, kWindow + 4 * w, words, n)) {
+    if (!io_.write(io_.ctx, layout_->txWindow + 4 * w, words, n)) {
       return false;
     }
   }
@@ -117,7 +120,7 @@ bool SdBridgeCard::rxGet(uint8_t* bytes, uint32_t count) {
   const uint32_t total = ceilDiv(count, 4);
   for (uint32_t w = 0; w < total; w += kChunk) {
     const uint32_t n = total - w < kChunk ? total - w : kChunk;
-    if (!io_.read(io_.ctx, kWindow + 4 * w, words, n)) {
+    if (!io_.read(io_.ctx, layout_->rxWindow + 4 * w, words, n)) {
       return false;
     }
     for (uint32_t i = 0; i < n; ++i) {
@@ -164,7 +167,7 @@ const char* SdBridgeCard::init() {
     return "no SD bridge in the Tang core (TS-Config 1.30+ only)";
   }
   uint32_t ctrl = 0;
-  if (!io_.read(io_.ctx, kRegCtrl, &ctrl, 1)) {
+  if (!io_.read(io_.ctx, layout_->ctrl, &ctrl, 1)) {
     return "LINK read failed";
   }
   clk10k_ = ctrl >> 16;
@@ -341,8 +344,8 @@ bool SdBridgeCard::read(uint32_t lba, uint8_t* data, uint32_t count) {
 }
 
 bool SdBridgeCard::write(uint32_t lba, const uint8_t* data, uint32_t count) {
-  if (!ready_) {
-    return false;
+  if (!ready_ || layout_->txWords < ceilDiv(kBlock + 4, 4)) {
+    return false;                       // ядро видео: TX — только команды
   }
   for (uint32_t i = 0; i < count; ++i) {
     if (!writeBlock(lba + i, data + i * kBlock)) {
@@ -350,6 +353,57 @@ bool SdBridgeCard::write(uint32_t lba, const uint8_t* data, uint32_t count) {
     }
   }
   return true;
+}
+
+bool SdBridgeCard::stopTransmission() {
+  // байт за CMD12 — мусор (карта ещё шлёт данные), затем R1 и «занята», пока не остановится
+  const uint8_t frame[7] = {0xFF, 0x40 | 12, 0, 0, 0, 0, 0x61};
+  uint32_t stat = 0;
+  if (!setPtr(0, kBlock + 2) || !txPut(frame, 7) || !op(kXfer, 7, &stat) || !op(kFill, 1, &stat) ||
+      !op(kWait, 16, &stat) || (stat & 2) != 0 || ((stat >> 8) & 0xFE) != 0) {
+    return false;
+  }
+  uint32_t busy = 0;
+  return op(kBusy, kBusyBytes, &busy) && (busy & 2) == 0;
+}
+
+bool SdBridgeCard::stream(uint32_t lba, uint32_t blocks, bool* crcError) {
+  *crcError = false;
+  if (!ready_ || layout_->strm == 0 || blocks == 0 || blocks > 0xFFF) {
+    return false;
+  }
+  if (command(18, sdhc_ ? lba : lba * kBlock, 0) != 0x00) {
+    ++errors_;
+    stopTransmission();
+    return false;
+  }
+  const uint32_t cmd = (kStream << 20) | kTokenBytes;
+  bool ok = setPtr(0, kBlock + 2) && io_.write(io_.ctx, layout_->strm, &blocks, 1) &&
+            io_.write(io_.ctx, layout_->cmd, &cmd, 1);
+  // блок — ~0,22 мс на 18,6 МГц: опрос с yield между опросами (1 мс), LINK свободен для других
+  const uint32_t start = io_.nowMs(io_.ctx);
+  uint32_t stat = 1;
+  while (ok) {
+    if (!io_.read(io_.ctx, layout_->cmd, &stat, 1) || (stat >> 16) != kStatMagic) {
+      ok = false;
+    } else if ((stat & 1) == 0) {
+      break;
+    } else if (io_.nowMs(io_.ctx) - start > kOpMs + blocks) {
+      ok = false;
+    } else if (io_.yield != nullptr) {
+      io_.yield(io_.ctx);
+    }
+  }
+  // конец: не таймаут, последний маркер — 0xFE (маркер ошибки — поток оборвался)
+  ok = ok && (stat & 2) == 0 && ((stat >> 8) & 0xFF) == 0xFE;
+  *crcError = (stat & 4) != 0;
+  if (!stopTransmission()) {
+    ok = false;
+  }
+  if (!ok) {
+    ++errors_;
+  }
+  return ok;
 }
 
 void SdBridgeCard::release() {

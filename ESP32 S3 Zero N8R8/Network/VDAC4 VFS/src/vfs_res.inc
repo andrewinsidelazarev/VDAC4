@@ -63,14 +63,32 @@ RES_READ        equ 2                   ; часть сектора D_LBA ном
 RES_WAIT        equ 3                   ; ждать ответ на прежний запрос дальше
 RES_WRITE       equ 4                   ; сектор D_BOUNCE -> D_LBA (только SD2 = карта Tang)
 RES_RELEASE     equ 5                   ; MODE 0: ESP снова владеет картой Tang (старт WC)
+RES_READN       equ 6                   ; серия (ESP 0.1.127): READN с D_LBA на D_COUNT секторов, первый -> D_BOUNCE
+RES_NEXTN       equ 7                   ; следующий сектор серии -> D_DEST (DMA) либо D_BOUNCE (D_BOUNCED)
 RES_PENDING     equ 1
 RES_FAIL        equ 2
 RES_POLLS       equ 2000                ; опросов за один вызов (прерывания закрыты)
+RES_SEC_TURNS   equ 128                 ; серия DMA: обменов «сектор?» за один вызов (~30 мс на 14 МГц)
 RES_TRIES       equ 250                 ; вызовов RES_WAIT на один запрос
 
 ; Переменные драйвера в окне #0000 (#3800…), общие с резидентом
 D_LBA           equ #38D0               ; BLKNUM: позиция чтения (XPOZI/PROZ)
 D_BOUNCE        equ #3E00               ; сектор: чтение — резидент кладёт сюда, драйвер — в HL; запись — наоборот
+
+; DMA TS-Config (как в zifi_spi.asm под ZIFI_SPI_DMA; резидент собирается без него: тот путь
+; адресует память через WC_PAGE2/3, а у резидента в окне #C000 своя страница)
+VR_DMASADDRL    equ #1AAF               ; источник: младший байт, за ним старший и страница
+VR_DMADADDRL    equ #1DAF               ; приёмник: так же
+VR_DMALEN       equ #26AF               ; слов в блоке минус один
+VR_DMACTR       equ #27AF               ; запуск; при чтении бит 7 — DMA занят
+VR_DMANUM       equ #28AF               ; блоков минус один
+VR_DMA_SPI_RAM  equ #02
+VR_DMA_RAM_SPI  equ #82
+VR_SPI_WRDMA    equ #03
+VR_SPI_RDDMA    equ #04
+VR_SPI_WR_DONE  equ #07
+VR_SPI_RD_DONE  equ #08
+VR_PAGE2        equ #12AF               ; страница окна #8000 (TS-Config отдаёт её чтением)
 
 ; Команды прошивки ESP 0.1.97+ (zifi/vdisk_service.hpp); WRITE и MODE — с 0.1.100
 CMD_VDISK_INFO  equ #15
@@ -83,8 +101,17 @@ RESP_VDISK_READ equ #96                 ; [итог][данные]
 RESP_VDISK_RESET equ #97                ; [итог][поколение LE32]
 RESP_VDISK_WRITE equ #98                ; [итог]
 RESP_VDISK_MODE equ #99                 ; [итог][флаги][секторов LE32]
+; ESP 0.1.127: сектор — один круг обмена вместо трёх (READ по 248 байт — 32 КБ/с, FLAC с SD2 не успевал)
+CMD_VDISK_READN equ #1E                 ; [lba LE32][секторов 1…255][режим]
+RESP_VDISK_DATA equ #9E                 ; по сектору подряд два кадра по 256 байт; 1 байт — итог отказа
 VDISK_READY     equ #01                 ; флаг INFO: том собран (режим 1 — карта у WC)
 VDISK_RAW       equ #40                 ; флаг INFO: режим 1, SD2 = карта Tang
+VDISK_READN     equ #20                 ; флаг INFO: прошивка умеет READN (0.1.127)
+; ESP 0.1.128: секторы серии — не кадрами (каждый байт через Z80: ~89 000 тактов на сектор, SD2 не
+; быстрее ~79 КБ/с — FLAC с карты Tang не успевал и с READN), а блоками DMA прямо в буфер WC.
+VDISK_READDMA   equ #10                 ; флаг INFO: READN умеет секторы через DMA
+READN_DMA       equ #80                 ; разряд байта режима READN: секторы — в очередь DMA
+LINK_F_SECTOR   equ #20                 ; флаг запроса канала: взять сектор из очереди секторов
 VDISK_CHUNK     equ 248
 
 DEV_SD2         equ 6                   ; DOS_SWP: второй SD ZC — его место и занимает VFS

@@ -1,7 +1,8 @@
 #pragma once
-// Источники тома VDAC4 VFS в прошивке. Сейчас один: TANG — microSD Tang (FatFs в /tangsd, мост
-// fb_sdspi ядра TS-Config 1.30+, tang_sd::Session на каждое обращение). Флешка USB (/usb) и сетевые
-// источники подключаются так же — отдельной папкой корня.
+// Источники тома VDAC4 VFS в прошивке: TANG — microSD Tang (FatFs в /tangsd, мост fb_sdspi ядра
+// TS-Config 1.30+ или ядра видео 1.47+, tang_sd::Session на каждое обращение); USB (1.47, 11.11.2026)
+// — флешка FAT32 или exFAT в разъёме USB-C модуля (UsbDrive, /usb). Сетевые источники подключаются
+// так же — отдельной папкой корня.
 //
 // Имена FatFs прошивки — в кодовой странице 437 (CONFIG_FATFS_API_ENCODING_ANSI_OEM): в том они
 // идут UTF-8 через таблицу CP437, а путь обратно к FatFs — снова CP437. Знаки, которых в CP437 нет
@@ -36,6 +37,17 @@ class PosixSource : public vdisk::Source {
   const char* folder_;
   const char* mount_;
 };
+
+#if ZIFI_HAS_USB_DRIVE
+// Флешка USB: каталог (WC открыл папку USB — ядро 1) включает USB-хост и ждёт флешку (UsbDrive::ready,
+// до 2 с при первом обращении; до того разъём — консоль USB). Чтение файла — из любой задачи (видео
+// с SD2: задача подачи VIDEO.ELF): флешка уже смонтирована каталогом.
+class UsbSource : public PosixSource {
+ public:
+  UsbSource() : PosixSource("USB", "/usb") {}
+  bool list(const char* path, Each each, void* user) override;
+};
+#endif
 
 #if ZIFI_HAS_SPI_LINK
 // microSD Tang: замок tang_sd::Session на время обращения, том монтируется по запросу

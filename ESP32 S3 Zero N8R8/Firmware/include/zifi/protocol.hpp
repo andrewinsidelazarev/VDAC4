@@ -63,6 +63,7 @@ enum Command : uint8_t {
   kVdiskReset = 0x17,
   kVdiskWrite = 0x18,  // [lba LE32][данные 512]: только SD2 = карта Tang
   kVdiskMode = 0x19,   // [0 — том VFS, 1 — карта Tang посекторно]
+  kVdiskReadN = 0x1E,  // (0.1.127) [lba LE32][секторов 1…255][режим] -> по сектору два кадра 0x9E
   // Обновление всей платы VDAC4 с GitHub (плагин VDAC4 Online Update 2, VDAC4UPD.WMF; устройство —
   // Network/Online Update/DESIGN.md): прошивки ESP и BL616, слоты flash ПЛИС, CORES на карте Tang,
   // плагины и модули ESP на карте Evo. START: [флаги] (бит 0 — и карта Evo); APPLY: номера строк
@@ -226,6 +227,7 @@ enum Command : uint8_t {
   kRespVdiskReset = 0x97,  // [итог][поколение LE32]
   kRespVdiskWrite = 0x98,  // [итог]
   kRespVdiskMode = 0x99,   // [итог][флаги][секторов LE32]
+  kRespVdiskData = 0x9E,   // READN: 256 байт половины сектора; 1 байт — итог отказа (серия кончилась)
   kRespVupStart = 0x9A,    // [1 — сеанс запущен]
   kRespVupApply = 0x9B,    // [1 — принято]
   kRespVupStop = 0x9C,     // [1 — сеанс остановлен]

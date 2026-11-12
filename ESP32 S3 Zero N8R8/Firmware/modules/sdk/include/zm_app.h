@@ -29,14 +29,16 @@ extern "C" {
 #endif
 
 #define ZM_APP_ABI_MAJOR 1
-#define ZM_APP_ABI_MINOR 14   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
+#define ZM_APP_ABI_MINOR 16   /* 1: temperature в zm_core_t; 2: net_* (поток HTTP/HTTPS); 3: ft_* (FT812);
                                 4: core_* (ядра ПЛИС из кэша BL616), link_*, sock_* (TCP/UDP);
                                 5: ui_* — экран приложения оверлеем Tang поверх картинки Evo;
                                 6: app_done — приложение кончило работу: выгрузить;
                                 11: wifi_rssi — уровень сигнала Wi-Fi;
                                 12: sock_open_tls — сокет TCP с шифрованием TLS;
                                 13: link_media — порции DMA до 8 КБ в команды приложения;
-                                14: handoff_put, handoff_take — файл следующему приложению */
+                                14: handoff_put, handoff_take — файл следующему приложению;
+                                15: sd2_* — видео с SD2 WC (VDAC4 VFS), link_burst;
+                                16: pcm_low_latency — короткий буфер DMA I2S для видео */
 
 /* core->temperature: датчика нет (или ещё не прочитан). */
 #define ZM_TEMPERATURE_UNKNOWN (-32768)
@@ -368,6 +370,33 @@ struct zm_core {
    * таблицы вмещает поле. */
   int (*handoff_put)(const char* to, void* block, uint32_t size);
   void* (*handoff_take)(uint32_t* size);
+
+  /* ABI 1.15 (прошивка 0.1.126): видео с SD2 WC (VDAC4 VFS) в ядро видео 1.47 — файл по первому
+   * кластеру и длине из записи каталога WC (их знает плагин FTVIEW4: WC #38A8 — первый кластер).
+   * sd2_open — только из command (ядро 1: состояние VDAC4 VFS живёт там). ZM_OK; ZM_NOT_FOUND — на
+   * SD2 такого файла нет (SD2 не VDAC4 VFS, том собран заново); *raw = 1 — SD2 сама карта Tang (WC
+   * держит её посекторно): годится sd2_stream; 0 — файл тома VFS (флешка USB, карта Tang через
+   * FatFs): только sd2_read. Файлов разом — до четырёх; при выгрузке ядро закрывает их само.
+   * sd2_read — байты с offset (любая задача): ZM_OK, *got меньше count только у конца файла.
+   * sd2_stream — только raw и ядро видео 1.47+: count байтов с offset целыми секторами мостом
+   * microSD прямо в медиа-FIFO ядра (offset и count кратны 512; начало и хвост порции не на границе
+   * сектора — sd2_read и окно MF_DATA). ZM_OK; *crc_errors — порций, где CRC16 блока не сошёлся
+   * (данные уже в FIFO). ZM_ERROR — поток оборвался (сколько ушло — не известно); ZM_NOT_FOUND —
+   * не годится (не карта Tang, ядро без потока, выравнивание). Карту держит всё время порции:
+   * порции — до 64 КБ, чтобы чтения WC с SD2 не ждали дольше kQuickMs.
+   * link_burst — слова в один адрес LINK транзакциями по 16 (окно MF_DATA 0x40000 ядра видео):
+   * слов — сколько угодно. Звать, только если size таблицы вмещает поле. */
+  int (*sd2_open)(uint32_t cluster, uint32_t size, void** file, int* raw);
+  int (*sd2_read)(void* file, uint32_t offset, uint8_t* data, uint32_t count, uint32_t* got);
+  int (*sd2_stream)(void* file, uint32_t offset, uint32_t count, uint32_t* crc_errors);
+  void (*sd2_close)(void* file);
+  int (*link_burst)(uint32_t address, const uint32_t* words, uint32_t count);
+  /* (ABI 1.16) Короткий буфер DMA I2S (~33 мс при 44,1 кГц вместо ~87) для следующих pcm_open этого
+   * приложения: on — 1 включить, 0 — обычный. Возвращает глубину DMA в кадрах вывода, которая будет у
+   * следующего pcm_open (её pcm_queued_ms и считает): 1440 или 3840. Для видео — звук кадра приходит
+   * лишь за кадр до показа, и обычный буфер держал его позади картинки. При выгрузке приложения —
+   * снова обычный. Звать, только если size таблицы вмещает поле. */
+  uint32_t (*pcm_low_latency)(int on);
 };
 
 /* Таблица приложения: заполняет приложение в main. */

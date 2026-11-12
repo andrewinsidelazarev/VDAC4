@@ -65,6 +65,12 @@ class SpiLink : public ByteLink {
   void flush() override;
   const char* name() const override { return "SPI"; }
   bool padsFrames() const override { return true; }
+  bool sectorsAvailable() const override {
+    return ready_ && bulkBuffer_ != nullptr && core_.sectorsAttached();
+  }
+  uint32_t sectorSession() const override { return core_.sectorSession(); }
+  bool pushSector(const uint8_t* data, uint32_t session, uint32_t timeoutMs) override;
+  void failSectors(uint32_t session) override { core_.failSectors(session); }
 
   bool ready() const { return ready_; }
   SpiLinkCore::Stats stats() const { return core_.stats(); }
@@ -176,6 +182,8 @@ class SpiLink : public ByteLink {
   uint32_t reserveReports_;
   uint8_t* bulkBuffer_;      // блок для чтения Z80 через DMA (см. spi_link_core.hpp)
   uint8_t* echoBuffer_;      // сюда Z80 отсылает блок обратно
+  // Служба VDISK ждёт места в очереди секторов: задача обмена будит её, взяв сектор.
+  SemaphoreHandle_t sectorRoom_ = nullptr;
   // DMA занят блоком: он выставлен либо открыт приём его обратной посылки.
   std::atomic<bool> bulkBusy_;
   uint8_t* dmaBuffer_;       // буфер проверки DMA, выделяется при первой проверке

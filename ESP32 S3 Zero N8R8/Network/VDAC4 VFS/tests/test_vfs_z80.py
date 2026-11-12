@@ -75,6 +75,13 @@ class Vdisk:
         self.flags = 1                  # INFO: 1 — том собран; 0.1.97/0.1.98 на плате давали 2
         self.max_payload = 0
         self.max_request = 0
+        self.readn = False              # прошивка 0.1.127+: READN (флаг INFO #20)
+        self.readn_reqs = []            # (lba, секторов, режим)
+        self.readdma = False            # прошивка 0.1.128+: READN с секторами через DMA (INFO #10)
+        self.core = None                # ядро канала (сеанс и очередь секторов) — ставит Wc
+        self.pending = []               # (сеанс, сектор либо None — отказ): ещё не в очереди
+        self.sector_gap = 0             # чтений буфера до каждого следующего сектора (карта медленная)
+        self.gap_left = 0
 
     @staticmethod
     def sector(lba):
@@ -111,6 +118,37 @@ class Vdisk:
         elif cmd == 0x17:
             self.gen += 1
             reply = frame(0x97, b'\0' + struct.pack('<I', self.gen))
+        elif cmd == 0x1E:
+            assert self.readn, 'READN у прошивки без флага'
+            assert len(p) == 6, p
+            lba, count, mode = struct.unpack('<IBB', p)
+            assert count >= 1
+            self.readn_reqs.append((lba, count, mode))
+            if mode & 0x80:
+                # секторы — в очередь канала (ByteLink::pushSector), кадров нет
+                assert self.readdma, 'READN DMA у прошивки без флага'
+                session = self.core.sector_session
+                if mode & 0x7F != (1 if self.raw else 0):
+                    self.pending.append((session, None))
+                    return b''
+                for i in range(count):
+                    if lba + i in self.fail_lba:
+                        self.pending.append((session, None))
+                        break
+                    data = self.card.get(lba + i, self.sector(lba + i)) if self.raw else self.sector(lba + i)
+                    self.pending.append((session, data))
+                return b''
+            if mode != (1 if self.raw else 0):
+                return frame(0x9E, b'\5')                # не тот режим
+            out = b''
+            for i in range(count):
+                if lba + i in self.fail_lba:
+                    out += frame(0x9E, b'\2')           # источник не ответил: серия кончилась
+                    break
+                data = self.card.get(lba + i, self.sector(lba + i)) if self.raw else self.sector(lba + i)
+                out += frame(0x9E, data[:256]) + frame(0x9E, data[256:])
+            self.max_payload = max(self.max_payload, 256)
+            return out
         elif cmd == 0x16:
             assert len(p) in (7, 8), p
             lba, ofs, n = struct.unpack('<IHB', p[:7])
@@ -129,7 +167,25 @@ class Vdisk:
         return reply
 
     def info_flags(self):
-        return 0x41 if self.raw else self.flags
+        return ((0x41 if self.raw else self.flags) | (0x20 if self.readn else 0) |
+                (0x30 if self.readdma else 0))
+
+    def feed(self):
+        """Служба кладёт секторы, пока в очереди канала есть место (pushSector ждёт)."""
+        while self.pending:
+            session, data = self.pending[0]
+            if session != self.core.sector_session:
+                self.pending.clear()                    # Z80 начала новый сеанс: серия брошена
+                return
+            if self.gap_left:
+                self.gap_left -= 1
+                return
+            if data is None:
+                self.core.fail_sectors(session)
+            elif not self.core.push_sector(data, session):
+                return
+            self.pending.pop(0)
+            self.gap_left = self.sector_gap
 
 
 class Wc:
@@ -181,6 +237,8 @@ class Wc:
         self.link.rx = bytearray()
         self.link.tx = bytearray()
         self.vdisk = Vdisk()
+        self.vdisk.core = self.link.core
+        self.ports.locate = self._dma_locate
         self.reply_delay = 0                       # чтений буфера до ответа службы
         self.held = []
         self._stream = bytearray()
@@ -230,7 +288,15 @@ class Wc:
             self.map((port >> 8) - 0x10, value)
         self.ports.write(port, value)
 
+    def _dma_locate(self, page, offset):
+        """DMA пишет физическую страницу: стоит в окне — в живую память окна, иначе — в саму страницу."""
+        for w in range(4):
+            if self.window[w] == page:
+                return self.mem, w * 0x4000 + offset
+        return self.page(page), offset
+
     def _run_app(self):
+        self.vdisk.feed()
         self.link.pump()
         self._stream += self.link.tx
         self.link.tx.clear()
@@ -501,6 +567,148 @@ class Vfs(unittest.TestCase):
         self.assertEqual(wc.peek(0x384A), 0)
         self.assertIn(3, waits, 'медленная ESP: драйвер ждал повторными RES_WAIT')
 
+    def test_series_reads_one_request_per_call(self):
+        """Прошивка 0.1.127 (флаг READN): RDDSE на 5 секторов — один запрос READN, по сектору два
+        кадра по 256 байт; READ по частям больше не идёт. Медленная ESP — то же ожиданием RES_WAIT."""
+        for delay in (0, 5000):
+            wc = self.driver(delay=delay)
+            wc.vdisk.readn = True
+            wc.run(0x3803)                              # DEVINI: INFO с флагом READN
+            self.assertEqual(wc.m.f & 0x40, 0x40)
+            wc.run(0x3809, hl=2000, de=0)
+            wc.m.iff1 = wc.m.iff2 = 1
+            wc.map(3, 0x44)
+            wc.run(0x380F, a=5, hl=0xC100)              # 5 секторов в окно #C000
+            self.assertEqual(wc.m.f & 0x40, 0x40, f'задержка {delay}')
+            self.assertEqual(wc.m.hl, 0xC100 + 5 * 512)
+            self.assertEqual((wc.m.iff1, wc.m.iff2), (1, 1))
+            wc.flush()
+            self.assertEqual(bytes(wc.page(0x44)[0x100:0x100 + 5 * 512]),
+                             b''.join(Vdisk.sector(l) for l in range(2000, 2005)))
+            self.assertEqual(wc.vdisk.readn_reqs, [(2000, 5, 0)])
+            self.assertEqual(wc.vdisk.reads, [], 'READ по частям не нужен')
+            self.assertEqual(int.from_bytes(wc.mem[0x38D0:0x38D4], 'little'), 2005)
+            self.assertEqual(wc.peek(0x384A), 0)
+            # второй вызов — новая серия с новой позиции; DOS_SWP кладёт образ драйвера заново —
+            # флаг READN в образе остался
+            wc.run(0x380F, a=2, hl=0xC100)
+            self.assertEqual(wc.vdisk.readn_reqs[-1], (2005, 2, 0))
+
+    def dma_driver(self, **kw):
+        wc = self.driver(**kw)
+        wc.vdisk.readn = wc.vdisk.readdma = True
+        wc.run(0x3803)                                  # DEVINI: INFO с флагом READDMA
+        self.assertEqual(wc.m.f & 0x40, 0x40)
+        self.assertEqual(wc.peek(wc.res_sym['D_READN']), 0x30)
+        return wc
+
+    def test_dma_series_puts_sectors_straight_into_the_buffer(self):
+        """Прошивка 0.1.128 (флаг READDMA): один READN с разрядом DMA, секторы — блоками DMA прямо в
+        страницу вызывающего (окна #C000 и #8000), кадров и READ нет, прерывания на выходе прежние."""
+        for window, page, hl in ((3, 0x44, 0xC100), (2, 0x45, 0x8000)):
+            wc = self.dma_driver()
+            wc.run(0x3809, hl=3000, de=0)
+            wc.m.iff1 = wc.m.iff2 = 1
+            wc.map(window, page)
+            wc.poke(0x6000 + window, page)
+            frames_before = wc.vdisk.max_payload
+            wc.run(0x380F, a=7, hl=hl)
+            self.assertEqual(wc.m.f & 0x40, 0x40, hex(hl))
+            self.assertEqual(wc.m.hl, hl + 7 * 512)
+            self.assertEqual((wc.m.iff1, wc.m.iff2), (1, 1))
+            self.assertEqual(wc.window[window], page)
+            wc.flush()
+            base = hl & 0x3FFF
+            self.assertEqual(bytes(wc.page(page)[base:base + 7 * 512]),
+                             b''.join(Vdisk.sector(l) for l in range(3000, 3007)))
+            self.assertEqual(wc.vdisk.readn_reqs, [(3000, 7, 0x80)])
+            self.assertEqual(wc.vdisk.reads, [])
+            self.assertEqual(wc.vdisk.max_payload, frames_before, 'секторы не шли кадрами')
+            self.assertEqual(wc.peek(wc.res_sym['D_BOUNCED']), 0)
+            self.assertEqual(int.from_bytes(wc.mem[0x38D0:0x38D4], 'little'), 3007)
+            self.assertEqual(wc.peek(0x384A), 0)
+            stats = wc.link.core
+            self.assertEqual((stats.sector_blocks, stats.sector_bad), (7, 0))
+
+    def test_dma_series_speed(self):
+        """Тактов Z80 на сектор при мгновенной ESP: кадрами было ~89 000 (не быстрее ~79 КБ/с на 14 МГц)."""
+        wc = self.dma_driver()
+        wc.run(0x3809, hl=100, de=0)
+        wc.map(3, 0x44)
+        start = wc.ticks
+        wc.run(0x380F, a=16, hl=0xC000)
+        per = (wc.ticks - start) / 16
+        self.assertEqual(wc.m.f & 0x40, 0x40)
+        print(f'\nсерия DMA: {per:.0f} тактов Z80 на сектор (14 МГц — {14e6 / per / 2:.0f} КБ/с без ESP)')
+        self.assertLess(per, 15_000)
+
+    def test_dma_series_bounces_what_dma_cannot_place(self):
+        # нечётный адрес; сектор через границу окон #8000/#C000 и следующий — уже в окне #C000
+        wc = self.dma_driver()
+        wc.run(0x3809, hl=500, de=0)
+        wc.map(3, 0x44)
+        wc.run(0x380F, a=2, hl=0xC101)
+        self.assertEqual(wc.m.f & 0x40, 0x40)
+        wc.flush()
+        self.assertEqual(bytes(wc.page(0x44)[0x101:0x101 + 1024]), Vdisk.sector(500) + Vdisk.sector(501))
+        wc.map(2, 0x45)
+        wc.run(0x3809, hl=600, de=0)
+        wc.run(0x380F, a=3, hl=0xBF00)
+        self.assertEqual(wc.m.f & 0x40, 0x40)
+        wc.flush()
+        got = bytes(wc.page(0x45)[0x3F00:0x4000]) + bytes(wc.page(0x44)[0:0x500])
+        self.assertEqual(got, Vdisk.sector(600) + Vdisk.sector(601) + Vdisk.sector(602))
+        self.assertEqual(wc.link.core.sector_blocks, 5)
+
+    def test_dma_series_slow_card_failure_and_bad_copy(self):
+        # карта медленная: секторы приходят реже, чем Z80 спрашивает — ожидание с окнами прерываний
+        wc = self.dma_driver()
+        wc.vdisk.sector_gap = 3000
+        waits = []
+        wc.hooks[wc.res_sym['D_CALL']] = lambda: waits.append(wc.m.a)
+        wc.m.set_breakpoint(wc.res_sym['D_CALL'])
+        wc.run(0x3809, hl=40, de=0)
+        wc.m.iff1 = wc.m.iff2 = 1
+        wc.map(3, 0x44)
+        wc.run(0x380F, a=3, hl=0xC000)
+        self.assertEqual(wc.m.f & 0x40, 0x40)
+        self.assertIn(3, waits, 'ждал повторными RES_WAIT')
+        self.assertEqual((wc.m.iff1, wc.m.iff2), (1, 1))
+        wc.flush()
+        self.assertEqual(bytes(wc.page(0x44)[0:1536]), b''.join(Vdisk.sector(l) for l in (40, 41, 42)))
+        # копия вернулась неверной — тот же сектор снова, данные верные
+        wc.vdisk.sector_gap = 0
+        wc.link.corrupt_blocks = 1
+        wc.run(0x3809, hl=50, de=0)
+        wc.run(0x380F, a=2, hl=0xC000)
+        self.assertEqual(wc.m.f & 0x40, 0x40)
+        wc.flush()
+        self.assertEqual(bytes(wc.page(0x44)[0:1024]), Vdisk.sector(50) + Vdisk.sector(51))
+        self.assertEqual(wc.link.core.sector_bad, 1)
+        # источник не прочитал второй сектор: отказ, ABT; следующий вызов — снова как обычно
+        wc.vdisk.fail_lba = {61}
+        wc.run(0x3809, hl=60, de=0)
+        wc.run(0x380F, a=3, hl=0xC000)
+        self.assertEqual(wc.m.f & 0x40, 0)
+        self.assertEqual(wc.peek(0x384A), 1)
+        wc.vdisk.fail_lba = set()
+        wc.run(0x3809, hl=70, de=0)
+        wc.run(0x380F, a=4, hl=0xC000)
+        self.assertEqual(wc.m.f & 0x40, 0x40)
+        wc.flush()
+        self.assertEqual(bytes(wc.page(0x44)[0:2048]), b''.join(Vdisk.sector(l) for l in range(70, 74)))
+
+    def test_series_failure_midway_and_tang_mode(self):
+        wc = self.driver()
+        wc.vdisk.readn = True
+        wc.run(0x3803)
+        wc.vdisk.fail_lba = {11}
+        wc.run(0x3809, hl=10, de=0)
+        wc.run(0x380F, a=3, hl=0xC000)
+        self.assertEqual(wc.m.f & 0x40, 0)              # NZ: отказ
+        self.assertEqual(wc.peek(0x384A), 1)            # ABT
+        self.assertEqual(wc.vdisk.readn_reqs, [(10, 3, 0)])
+
     def test_source_failure_and_old_firmware(self):
         wc = self.driver()
         wc.vdisk.fail_lba = {7}
@@ -562,6 +770,27 @@ class Vfs(unittest.TestCase):
         wc.map(0, 0xF1)
         wc.run(0x4FF8, a=6, ix=0)
         return wc
+
+    def test_series_in_tang_mode(self):
+        """SD2 = карта Tang с прошивкой 0.1.127: READN с байтом режима 1; флаг READN — из INFO
+        при монтировании, и он переживает DOS_SWP (образ драйвера)."""
+        wc = Wc()
+        wc.vdisk.readn = True
+        wc.install_resident()
+        msg = wc.toggle(ENTER)
+        self.assertEqual(msg[0], 'SD2 = Tang microSD card, read/write', msg)
+        wc.map(0, 0xF1)
+        wc.run(0x4FF8, a=6, ix=0)
+        wc.map(3, 0x44)
+        wc.run(0x3809, hl=5000, de=0)
+        wc.m.iff1 = wc.m.iff2 = 1
+        wc.run(0x380F, a=4, hl=0xC100)
+        self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0x40, 0))
+        wc.flush()
+        self.assertEqual(bytes(wc.page(0x44)[0x100:0x100 + 2048]),
+                         b''.join(Vdisk.sector(l) for l in range(5000, 5004)))
+        self.assertEqual(wc.vdisk.readn_reqs, [(5000, 4, 1)])
+        self.assertEqual(wc.vdisk.reads, [])
 
     def test_tang_mode_writes_and_reads_back(self):
         wc = self.tang_driver()

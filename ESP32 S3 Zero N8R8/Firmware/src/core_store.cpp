@@ -274,15 +274,27 @@ const char* load(const char* name, uint32_t* version, Progress progress, void* c
     return "bad core name";
   }
   tang_sd::Session session;
-  if (tang_sd::heldByWc()) {
+  // Карта Tang у WC (SD2): только ядро видео из слота 3 — карту оно само не трогает, мост к ней в нём
+  // есть (1.47+): видео с SD2; удержание подключится к нему само (tang_sd::attachHeld)
+  const bool held = tang_sd::heldByWc();
+  if (held && strcmp(n, "VIDEO") != 0) {
     return tang_sd::kHeldByWc;
   }
   // у ядра свой слот во flash Tang — оттуда; слот пуст (или BL616 старше 35) — как прочие, с SD
   for (const FlashCore& core : kFlashCores) {
     if (strcmp(core.name, n) == 0) {
       const char* problem = loadSlot(core, version);
+      if (problem == nullptr && held) {
+        // карта у WC: сразу к мосту ядра видео (иначе ждало бы первое чтение SD2 — инициализация
+        // карты ~0,2 с); ядро старше 1.47 моста не имеет — SD2 до возврата в слот 0 не читается
+        const char* attach = tang_sd::holdForWc();
+        bringupLog(kTag, "core %s: Tang SD held by WC %s", n, attach ? attach : "attached to the video core");
+      }
       if (problem != kNoSlot) {
         return problem;
+      }
+      if (held) {
+        return tang_sd::kHeldByWc;    // с SD (кэш BL616) — нельзя: FatFs ESP карту не монтирует
       }
       bringupLog(kTag, "core %s: not from Tang flash slot %u, trying the Tang SD and the BL616 cache", n,
                  static_cast<unsigned>(core.slot));

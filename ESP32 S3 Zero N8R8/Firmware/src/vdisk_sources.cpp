@@ -10,6 +10,9 @@
 #if ZIFI_HAS_SPI_LINK
 #include "zifi/tang_sd.hpp"
 #endif
+#if ZIFI_HAS_USB_DRIVE
+#include "zifi/usb_drive.hpp"
+#endif
 
 namespace zifi {
 namespace vdisk_sources {
@@ -120,6 +123,13 @@ bool PosixSource::read(const char* path, uint64_t offset, uint8_t* out, size_t n
   fclose(f);
   return ok;
 }
+
+#if ZIFI_HAS_USB_DRIVE
+bool UsbSource::list(const char* path, Each each, void* user) {
+  if (!usbDrive().ready()) return false;      // нет флешки (или не FAT32/exFAT) — папка пуста
+  return PosixSource::list(path, each, user);
+}
+#endif
 
 #if ZIFI_HAS_SPI_LINK
 bool TangSource::list(const char* path, Each each, void* user) {

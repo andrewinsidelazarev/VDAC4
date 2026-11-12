@@ -21,7 +21,7 @@ from spi_link_model import (BULK_ATTEMPTS, BULK_ECHOED, BULK_FREE, BULK_LOADED, 
                             STATUS_PUT_OK, STATUS_PUT_BAD, STATUS_PUT_CAPABLE,
                             CHUNK, FLAG_DROP, FLAG_SESSION, HEADER, MAGIC, REQUEST, RESPONSE,
                             STATE_EMPTY, STATE_PENDING, STATUS_MORE, TURN_SIZE, VERSION,
-                            LinkCore, checksum, request)
+                            FLAG_SECTOR, SECTOR_SLOTS, LinkCore, checksum, request)
 from test_weather_parse import ROOT, build_exe
 
 BUILD = ROOT / '.test-build' / 'spi_link'
@@ -76,9 +76,19 @@ class Core:
     def state_word(self, nonce: int = 0) -> bytes:
         return bytes.fromhex(self.host.ask(f'state {nonce}'))
 
+    def push_sector(self, data: bytes, session: int) -> bool:
+        return self.host.ask(f'secpush {session} {data.hex()}') == '1'
+
+    def fail_sectors(self, session: int) -> None:
+        assert self.host.ask(f'secfail {session}') == 'ok'
+
+    @property
+    def sector_session(self) -> int:
+        return int(self.host.ask('secsession'))
+
     def stats(self) -> dict[str, int]:
         names = ('turns', 'repeats', 'bad', 'short', 'from', 'to', 'pending', 'space',
-                 'blocks', 'bad_blocks', 'gave_up', 'puts', 'bad_puts')
+                 'blocks', 'bad_blocks', 'gave_up', 'puts', 'bad_puts', 'sectors', 'bad_sectors')
         return dict(zip(names, map(int, self.host.ask('stats').split())))
 
 
@@ -433,6 +443,112 @@ class SpiLinkCoreTest(unittest.TestCase):
         self.assertEqual(core.write(b'x'), 0)
         self.assertEqual(core.stats()['space'], 0)
 
+    def sector(self, n: int) -> bytes:
+        return bytes((n * 7 + i * 13 + (i >> 8)) & 0xFF for i in range(BULK_SIZE))
+
+    def test_sectors_go_through_dma_one_after_another(self) -> None:
+        # Резидент VDAC4 VFS: новый сеанс, служба кладёт секторы наперёд, Z80 забирает их DMA;
+        # подтверждение сектора и следующий сектор — в одном ответе.
+        core = self.core()
+        core.write(b'frame for someone else')
+        self.parse(core.handle_request(request(1, flags=FLAG_SESSION | FLAG_DROP), BULK_FREE))
+        session = core.sector_session
+        _, status, _, _ = self.parse(core.handle_request(request(2, flags=FLAG_SECTOR), BULK_FREE))
+        self.assertEqual(status, 0, 'сектора ещё нет: спросить снова')
+        for n in range(SECTOR_SLOTS):
+            self.assertTrue(core.push_sector(self.sector(n), session))
+        self.assertFalse(core.push_sector(self.sector(9), session), 'очередь полна')
+        self.assertFalse(core.push_sector(self.sector(9), session + 1), 'чужой сеанс')
+        core.write(b'event')
+        _, status, data, _ = self.parse(core.handle_request(request(3, room=CHUNK, flags=FLAG_SECTOR),
+                                                            BULK_FREE))
+        self.assertEqual((status, data), (STATUS_MORE | STATUS_BULK, b''), 'данных в ответе нет')
+        self.assertEqual(core.bulk_data, self.sector(0))
+        self.assertEqual(core.state_word()[0], 0xA5, 'кадр ждёт своего, сектор — не данные очереди')
+        self.assertTrue(core.push_sector(self.sector(4), session), 'место освободилось')
+        for n in range(1, 5):
+            _, status, _, _ = self.parse(core.handle_request(request(3 + n, flags=FLAG_SECTOR),
+                                                             BULK_ECHOED))
+            self.assertEqual(status & ~STATUS_MORE, STATUS_BULK)
+            self.assertEqual(core.bulk_data, self.sector(n))
+        _, status, _, _ = self.parse(core.handle_request(request(8, flags=FLAG_SECTOR), BULK_ECHOED))
+        self.assertEqual(status & ~STATUS_MORE, 0, 'последний подтверждён, новых нет')
+        stats = core.stats()
+        self.assertEqual((stats['sectors'], stats['bad_sectors'], stats['blocks']), (5, 0, 0))
+        _, status, data, _ = self.parse(core.handle_request(request(9, room=CHUNK), BULK_ECHOED))
+        self.assertEqual(data, b'event', 'кадры после серии идут как прежде; сброшенный DROP — нет')
+
+    def test_sector_echo_failure_repeats_then_ends_the_series(self) -> None:
+        core = self.core()
+        self.parse(core.handle_request(request(1, flags=FLAG_SESSION | FLAG_DROP), BULK_FREE))
+        session = core.sector_session
+        core.push_sector(self.sector(1), session)
+        core.push_sector(self.sector(2), session)
+        self.parse(core.handle_request(request(2, flags=FLAG_SECTOR), BULK_FREE))
+        _, status, _, _ = self.parse(core.handle_request(request(3, flags=FLAG_SECTOR), BULK_LOADED))
+        self.assertEqual(status, STATUS_BULK, 'не прочитан — по-прежнему выставлен')
+        _, status, _, _ = self.parse(core.handle_request(request(4, flags=FLAG_SECTOR), BULK_FREE))
+        self.assertEqual(status, STATUS_BULK | STATUS_ECHO_BAD)
+        self.assertEqual(core.bulk_data, self.sector(1), 'тот же сектор снова')
+        self.parse(core.handle_request(request(5, flags=FLAG_SECTOR), BULK_FREE))
+        _, status, _, _ = self.parse(core.handle_request(request(6, flags=FLAG_SECTOR), BULK_FREE))
+        self.assertEqual(status, STATUS_ECHO_BAD, 'трижды неверно — серия оборвана')
+        self.assertEqual(core.stats()['bad_sectors'], 3)
+
+    def test_failure_comes_after_the_sectors_read_before_it(self) -> None:
+        core = self.core()
+        self.parse(core.handle_request(request(1, flags=FLAG_SESSION), BULK_FREE))
+        session = core.sector_session
+        core.push_sector(self.sector(1), session)
+        core.fail_sectors(session)
+        _, status, _, _ = self.parse(core.handle_request(request(2, flags=FLAG_SECTOR), BULK_FREE))
+        self.assertEqual(status, STATUS_BULK)
+        _, status, _, _ = self.parse(core.handle_request(request(3, flags=FLAG_SECTOR), BULK_ECHOED))
+        self.assertEqual(status, STATUS_BULK_STALE, 'отказ — после положенного раньше')
+        _, status, _, _ = self.parse(core.handle_request(request(4, flags=FLAG_SECTOR), BULK_ECHOED))
+        self.assertEqual(status, 0, 'отказ сообщается один раз')
+        _, status, _, _ = self.parse(core.handle_request(request(5, flags=FLAG_SECTOR), BULK_OFF))
+        self.assertEqual(status, STATUS_BULK_STALE, 'без DMA серии нет')
+
+    def test_new_session_cancels_the_series(self) -> None:
+        core = self.core()
+        self.parse(core.handle_request(request(1, flags=FLAG_SESSION), BULK_FREE))
+        old = core.sector_session
+        core.push_sector(self.sector(1), old)
+        core.push_sector(self.sector(2), old)
+        self.parse(core.handle_request(request(2, flags=FLAG_SECTOR), BULK_FREE))
+        core.fail_sectors(old)
+        _, status, _, _ = self.parse(core.handle_request(request(3, flags=FLAG_SESSION | FLAG_DROP),
+                                                         BULK_LOADED))
+        self.assertEqual(status, 0)
+        self.assertNotEqual(core.sector_session, old)
+        self.assertFalse(core.push_sector(self.sector(3), old), 'служба видит: сеанс сменился')
+        _, status, _, _ = self.parse(core.handle_request(request(4, flags=FLAG_SECTOR), BULK_LOADED))
+        self.assertEqual(status, STATUS_BULK | STATUS_BULK_STALE, 'невычитанный сектор — устаревший')
+        _, status, _, _ = self.parse(core.handle_request(request(5, flags=FLAG_SECTOR), BULK_FREE))
+        self.assertEqual(status, 0, 'старые секторы и отказ отменены')
+        self.assertTrue(core.push_sector(self.sector(7), core.sector_session))
+        _, status, _, _ = self.parse(core.handle_request(request(6, flags=FLAG_SECTOR), BULK_FREE))
+        self.assertEqual(status, STATUS_BULK)
+        self.assertEqual(core.bulk_data, self.sector(7))
+
+    def test_foreign_request_with_data_cancels_the_series(self) -> None:
+        # резидент из серии ушёл, а служба ждёт места: первый же запрос другой программы с данными
+        # отменяет серию (иначе ответ ей ждал бы тишины Z80)
+        core = self.core()
+        self.parse(core.handle_request(request(1, flags=FLAG_SESSION), BULK_FREE))
+        session = core.sector_session
+        for n in range(SECTOR_SLOTS):
+            core.push_sector(self.sector(n), session)
+        self.assertFalse(core.push_sector(self.sector(9), session), 'очередь полна — служба ждёт')
+        self.parse(core.handle_request(request(2, room=CHUNK), BULK_FREE))
+        self.assertEqual(core.sector_session, session, 'запрос без данных серию не трогает')
+        self.parse(core.handle_request(request(3, b'STATUS', room=CHUNK), BULK_FREE))
+        self.assertNotEqual(core.sector_session, session, 'запрос с данными — серия отменена')
+        self.assertFalse(core.push_sector(self.sector(9), session), 'служба видит: сеанс сменился')
+        _, status, _, _ = self.parse(core.handle_request(request(4, flags=FLAG_SECTOR), BULK_FREE))
+        self.assertEqual(status, 0, 'положенное в брошенной серии выброшено')
+
     def test_random_traffic_matches_the_model(self) -> None:
         rng = random.Random(20261001)
         put_block = bytes(rng.randrange(256) for _ in range(BULK_SIZE))
@@ -452,7 +568,7 @@ class SpiLinkCoreTest(unittest.TestCase):
                             tid = (tid + rng.choice((1, 1, 1, 3))) & 0xFF
                         flags = rng.choice((0, 0, 0, 0, FLAG_DROP, FLAG_SESSION,
                                             FLAG_SESSION | FLAG_DROP))
-                        flags |= rng.choice((0, FLAG_BULK, FLAG_BULK))
+                        flags |= rng.choice((0, FLAG_BULK, FLAG_BULK, FLAG_SECTOR, FLAG_SECTOR | FLAG_BULK))
                         flags |= rng.choice((0, 0, FLAG_PUT, FLAG_PUT_DONE,
                                              FLAG_PUT | FLAG_PUT_DONE))
                         bulk = rng.choice((BULK_OFF, BULK_FREE, BULK_FREE, BULK_LOADED,
@@ -478,9 +594,18 @@ class SpiLinkCoreTest(unittest.TestCase):
                                                              put_received=received), answer)
                         if answer and answer[2] & STATUS_BULK and not answer[2] & STATUS_BULK_STALE:
                             self.assertEqual(core.bulk_data, model.bulk_data)
-                    elif action < 8:
+                    elif action < 7:
                         data = rng.randbytes(rng.choice((1, 5, 60, 300, 700)))
                         self.assertEqual(core.write(data), model.write(data))
+                    elif action < 8:
+                        session = model.sector_session - rng.choice((0, 0, 0, 0, 1))
+                        if rng.randrange(6) == 0:
+                            core.fail_sectors(session)
+                            model.fail_sectors(session)
+                        else:
+                            data = rng.randbytes(BULK_SIZE)
+                            self.assertEqual(core.push_sector(data, session),
+                                             model.push_sector(data, session))
                     else:
                         limit = rng.choice((1, 16, 5000))
                         self.assertEqual(core.read(limit), model.read(limit))
@@ -492,6 +617,9 @@ class SpiLinkCoreTest(unittest.TestCase):
             self.assertEqual((stats['blocks'], stats['bad_blocks'], stats['gave_up']),
                              (model.bulk_blocks, model.bulk_bad, model.bulk_gave_ups))
             self.assertEqual((stats['puts'], stats['bad_puts']), (model.put_blocks, model.put_bad))
+            self.assertEqual((stats['sectors'], stats['bad_sectors']),
+                             (model.sector_blocks, model.sector_bad))
+            self.assertTrue(model.sector_blocks and model.sector_bad, 'случайный обмен прошёл ветви секторов')
             if capacity >= 1024:
                 self.assertTrue(model.put_blocks and model.put_bad, 'случайный обмен прошёл ветви приёма')
             if capacity >= BULK_SIZE:

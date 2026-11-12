@@ -437,12 +437,19 @@ bool SpiLink::startDriver() {
   // байта; длина приёма кратна четырём. Без памяти блоки не предлагаются.
   g_bulkReady = xSemaphoreCreateBinary();
   g_echoReady = xSemaphoreCreateBinary();
+  sectorRoom_ = xSemaphoreCreateBinary();
+  // Очередь секторов VDAC4 VFS — во внутренней RAM, как кольца: её берёт задача обмена.
+  uint8_t* sectors = static_cast<uint8_t*>(heap_caps_malloc(
+      SpiLinkCore::kSectorSlots * SpiLinkCore::kBulkSize, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  if (sectorRoom_ != nullptr) {
+    core_.attachSectors(sectors);
+  }
   bulkBuffer_ = static_cast<uint8_t*>(heap_caps_calloc(
       1, SpiLinkCore::kBulkSize + 4, MALLOC_CAP_DMA));
   echoBuffer_ = static_cast<uint8_t*>(heap_caps_calloc(
       1, SpiLinkCore::kMediaMax + 4, MALLOC_CAP_DMA));
   if (g_bulkReady == nullptr || g_echoReady == nullptr ||
-      echoBuffer_ == nullptr) {
+      echoBuffer_ == nullptr || sectorRoom_ == nullptr) {
     bulkBuffer_ = nullptr;
   }
 
@@ -522,6 +529,7 @@ void SpiLink::taskLoop() {
   uint32_t bulkReports = 0;
   uint32_t putReports = 0;
   uint32_t gaveUp = 0;
+  uint32_t sectorWakes = core_.sectorWakes();
   for (;;) {
     taskStep_.store(kStepWaitRequest, std::memory_order_relaxed);
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
@@ -637,6 +645,11 @@ void SpiLink::taskLoop() {
       }
     }
     bulkBusy_.store(sendPending || echoPending, std::memory_order_relaxed);
+    if (core_.sectorWakes() != sectorWakes) {
+      // Сектор взят либо сеанс сменился: служба VDISK кладёт следующий или бросает серию.
+      sectorWakes = core_.sectorWakes();
+      xSemaphoreGive(sectorRoom_);
+    }
     const uint32_t gaveUpNow = core_.stats().bulkGaveUp;
     if (gaveUpNow != gaveUp) {
       gaveUp = gaveUpNow;
@@ -710,6 +723,30 @@ bool SpiLink::reserve(size_t length, uint32_t timeoutMs) {
     delay(1);
   }
   return true;
+}
+
+bool SpiLink::pushSector(const uint8_t* data, uint32_t session, uint32_t timeoutMs) {
+  if (!sectorsAvailable()) {
+    return false;
+  }
+  // Тишина Z80 — как у reserve(): от начала ожидания либо от последнего обмена, что позже.
+  const uint32_t started = millis();
+  for (;;) {
+    if (core_.pushSector(data, session)) {
+      return true;
+    }
+    if (core_.sectorSession() != session) {
+      return false;                   // новый сеанс: Z80 серию бросила
+    }
+    const uint32_t now = millis();
+    const uint32_t waited = now - started;
+    const uint32_t sinceActivity = now - lastActivityMs_.load(std::memory_order_relaxed);
+    const uint32_t quiet = sinceActivity < waited ? sinceActivity : waited;
+    if (quiet >= timeoutMs || waited >= kReserveLimitMs) {
+      return false;
+    }
+    xSemaphoreTake(sectorRoom_, pdMS_TO_TICKS(2));
+  }
 }
 
 void SpiLink::flush() {

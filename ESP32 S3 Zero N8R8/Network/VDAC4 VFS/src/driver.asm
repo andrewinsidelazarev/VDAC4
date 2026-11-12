@@ -1,6 +1,10 @@
 ; VDAC4 VFS — драйвер устройства 6 Wild Commander (образ по #3800, его кладёт RES_SWAP).
-; Чтение: сектор 512 байтов приходит от ESP тремя частями (248 + 248 + 16) через резидент в буфер
-; D_BOUNCE и копируется в HL. Запись (только SD2 = карта Tang, иначе ESP отказывает): сектор из HL —
+; Чтение: с прошивкой ESP 0.1.128+ (флаг READDMA в INFO) — серия, и каждый сектор резидент забирает
+; DMA TS-Config прямо в HL (не помещается в одно окно #8000…#FFFF — через D_BOUNCE): ни одного
+; байта через процессор. С 0.1.127 (только READN) — серия кадрами:
+; ESP шлёт по сектору два кадра по 256 байт подряд, резидент кладёт их в буфер D_BOUNCE, драйвер —
+; в HL; сектор — один круг обмена (прежде три запроса по 248 байт: SD2 = карта Tang — 32 КБ/с, FLAC
+; не успевал, 11.11.2026). Со старой прошивкой — по-прежнему тремя частями (248 + 248 + 16). Запись (только SD2 = карта Tang, иначе ESP отказывает): сектор из HL —
 ; в D_BOUNCE, резидент шлёт его одной командой. Таблица и общий блок CORE32 — как у SD-ZC: CORE32 обращается
 ; к ним по постоянным адресам (KERNEL.ASM), начальные значения блока — побайтно из SD-ZC v1.11i.
 ; Резидент исполняется в окне #C000, поэтому вызов D_CALL на его время закрывает прерывания
@@ -30,6 +34,10 @@ D_COUNT:        db 0
 D_TRIES:        db 0
 D_RES:          db 0
 D_RESCF:        db 0
+D_READN:        db 0                    ; флаги INFO READN|READDMA (резидент ставит и в образ)
+D_DEST:         dw 0                    ; куда сектор серии: резидент кладёт туда DMA
+D_CPAGE:        db 0                    ; страница окна #C000 вызывающего (D_CALL)
+D_BOUNCED:      db 0                    ; сектор лёг в D_BOUNCE: драйверу перенести его в HL
 
 D_SELDEV:
         xor a
@@ -64,6 +72,8 @@ D_CALL:
         push af                         ; P/V — были ли прерывания открыты
         ld bc,#13AF
         in e,(c)
+        ld a,e
+        ld (D_CPAGE),a                  ; туда, если HL в окне #C000, резидент кладёт сектор DMA
         push de                         ; E — страница окна #C000
         ld a,(D_PAGE)
         out (c),a
@@ -173,13 +183,38 @@ D_RDDSE:
         ld a,RES_BEGIN
         call D_DO
         jr c,D_FAIL
+        ld a,(D_READN)
+        or a
+        jr z,.sector
+        ld a,RES_READN                  ; серия: запрос и первый сектор
+.series:
+        ld (D_DEST),hl
+        call D_DO
+        jp c,D_FAIL
+        ld a,(D_BOUNCED)
+        or a
+        jr z,.placed                    ; сектор уже в HL: его положил DMA
+        ex de,hl
+        ld hl,D_BOUNCE
+        ld bc,512
+        ldir                            ; окно #C000 уже прежнее: HL может быть и там
+        ex de,hl
+        jr .moved
+.placed:
+        inc h
+        inc h                           ; HL += 512
+.moved:
+        call D_NEXT
+        ld a,RES_NEXTN
+        jr nz,.series
+        jp D_OK
 .sector:
         xor a
         ld (D_PART),a
 .part:
         ld a,RES_READ
         call D_DO
-        jr c,D_FAIL
+        jp c,D_FAIL
         ld a,(D_PART)
         inc a
         ld (D_PART),a
@@ -192,4 +227,4 @@ D_RDDSE:
         ex de,hl
         call D_NEXT
         jr nz,.sector
-        jr D_OK
+        jp D_OK

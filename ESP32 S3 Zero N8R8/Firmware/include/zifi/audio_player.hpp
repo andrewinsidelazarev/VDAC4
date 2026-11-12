@@ -112,6 +112,10 @@ class AudioPlayer {
   // выводит. pcmWrite ждёт места до kPcmWriteWaitMs и возвращает принятые
   // кадры; вызывать из задачи приложения, не из задачи звука.
   bool pcmOpen(uint32_t rate, uint8_t channels);
+  // Короткий буфер DMA I2S (6 x 240 кадров, ~33 мс вместо 87) на следующие сеансы PCM — для видео: звук кадра
+  // приходит из ядра видео лишь за кадр до показа. Возвращает глубину DMA в кадрах вывода, которая
+  // будет у следующего pcmOpen. Закрытие сеанса и прочие режимы возвращают обычную глубину.
+  uint32_t pcmLowLatency(bool on);
   size_t pcmWrite(const float* frames, size_t count);
   uint32_t pcmQueuedMs() const;
   void pcmFlush();
@@ -185,6 +189,8 @@ class AudioPlayer {
   static void taskEntry(void* context);
   void taskLoop();
   bool startI2s();
+  bool createI2s(uint32_t descriptors, uint32_t frames, uint32_t rate);
+  void setDmaDepth(uint32_t descriptors, uint32_t frames);
   void apply(const Command& command);
   void streamStep();
   void toneStep();
@@ -204,6 +210,9 @@ class AudioPlayer {
   bool sendTone(const ToneStep* steps, size_t count);
 
   void* channel_;        // i2s_chan_handle_t
+  uint32_t dmaDescriptors_ = 8;   // глубина DMA канала сейчас (createI2s)
+  uint32_t dmaFrames_ = 480;
+  std::atomic<bool> lowLatency_{false};   // pcmLowLatency: короткий DMA следующему сеансу PCM
   void* decoder_;        // HMP3Decoder
   TaskHandle_t task_;
   QueueHandle_t commands_;

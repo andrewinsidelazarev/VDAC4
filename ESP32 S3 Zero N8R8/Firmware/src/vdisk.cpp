@@ -289,6 +289,18 @@ bool Volume::load(uint32_t index) {
   return true;
 }
 
+bool Volume::fileAt(uint32_t cluster, Source** source, std::vector<char>& where, uint64_t* size) const {
+  const int x = built_ ? findExtent(cluster) : -1;
+  if (x < 0) return false;
+  const uint32_t index = extents_[x].node;
+  const Node& n = nodes_[index];
+  if ((n.flags & kDir) || n.cluster != cluster || n.source >= sources_.size()) return false;
+  if (!path(index, where)) return false;
+  *source = sources_[n.source];
+  *size = n.size;
+  return true;
+}
+
 int Volume::findExtent(uint32_t cluster) const {
   // extents_ растут по кластерам (выдача по порядку)
   size_t lo = 0, hi = extents_.size();

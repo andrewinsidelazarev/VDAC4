@@ -16,6 +16,7 @@ class SdBridgeHostTest(unittest.TestCase):
     def test_scenarios(self):
         exe = build_exe(BUILD, 'sd_bridge_host.exe', [ROOT / 'include'],
                         [(ROOT / 'src' / 'sd_bridge_card.cpp', 'card.obj'),
+                         (ROOT / 'src' / 'fat32_map.cpp', 'fat32.obj'),
                          (ROOT / 'tests' / 'sd_bridge_host.cpp', 'host.obj')])
         if exe is None:
             raise unittest.SkipTest('нет Visual Studio Build Tools')

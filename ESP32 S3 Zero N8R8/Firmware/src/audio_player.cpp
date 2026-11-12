@@ -55,6 +55,13 @@ constexpr uint32_t kMinDacRate = 16000;
 // Буферы DMA I2S: 8 x 480 кадров — около 87 мс запаса на 44,1 кГц.
 constexpr uint32_t kDmaDescriptors = 8;
 constexpr uint32_t kDmaFrames = 480;
+// Короткий буфер — для видео (pcm_low_latency, VIDEO.ELF): звук кадра приходит из ядра видео лишь
+// за ~1 кадр до показа (ядро держит наперёд один декодированный кадр), а 8 x 480 держали его ещё
+// 87 мс — звук всё время отставал от картинки на 75–136 мс, и сверке нечего было выбросить, чтобы
+// догнать (11.11.2026; стенд VIDEO.ELF: с 6 x 240 и очередью 40 мс — 28–48 мс у PCM, 44–64 у MP3,
+// без обрывов). Только на время сеанса PCM.
+constexpr uint32_t kLowDmaDescriptors = 6;   // 33 мс: короче — стирание flash (журнал) рвало бы звук
+constexpr uint32_t kLowDmaFrames = 240;
 constexpr uint32_t kI2sWriteTimeoutMs = 1000;
 constexpr uint32_t kCommandTimeoutMs = 500;
 constexpr uint32_t kStartTimeoutMs = 2000;
@@ -430,12 +437,35 @@ void AudioPlayer::taskEntry(void* context) {
 }
 
 bool AudioPlayer::startI2s() {
+  return createI2s(kDmaDescriptors, kDmaFrames, kDefaultRate);
+}
+
+// Глубину DMA ESP-IDF задаёт только при создании канала: другая — канал заново, на той же частоте.
+void AudioPlayer::setDmaDepth(uint32_t descriptors, uint32_t frames) {
+  if (channel_ != nullptr && descriptors == dmaDescriptors_ && frames == dmaFrames_) {
+    return;
+  }
+  const uint32_t rate = outputRate_ != 0 ? outputRate_ : kDefaultRate;
+  if (channel_ != nullptr) {
+    i2s_channel_disable(channelOf(channel_));
+    i2s_del_channel(channelOf(channel_));
+    channel_ = nullptr;
+  }
+  if (createI2s(descriptors, frames, rate)) {
+    bringupLog(kTag, "I2S DMA %u x %u frames (%u ms)", static_cast<unsigned>(descriptors),
+               static_cast<unsigned>(frames), static_cast<unsigned>(descriptors * frames * 1000U / rate));
+  } else if (!createI2s(kDmaDescriptors, kDmaFrames, rate)) {
+    bringupLog(kTag, "I2S channel was not re-created: no sound until restart");
+  }
+}
+
+bool AudioPlayer::createI2s(uint32_t descriptors, uint32_t frames, uint32_t rate) {
   i2s_chan_config_t channelConfig = {};
   channelConfig.id = I2S_NUM_0;
   channelConfig.role = I2S_ROLE_MASTER;
-  // 8 x 480 отсчётов — около 87 мс запаса на 44,1 кГц.
-  channelConfig.dma_desc_num = kDmaDescriptors;
-  channelConfig.dma_frame_num = kDmaFrames;
+  // Обычно 8 x 480 отсчётов — около 87 мс запаса на 44,1 кГц; для видео — короче.
+  channelConfig.dma_desc_num = descriptors;
+  channelConfig.dma_frame_num = frames;
   // Когда данных нет, в ЦАП идут нули, а тактовые не останавливаются: PCM5102
   // не теряет захват и не щёлкает на каждом старте звука.
   channelConfig.auto_clear_after_cb = true;
@@ -448,7 +478,7 @@ bool AudioPlayer::startI2s() {
   }
 
   i2s_std_config_t config = {};
-  config.clk_cfg = clockFor(kDefaultRate);
+  config.clk_cfg = clockFor(rate);
   // Формат Philips I2S (перемычка FMT модуля в L), 16 бит в 32-битном слоте:
   // BCK = 64 fs.
   config.slot_cfg.data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
@@ -480,7 +510,9 @@ bool AudioPlayer::startI2s() {
     return false;
   }
   channel_ = channel;
-  outputRate_ = kDefaultRate;
+  outputRate_ = rate;
+  dmaDescriptors_ = descriptors;
+  dmaFrames_ = frames;
   driveI2sPads();
   gpio_drive_cap_t drive = GPIO_DRIVE_CAP_DEFAULT;
   gpio_get_drive_capability(static_cast<gpio_num_t>(board::kI2sBckPin), &drive);
@@ -492,7 +524,7 @@ bool AudioPlayer::startI2s() {
 void AudioPlayer::setOutputRate(uint32_t sourceRate) {
   repeat_ = sourceRate < kMinDacRate ? 2 : 1;
   const uint32_t wanted = sourceRate * repeat_;
-  if (wanted == outputRate_) {
+  if (wanted == outputRate_ || channel_ == nullptr) {
     return;
   }
   const i2s_std_clk_config_t clock = clockFor(wanted);
@@ -517,6 +549,9 @@ void AudioPlayer::setOutputRate(uint32_t sourceRate) {
 // DMA (до 8 x 480 кадров, около 87 мс), не доигрывать. Канал на мгновение
 // останавливается, буферы заполняются нулями, тактовые идут снова.
 void AudioPlayer::silenceOutput() {
+  if (channel_ == nullptr) {
+    return;
+  }
   const esp_err_t stopped = i2s_channel_disable(channelOf(channel_));
   preloadSilence(channelOf(channel_));
   const esp_err_t started = i2s_channel_enable(channelOf(channel_));
@@ -527,6 +562,9 @@ void AudioPlayer::silenceOutput() {
 }
 
 void AudioPlayer::writeI2s(size_t bytes) {
+  if (channel_ == nullptr) {
+    return;                              // канал не пересоздался (setDmaDepth): звука нет
+  }
   uint16_t peak = watchPeak_;
   for (size_t index = 0; index < bytes / sizeof(int16_t); ++index) {
     const int32_t value = pcm_[index];
@@ -552,7 +590,7 @@ void AudioPlayer::writeI2s(size_t bytes) {
   if (written != 0 && outputRate_ != 0) {
     // Запись возвращается, когда в DMA нашлось место, — то есть DMA снова полон.
     lastWriteMs_.store(static_cast<uint32_t>(esp_timer_get_time() / 1000));
-    dmaTailMs_.store(kDmaDescriptors * kDmaFrames * 1000U / outputRate_);
+    dmaTailMs_.store(dmaDescriptors_ * dmaFrames_ * 1000U / outputRate_);
   }
   if (error == ESP_OK && written == bytes) {
     return;
@@ -659,6 +697,12 @@ void AudioPlayer::apply(const Command& command) {
       input_.discard(input_.available());
       pcmChannels_ = command.argument;
       pcmRate_.store(command.value);
+      // видео попросило короткий буфер DMA (pcm_low_latency) — на этот сеанс
+      if (lowLatency_.load()) {
+        setDmaDepth(kLowDmaDescriptors, kLowDmaFrames);
+      } else {
+        setDmaDepth(kDmaDescriptors, kDmaFrames);
+      }
       setOutputRate(command.value);
       sampleRate_.store(command.value);
       channels_.store(pcmChannels_);
@@ -686,10 +730,12 @@ void AudioPlayer::apply(const Command& command) {
         state_.store(kStateIdle);
         pcmRate_.store(0);
       }
+      setDmaDepth(kDmaDescriptors, kDmaFrames);   // прочим — обычный запас
       xSemaphoreGive(opened_);
       break;
 
     case kCommandOpen:
+      setDmaDepth(kDmaDescriptors, kDmaFrames);
       releaseModule();
       format_.store(kFormatMp3);
       input_.discard(input_.available());
@@ -743,6 +789,7 @@ void AudioPlayer::apply(const Command& command) {
     case kCommandOpenModule:
       // Буфер файла выделило ядро 1 и сейчас будет его заполнять; разбирать
       // его задача начнёт по StartModule.
+      setDmaDepth(kDmaDescriptors, kDmaFrames);
       releaseModule();
       input_.discard(input_.available());
       moduleFile_ = command.data;
@@ -983,7 +1030,13 @@ void AudioPlayer::pcmStep() {
   }
   // Кадров вдвое меньше отсчётов буфера; при удвоении кадров (источник ниже 16 кГц,
   // play) — вчетверо: иначе блок не удваивался и звучал вдвое быстрее и выше.
-  const size_t blockBytes = (repeat_ == 2 ? kPcmSamples / 4 : kPcmSamples / 2) * 2 * sizeof(int16_t);
+  size_t blockFrames = repeat_ == 2 ? kPcmSamples / 4 : kPcmSamples / 2;
+  // Короткий буфер DMA (видео): блок не длиннее дескриптора — иначе он сам добавлял бы задержку
+  // (1152 кадра — 26 мс, и их не видно в pcmQueuedMs, пока DMA их принимает).
+  if (dmaFrames_ < kDmaFrames && blockFrames > dmaFrames_ / repeat_) {
+    blockFrames = dmaFrames_ / repeat_;
+  }
+  const size_t blockBytes = blockFrames * 2 * sizeof(int16_t);
   size_t available = input_.available() & ~static_cast<size_t>(3);
   if (available == 0) {
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -1279,6 +1332,11 @@ void AudioPlayer::toneStep() {
     ++stepIndex_;
     stepPosition_ = 0;
   }
+}
+
+uint32_t AudioPlayer::pcmLowLatency(bool on) {
+  lowLatency_.store(on);
+  return on ? kLowDmaDescriptors * kLowDmaFrames : kDmaDescriptors * kDmaFrames;
 }
 
 bool AudioPlayer::pcmOpen(uint32_t rate, uint8_t channels) {

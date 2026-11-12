@@ -66,6 +66,11 @@ class Volume {
   // Сектор lba (512 байт) в out. false — ошибка источника (сектор не годен).
   bool read(uint32_t lba, uint8_t* out);
 
+  // Файл тома, который начинается кластером cluster (первый кластер из записи каталога WC: видео с
+  // SD2 — sd2_files): источник, путь внутри него, длина. false — такого файла нет (каталог, середина
+  // файла, том собран заново).
+  bool fileAt(uint32_t cluster, Source** source, std::vector<char>& where, uint64_t* size) const;
+
   // Для проверок: сколько узлов и кластеров выдано
   size_t nodeCount() const { return nodes_.size(); }
   uint32_t clustersUsed() const { return nextCluster_ - kRootCluster; }

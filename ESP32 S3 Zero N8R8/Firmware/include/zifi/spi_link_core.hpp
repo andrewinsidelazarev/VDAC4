@@ -122,6 +122,23 @@ class SpiLinkCore {
   // Начало сеанса (ZiFi_Init). Номер новой программы может случайно совпасть с
   // последним номером прежней, поэтому такой запрос повтором не считается.
   static constexpr uint8_t kFlagNewSession = 0x80;
+  // Секторы SD2 для резидента VDAC4 VFS (0.1.128). Запрос с этим флагом берёт блок не из общей
+  // очереди кадров, а из очереди секторов (её наполняет служба VDISK, pushSector), и Z80 кладёт
+  // его своим DMA прямо в буфер WC — ни одного байта через процессор (прежде сектор шёл кадрами
+  // по 54 байта за обмен и стоил Z80 ~89 000 тактов: SD2 — не быстрее ~79 КБ/с даже при мгновенной
+  // ESP, FLAC с карты Tang не успевал, 11.11.2026). Целость — та же обратная посылка, что у
+  // блока; данных в ответе нет. Статус ответа на такой запрос:
+  //   kStatusBulk — сектор выставлен; с kStatusEchoBad — тот же снова (прошлая копия неверна);
+  //   kStatusBulk | kStatusBulkStale — выставлен чужой старый блок: прочитать и выбросить;
+  //   kStatusBulkStale без kStatusBulk либо kStatusEchoBad без kStatusBulk — серия кончилась
+  //   отказом (источник не прочитал сектор, DMA нет, копия трижды неверна);
+  //   ничего из этого — сектора пока нет, спросить снова.
+  // Подтверждение сектора — следующий такой же запрос (итог сверки), и в том же ответе может
+  // прийти уже следующий сектор. Новый сеанс отменяет серию: очередь секторов пустеет, служба,
+  // ждущая места, бросает серию (сеанс сменился).
+  static constexpr uint8_t kFlagSector = 0x20;
+  // Секторов наперёд: служба читает карту, пока Z80 забирает прежние.
+  static constexpr size_t kSectorSlots = 4;
 
   // Статус ответа: у ESP остались данные, следующий обмен можно начинать сразу.
   static constexpr uint8_t kStatusMore = 0x01;
@@ -168,6 +185,8 @@ class SpiLinkCore {
     uint32_t bulkGaveUp;     // сколько раз DMA выключался до конца сеанса
     uint32_t putBlocks;      // блоков, принятых от Z80 через DMA
     uint32_t putBad;         // блоков от Z80, не сошедшихся с XOR
+    uint32_t sectorBlocks;   // секторов, подтверждённых Z80
+    uint32_t sectorBad;      // секторов, вернувшихся с искажением
   };
 
   SpiLinkCore();
@@ -209,6 +228,21 @@ class SpiLinkCore {
   uint32_t activity() const;
   Stats stats() const;
 
+  // --- очередь секторов (служба VDISK; см. kFlagSector) ---------------------
+
+  // Место под очередь: kSectorSlots * kBulkSize байтов (память даёт вызывающий, как у колец).
+  // Без него секторов нет: pushSector отказывает, запрос сектора — как без DMA.
+  void attachSectors(uint8_t* storage);
+  bool sectorsAttached() const { return sectorSlots_ != nullptr; }
+  // Номер сеанса Z80. Серия идёт в сеансе, начатом перед её запросом; новый сеанс её отменяет.
+  uint32_t sectorSession() const;
+  // Положить сектор kBulkSize байтов. false — места нет либо сеанс уже не тот (sectorSession).
+  bool pushSector(const uint8_t* data, uint32_t session);
+  // Серия сеанса session кончилась отказом: Z80 узнает об этом, забрав уже положенное.
+  void failSectors(uint32_t session);
+  // Растёт, когда в очереди освобождается место или сменился сеанс: будить ждущую службу.
+  uint32_t sectorWakes() const;
+
   static uint8_t checksum(const uint8_t* data, size_t length);
 
  private:
@@ -219,6 +253,7 @@ class SpiLinkCore {
   uint8_t lastTid_;
   bool haveLast_;
   bool blockOut_;        // блок взят из очереди и ещё не подтверждён
+  bool blockSector_;     // этот блок — сектор из очереди секторов, а не из очереди кадров
   bool bulkGaveUp_;      // DMA выключен до начала нового сеанса
   uint8_t blockTries_;   // сколько раз этот блок не прошёл проверку
   // Сколько байтов неподтверждённого блока осталось отдать обычными ответами.
@@ -243,6 +278,20 @@ class SpiLinkCore {
   std::atomic<uint32_t> bulkGaveUps_;
   std::atomic<uint32_t> putBlocks_;
   std::atomic<uint32_t> putBad_;
+  std::atomic<uint32_t> sectorBlocks_;
+  std::atomic<uint32_t> sectorBad_;
+
+  // Очередь секторов: кладёт служба VDISK (sectorTail_), берёт задача обмена (sectorHead_).
+  // Каждый сектор помечен сеансом: положенный в отменённом сеансе выбрасывается при взятии.
+  bool takeSector(uint8_t* output);
+  void newSectorSession();
+  uint8_t* sectorSlots_;                 // kSectorSlots блоков по kBulkSize
+  uint32_t slotSession_[kSectorSlots];
+  std::atomic<uint32_t> sectorHead_;
+  std::atomic<uint32_t> sectorTail_;
+  std::atomic<uint32_t> sectorSession_;
+  std::atomic<uint32_t> sectorFailed_;   // сеанс, чья серия кончилась отказом; 0 — нет
+  std::atomic<uint32_t> sectorWakes_;
 };
 
 }  // namespace zifi
