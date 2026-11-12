@@ -18,6 +18,7 @@ ap.add_argument('--planes', type=int, default=4)
 ap.add_argument('--hires', action='store_true', help='640 точек: выборка плоскостей занимает все слоты окна DDF')
 ap.add_argument('--lace', action='store_true', help='interlace: 512 строк в плоскости, модуль — строка')
 ap.add_argument('--lace-field', action='store_true', help='вывод interlace: последнее поле (0.13.9)')
+ap.add_argument('--no-stretch', action='store_true', help='не растягивать по высоте (0.13.11)')
 ap.add_argument('--dump', help='кадры вывода HDMI: «С,N» (run_boot.py --hdmi-dump)')
 ap.add_argument('--diw', default='2C81,2CC1', help='DIWSTRT,DIWSTOP (hex), по умолчанию стандартный экран PAL')
 args = ap.parse_args()
@@ -89,7 +90,7 @@ stage.mkdir(exist_ok=True)
 path = stage / 'video_load.rom'
 path.write_bytes(rom)
 cmd = [sys.executable, str(root / 'run_boot.py'), '--video', '--slot-stats', '--stage', args.stage,
-       '--seconds', str(args.seconds), '--rom', str(path)] + (['--compat'] if args.compat else []) + (['--lace-field'] if args.lace_field else []) + (['--hdmi-dump', args.dump] if args.dump else []) + \
+       '--seconds', str(args.seconds), '--rom', str(path)] + (['--compat'] if args.compat else []) + (['--lace-field'] if args.lace_field else []) + (['--no-stretch'] if args.no_stretch else []) +(['--hdmi-dump', args.dump] if args.dump else []) + \
       (['--no-build'] if args.no_build else [])
 run = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors='replace')
 log = (stage / 'run.log').read_text(encoding='utf-8', errors='replace')

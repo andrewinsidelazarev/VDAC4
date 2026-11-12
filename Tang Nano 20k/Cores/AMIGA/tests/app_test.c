@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #define CHECK(x) do { if (!(x)) { printf("FAIL %d: %s\n",__LINE__,#x); exit(1); } } while(0)
-static uint32_t video_register,video_capability=0x41565331u,lace_capability=0x414C4631u;
+static uint32_t video_register,video_capability=0x41565331u,lace_capability=0x414C4631u,fit_capability=0x41465331u;
 static int video_write_failed;
 static uint32_t mode_register,mode_capability=0x414D4331u;static int mode_write_failed;   // режим совместимости (слой 0.25)
 static uint32_t ticks, expected, seq, delivered, mask_lo, mask_hi;
@@ -94,6 +94,7 @@ static int read_mock(uint32_t a,uint32_t *v,uint32_t n) {
     CHECK(n==1); *v=0;
     if(a==R_VIDEO_CAP)*v=video_capability;
     if(a==R_LACE_CAP)*v=lace_capability;
+    if(a==R_FIT_CAP)*v=fit_capability;
     if(a==R_VIDEO)*v=video_register;
     if(a==R_MODE_CAP)*v=mode_capability;
     if(a==R_MODE)*v=mode_register;
@@ -615,9 +616,9 @@ int main(int argc,char **argv) {
             const unsigned before=hid_count;tap(&parser,0x0b);tap(&parser,0x83); // F6/F7, ordinary Amiga keys
             CHECK(video_config==0);CHECK(video_register==0);CHECK(hid_count==before+4);
             tap(&parser,0x78);CHECK(menu_open);for(unsigned i=0;i<5;i++)tap(&parser,0x0d);
-            CHECK(menu_card==CARD_VIDEO);CHECK(menu_item_n==3);CHECK(menu_cursor==0);
+            CHECK(menu_card==CARD_VIDEO);CHECK(menu_item_n==4);CHECK(menu_cursor==0);
             CHECK(!strcmp(menu_items[0].name,"PICTURE SIZE"));CHECK(!strcmp(menu_items[1].name,"COMPATIBILITY"));
-            CHECK(!strcmp(menu_items[2].name,"INTERLACE"));
+            CHECK(!strcmp(menu_items[2].name,"INTERLACE"));CHECK(!strcmp(menu_items[3].name,"STRETCH HEIGHT"));
             CHECK(!strcmp(video_value(1),"OFF"));
             tap(&parser,0x5a);CHECK(video_config==1);CHECK(video_register==1);CHECK(!strcmp(video_value(0),"95%"));
             tap(&parser,0x5a);CHECK(video_config==2);tap(&parser,0x5a);CHECK(video_config==0);tap(&parser,0x5a);CHECK(video_config==1);
@@ -667,6 +668,24 @@ int main(int argc,char **argv) {
             CHECK(!strcmp(video_value(2),"N/A"));
             menu_cursor=2;tap(&parser,0x5a);CHECK(video_config==6);CHECK(strstr(menu_status,"UPDATE AMIGA.BIN"));
             lace_capability=0x414C4631u;tap_ext(&parser,0x71);CHECK(video_config==0);CHECK(video_register==0);   // Del
+            // STRETCH HEIGHT (слой 0.29, ядро 0.13.11): строка 3 — бит 3 R_VIDEO (1 — не растягивать), сразу и на карту
+            // (AMIGA-VIDEO 3); размер бит не сбрасывает; прежние версии VIDEO.CFG — растягивать.
+            CHECK(video_apply());CHECK(fit_supported);CHECK(!strcmp(video_value(3),"ON"));
+            menu_cursor=3;tap(&parser,0x5a);CHECK(video_config==8);CHECK(video_register==8);CHECK(!strcmp(video_value(3),"OFF"));
+            CHECK(menu_mode==MODE_LIST);CHECK(resets==resets_before);
+            menu_cursor=0;tap(&parser,0x5a);CHECK(video_config==9);CHECK(video_register==9);
+            video_config=0;CHECK(video_read_config());CHECK(video_config==9);CHECK(video_register==9);
+            {const char v3[]="AMIGA-VIDEO 3 1 0 2\n";CHECK(video_parse((const uint8_t*)v3,sizeof v3-1));CHECK(video_config==14);}
+            {const char v3[]="AMIGA-VIDEO 3 0 1 0\r\n";CHECK(video_parse((const uint8_t*)v3,sizeof v3-1));CHECK(video_config==0);}
+            {const char v2[]="AMIGA-VIDEO 2 0 1\n";CHECK(video_parse((const uint8_t*)v2,sizeof v2-1));CHECK(video_config==1);}
+            {const char bad[]="AMIGA-VIDEO 3 0 2 0\n";CHECK(!video_parse((const uint8_t*)bad,sizeof bad-1));}
+            {const char bad[]="AMIGA-VIDEO 3 0 1\n";CHECK(!video_parse((const uint8_t*)bad,sizeof bad-1));}
+            {const char bad[]="AMIGA-VIDEO 4 0 1 0\n";CHECK(!video_parse((const uint8_t*)bad,sizeof bad-1));}
+            // Ядро без бита 3 (до 0.13.11): пункт N/A, в регистр бит не идёт, Enter не меняет.
+            fit_capability=0;video_config=9;CHECK(video_apply());CHECK(!fit_supported);CHECK(video_register==1);
+            CHECK(!strcmp(video_value(3),"N/A"));
+            menu_cursor=3;tap(&parser,0x5a);CHECK(video_config==9);CHECK(strstr(menu_status,"UPDATE AMIGA.BIN"));
+            fit_capability=0x41465331u;tap_ext(&parser,0x71);CHECK(video_config==0);CHECK(video_register==0);   // Del
             tap(&parser,0x76);CHECK(!menu_open);mem_remove(VIDEO_CFG);mem_remove(MODE_CFG);menu_items_free();menu_card=CARD_TANG;
         }
         // Самый большой диск: карта занятости не влезает в корень, цепочка дополнительных блоков.

@@ -7,6 +7,7 @@
 // целый кадр (на плате — чёрный экран загрузки). Счётчик overruns остаётся.
 module amiga_video_capture(
  input wire clk,reset,hs,vs,window_in,lace,field,
+ input wire fit, // 12.11.2026 (0.13.11): не растягивать по высоте (бит 3 регистра картинки, такт тот же)
  input wire [23:0] rgb,
  input wire read_clk,input wire [9:0] read_address,output reg [31:0] read_rgb,
  input wire [1:0] consumed,
@@ -53,6 +54,13 @@ module amiga_video_capture(
  wire [9:0] ybase=pal ? 10'd23:10'd20;
  wire [9:0] yend=pal ? 10'd311:10'd260;
  wire sample=cx>=330 && cx<1802 && cy>=ybase && cy<yend && !cx[0];
+ // 12 ноября 2026 (0.13.11): STRETCH HEIGHT (бит 3 регистра картинки). ON (по умолчанию) — окно DIW, растянутое на весь
+ // кадр, как до 0.13.10. OFF (fit) — по вертикали весь растр, как у оригинальной Amiga с монитором и у исходного NanoMig:
+ // 288 строк PAL с 23-й после VSYNC (NTSC 240 с 20-й), каждая строка ровно дважды; картинка стоит там, куда её ставит
+ // программа, без центрирования. По горизонтали — окно DIW в обоих режимах (растяжение 16:9 задумано).
+ reg fit_r=0;
+ wire [9:0] dh=ymax-ymin+10'd2;                                   // высота окна DIW, логические строки
+ wire [9:0] field_h=pal ? 10'd576:10'd480;
  wire [9:0] x=(cx-330)>>1;
  wire [9:0] y=(cy-ybase)<<1;
  // Половина строки — точки x_lo..x_lo+367; точка p занимает байты 3p..3p+2, блок = 16 байт.
@@ -76,7 +84,7 @@ module amiga_video_capture(
      frame_toggle<=0;overruns<=0;frame_info<=0;pal<=1;pal_seen<=1;bank<=0;black_frames<=0;lit<=0;
      wx0<=0;wx1<=735;wy0<=0;wy1<=575;
      got<=0;skip_half<=0;any_window<=0;
-     xmin<=10'd41;xmax<=10'd680;ymin<=10'd34;ymax<=10'd546;
+     xmin<=736;xmax<=0;ymin<=576;ymax<=0;fit_r<=0;
    end else begin
      // 7 ноября 2026: счётчики останавливаются, а не идут по кругу. При инициализации
      // graphics.library кадрового импульса нет ~0,16 с (TOD CIA-A за 46 мс не тикает,
@@ -102,14 +110,9 @@ module amiga_video_capture(
        else if(cy>=250 && cy<=270) begin if(!pal_seen)pal<=0; pal_seen<=0; end
        bank<=~bank;lace_r<=lace;field_r<=field;cap_ahead<=0;
        row_addr<=(lace ? (field ? 17'd138:17'd0) : (!bank ? 17'd39744:17'd0));
-       // 12 ноября 2026 (0.13.10): рамка вывода — стандартный экран Amiga (DIW $2C81-$2CC1 PAL, $2C81-$F4C1 NTSC; на
-       // захвате x 41..680, y 34..546 / 40..440 — измерено в модели), окно DIW её только расширяет (оверскан). Как у
-       // монитора и у исходного NanoMig (окно экрана фиксированное): картинка стоит там, куда её ставит программа. Прежде
-       // рамкой было окно DIW, растянутое на весь кадр: у программы, чьё окно меньше экрана или несимметрично картинке,
-       // сцена съезжала, с другой стороны оставалась чёрная полоса («9 Fingers», Spaceballs: в оригинале все сцены по
-       // вертикали в центре). Workbench, игры на весь экран и оверскан — как прежде; растяжение на 16:9 — как прежде.
-       // Строки и точки полей тоже пишутся в SDRAM (окно записи wx/wy — то же), иначе на полях остались бы старые кадры.
-       got<=0;any_window<=0;lit<=0;xmin<=10'd41;xmax<=10'd680;ymin<=pal ? 10'd34:10'd40;ymax<=pal ? 10'd546:10'd440;
+       // 12.11.2026 (0.13.11): рамка 0.13.10 (стандартный экран на месте DIW $2C81) снята. STRETCH HEIGHT — см. fit_r выше;
+       // берётся с начала кадра.
+       got<=0;any_window<=0;lit<=0;xmin<=736;xmax<=0;ymin<=576;ymax<=0;fit_r<=fit;
      end
      if(sample) begin
        got<=1;
@@ -139,17 +142,18 @@ module amiga_video_capture(
        if(window_in) begin
          any_window<=1;win_line<=1;if(|rgb)lit<=1;
          if(x<xmin)xmin<=x;if(x>xmax)xmax<=x;
-         if(y<ymin)ymin<=y;if(y>ymax)ymax<=y; // 0.13.10: от стандартного окна, не от первой строки окна
+         if(!any_window)ymin<=y;ymax<=y; // y внутри кадра только растёт
        end
      end
      if(cx==0 && cy==yend && got) begin
        // 11.11.2026 (0.13.9): бит 42 — поле этого кадра (field_r): вывод в режиме «последнее поле» берёт его строки
-       frame_info<={1'b0,field_r,bank,lace_r,any_window?xmin:10'd0,any_window?ymin:10'd0,
-         any_window?xmax-xmin+10'd1:10'd736,any_window?ymax-ymin+10'd2:(pal?10'd576:10'd480)};
+       frame_info<={1'b0,field_r,bank,lace_r,any_window?xmin:10'd0,(any_window && !fit_r)?ymin:10'd0,
+         any_window?xmax-xmin+10'd1:10'd736,(any_window && !fit_r)?dh:field_h};
        frame_toggle<=~frame_toggle;
        if(any_window && !lit) black_frames<=black_frames+1'b1; // по кругу: важен рост
        if(any_window && xmax-xmin>=10'd159 && ymax-ymin>=10'd98) begin
-         wx0<=xmin;wx1<=xmax;wy0<=ymin;wy1<=ymax+10'd1;
+         // OFF: пишутся все строки растра (бордюр тоже), иначе на нём остались бы старые кадры
+         wx0<=xmin;wx1<=xmax;wy0<=fit_r?10'd0:ymin;wy1<=fit_r?field_h-10'd1:ymax+10'd1;
        end else begin wx0<=0;wx1<=735;wy0<=0;wy1<=575;end
      end
    end

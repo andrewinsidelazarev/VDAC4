@@ -10,7 +10,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 | **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Evo, `/WC/ESP` | 1.47, слой ESP 0.12 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`VIDEO/esp/dist/VIDEO.ELF`](VIDEO/esp/dist/VIDEO.ELF) |
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.10 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
-| **Amiga / AGA** (на основе NanoMig) — 68020, 2 МиБ chip + 4 МиБ fast, дискета DF0, жёсткий диск HDF, HDMI 576p | карта Tang, `CORES` | 0.13.10, слой ESP 0.28 | [`SD/CORES/AMIGA.BIN`](SD/CORES/AMIGA.BIN), [`AMIGA.ELF`](SD/CORES/AMIGA.ELF) |
+| **Amiga / AGA** (на основе NanoMig) — 68020, 2 МиБ chip + 4 МиБ fast, дискета DF0, жёсткий диск HDF, HDMI 576p | карта Tang, `CORES` | 0.13.12, слой ESP 0.29 | [`SD/CORES/AMIGA.BIN`](SD/CORES/AMIGA.BIN), [`AMIGA.ELF`](SD/CORES/AMIGA.ELF) |
 | **Mega Drive / Genesis** (на основе mdtang) — YM2612 и PSG синтезирует ESP, снимки F5/F6, HDMI 720p60/720p50 по стандарту; нужна прошивка ESP 0.1.111 | карта Tang, `CORES` | 0.8, слой ESP 1.7 | [`SD/CORES/MD.BIN`](SD/CORES/MD.BIN), [`MD.ELF`](SD/CORES/MD.ELF) |
 
 `.BIN` — само ядро. `.ELF` — его слой на ESP: клавиатура и мышь Evo, звук на ЦАП ESP, сохранения на
@@ -107,7 +107,7 @@ Evo порциями DMA, рисует «Loading the game», имя файла �
 
 | Amiga | |
 |---|---|
-| F11 | меню дискет, дисков и настроек (SETUP: размер картинки, режим совместимости 68000, interlace — оба поля или последнее; KEYS: клавиатура как джойстик — назначенные клавиши в этом режиме до Amiga не доходят) |
+| F11 | меню дискет, дисков и настроек (SETUP: размер картинки, режим совместимости 68000, interlace — оба поля или последнее, растяжение по высоте; KEYS: клавиатура как джойстик — назначенные клавиши в этом режиме до Amiga не доходят) |
 | Ctrl+Alt+F4 | тёплый сброс |
 | F12 | выход в WC |
 

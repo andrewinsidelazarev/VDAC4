@@ -28,7 +28,7 @@ module amiga_video(
     wire [3:0] black_frames;
     wire pal;
     wire cap_ahead,cap_bank; // 9.11.2026 (0.13.7): см. выбор банка ниже
-    amiga_video_capture capture(.clk(clk28),.reset(reset28),.hs(hs),.vs(vs),
+    amiga_video_capture capture(.clk(clk28),.reset(reset28),.hs(hs),.vs(vs),.fit(picture[3]),
         .window_in(window_in),.lace(lace),.field(field),.rgb(rgb_in),
         .read_clk(clk85),.read_address(capture_read_address),.read_rgb(capture_rgb),
         .consumed(consumed),.ready_toggle(capture_ready),

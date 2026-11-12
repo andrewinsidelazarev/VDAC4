@@ -19,6 +19,7 @@ ap.add_argument('--stage',help='своя папка сборки в tests/ (дв
 ap.add_argument('--hdmi-dump',help='с --video: «С,N» — кадры вывода 576p/480p (то, что уходит в TMDS) в hdmi_NNNNN.ppm с секунды С, каждый N-й')
 ap.add_argument('--threads',type=int,default=0,help='Verilator --threads N (быстрее на многоядерном ПК)')
 ap.add_argument('--lace-field',action='store_true',help='с --video: бит 2 регистра картинки — interlace, показ последнего поля (0.13.9)')
+ap.add_argument('--no-stretch',action='store_true',help='с --video: бит 3 регистра картинки — не растягивать по высоте (0.13.11)')
 ap.add_argument('--no-build',action='store_true');args=ap.parse_args()
 root=Path(__file__).resolve().parents[1]
 stage=root/('tests/'+args.stage if args.stage else 'tests/boot-video-build' if args.video else 'tests/boot-build');stage.mkdir(exist_ok=True)
@@ -60,7 +61,7 @@ always @(posedge clk_28m) begin
 end
 ''' if args.video else 'assign video_diag=0;\n'
 # 11.11.2026 (0.13.9): --lace-field — бит 2 регистра картинки: interlace, показ последнего поля
-video=video.replace('PICTURE',"4'd4" if args.lace_field else "4'd0")
+video=video.replace('PICTURE',f"4'd{(4 if args.lace_field else 0)|(8 if args.no_stretch else 0)}")
 # 11.11.2026: ram_double, ram_single и steal — как в amiga_vdac4.sv. Прежде стенд их не подключал: steal был 0 (CPU и
 # блиттер никогда не уступали отстающему видео), сдвоенного чтения не было — пропуски захвата стенда завышены.
 if args.video and args.hdmi_dump:
