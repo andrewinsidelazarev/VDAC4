@@ -13,6 +13,23 @@
  * встала: поток не успел) — вставляется тишина. После начала звука и после паузы — точно
  * (ALIGN_MS). Очередь ЦАП держится короткой (буфер DMA ESP + QUEUE_MS), поэтому поправка
  * действует сразу.
+ * ЗАДЕРЖКА ВЫВОДА. Ядро держит наперёд один декодированный кадр: звук кадра приходит сюда лишь за
+ * ~1 кадр до его показа. Всё, что дольше этого лежит между pcm_write и ЦАП, — отставание звука,
+ * которое сверка не исправит (выбросить нечего: звук приходит впритык). Обычный буфер DMA ESP
+ * (8 × 480 кадров, 87 мс) и очередь 60 мс держали звук позади картинки на 75–136 мс, и сверка
+ * поправляла каждые 100 мс (на плате — «adjusted 49 times in 5 s», 11.11.2026). Прошивка 0.1.129+
+ * (ABI 1.16, pcm_low_latency) даёт короткий буфер DMA (6 × 240 кадров, 33 мс при 44,1 кГц), очередь
+ * сверх него — QUEUE_LOW_MS: на стенде звук позади картинки на 28–48 мс (PCM) и 44–64 мс (MP3) вместо
+ * 75–136, без обрывов. Короче DMA не взят: стирание flash (журнал ESP) останавливает кэш на десятки мс,
+ * и это время ЦАП держится только буфером DMA.
+ * СВОДКА в журнал — при конце потока (выход, перемотка), не каждые 5 с: запись во flash останавливает
+ * кэш, и периодическая строка сама рвала бы звук. В ней — расхождение звука с картинкой (среднее,
+ * крайние) и сколько поправок СДЕЛАНО (раньше считались и сверки, где выбросить было нечего).
+ * У MP3 декодер отдаёт сначала задержку кодека (кодер LAME 576 + декодер 529 отсчётов): она — не звук
+ * ролика и идёт в счёт как вставленная тишина; выбрасывает её обычная сверка, когда есть запас.
+ * Выброс сразу в начале опустошал очередь (звук приходит впритык): стенд — обрыв ЦАП на ~120 мс.
+ * Запас MP3 в кольце — по битрейту декодера, не по nAvgBytesPerSec заголовка: при неверном заголовке
+ * (6000 вместо 16 000) сверка выбрасывала втрое больше, чем лежало, и ЦАП пустел.
  * Режим часов звука ядра (R_AU_CTL бит 1) не включается: если звук в файле лежит позже своего кадра
  * дальше, чем разбор опережает показ (1–2 кадра), часы встали бы навсегда.
  *
@@ -31,19 +48,25 @@
  * обнуляет его указатель записи; ядро не берёт звук, пока эпоха не подтверждена (R_AU_CTL [15:8]):
  * здесь — свой указатель в 0, очередь ЦАП и декодер — заново, затем подтверждение.
  */
+#include <stddef.h>
 #include <string.h>
 
 #include "video.h"
 #include "zm_source.h"
 
-#define QUEUE_MS     60u         /* очередь ЦАП сверх буфера DMA ESP не длиннее */
+#define QUEUE_MS     60u         /* очередь ЦАП сверх буфера DMA ESP не длиннее (прошивка до 0.1.129) */
+#define QUEUE_LOW_MS 40u         /* то же при коротком буфере DMA (pcm_low_latency): звук ядра приходит
+                                    порциями по кадру (40 мс) — очередь короче их не перекрывала
+                                    (стенд: обрывы ЦАП в начале MP3 и после перемотки при 20) */
+#define MP3_DELAY_START 1105u    /* кадров задержки кодека в начале файла: кодер LAME 576 + декодер 529 */
+#define MP3_DELAY_SEEK  529u     /* после перемотки — только декодер */
 /* pcm_queued_ms() прошивки ESP считает и буфер DMA I2S: 8 × 480 кадров (audio_player.cpp,
    kDmaDescriptors × kDmaFrames) — 87 мс при 44,1 кГц, 120 при 32, 174 при 22,05. Прежде предел
    очереди был 120 мс на всё: при 22,05 кГц сразу после записи очередь уже 174 мс, звук шёл кусками
    по 23 мс раз в ~55 мс (ЦАП получал ~8,3 тыс. кадров/с вместо 22 050, «fr16677/2000ms udf27»),
    отставал, и подстройка выбрасывала по 250 мс каждые 100 мс — ролик «тормозил» (28.10.2026, Muse
    22 кГц; на пути FT812 звук шёл через GS). */
-#define DMA_FRAMES   3840u
+#define DMA_FRAMES   3840u        /* обычный буфер DMA ESP; короткий — от pcm_low_latency */
 #define START_MS     60u         /* начать вывод, когда принято на столько звука */
 #define SYNC_MS      30u         /* расхождение с картинкой больше — поправка */
 #define ALIGN_MS     8u          /* после начала звука и после паузы — до такого */
@@ -54,6 +77,8 @@
 #define AU_PAUSE     (1u << 23)  /* R_AU_WP: пауза ядра */
 
 static const zm_core_t* core;
+static uint32_t dma_frames = DMA_FRAMES;     /* буфер DMA I2S ESP, кадров вывода */
+static uint32_t queue_extra_ms = QUEUE_MS;   /* очередь сверх него */
 
 /* --- кольцо принятых байтов ------------------------------------------------------------------- */
 static uint8_t* ring;
@@ -172,9 +197,13 @@ typedef struct {
   uint32_t slots_seen, slot_ms; /* темп ядра: последний виденный счёт слотов и когда сменился */
   uint32_t pause_ms;            /* когда началась пауза */
   uint32_t fix_drop;            /* выбросить ещё столько кадров входа */
+  uint32_t mp3_bps;             /* MP3: байтов в секунду по битрейту декодера (0 — ещё не знаем) */
   uint32_t last_sync_ms;
-  uint32_t fix_log_ms, fix_n;   /* подстройки синхронности: сводка в журнал не чаще раза в 5 с */
-  int32_t fix_max;
+  /* сверки синхронности за поток: сводка в журнал — при его конце (sync_report) */
+  uint32_t sync_n, fix_silence, fix_drops;
+  int64_t sync_sum;
+  int32_t sync_min, sync_max;
+  uint32_t silence_ms, drop_ms;
   uint8_t pcm_carry[8];         /* неполный кадр PCM между чтениями */
   uint32_t carry_n;
   uint32_t overflow_bytes;      /* выброшено при полном кольце за эпоху (журнал) */
@@ -191,15 +220,33 @@ static void set_ctl(asess_t* a)
   vlink_wr(R_AU_CTL, 1u | (uint32_t)a->epoch << 8);
 }
 
+/* сводка сверок за поток — одной строкой при его конце (не каждые 5 с: запись во flash останавливает
+   кэш ESP, и периодическая строка сама рвала бы звук) */
+static void sync_report(asess_t* a)
+{
+  if (a->sync_n) {
+    core->log("video: audio vs picture %d ms avg (%d..%d) over %u checks; silence added %u times (%u ms), "
+              "dropped %u times (%u ms); DAC buffer %u frames",
+              (int)(a->sync_sum / (int64_t)a->sync_n), (int)a->sync_min, (int)a->sync_max, (unsigned)a->sync_n,
+              (unsigned)a->fix_silence, (unsigned)a->silence_ms, (unsigned)a->fix_drops, (unsigned)a->drop_ms,
+              (unsigned)dma_frames);
+  }
+  a->sync_n = a->fix_silence = a->fix_drops = a->silence_ms = a->drop_ms = 0;
+  a->sync_sum = 0;
+  a->sync_min = a->sync_max = 0;
+}
+
 /* новый поток (эпоха): всё с начала, кроме указателя чтения FIFO ядра (его обнуляет только новая
    эпоха — ядро обнуляет свой указатель записи вместе с ней) */
 static void restart(asess_t* a)
 {
+  sync_report(a);
   ring_reset();
   a->started = 0;
   a->written = 0;
   a->content_shift = 0;
   a->fix_drop = 0;
+  a->mp3_bps = 0;
   a->carry_n = 0;
   a->slots_seen = 0;
   a->slot_ms = core->millis();
@@ -292,7 +339,10 @@ static uint32_t buffered_frames(const asess_t* a)
 {
   uint64_t f;
   if (a->tag == 1) f = (ring_used() + a->carry_n) / a->block_align;
-  else f = a->avg_bytes ? (uint64_t)ring_used() * a->out_rate / a->avg_bytes : 0;
+  else {
+    const uint32_t bps = a->mp3_bps ? a->mp3_bps : a->avg_bytes;   /* заголовок у MP3 бывает неверен */
+    f = bps ? (uint64_t)ring_used() * a->out_rate / bps : 0;
+  }
   return f > a->fix_drop ? (uint32_t)(f - a->fix_drop) : 0;
 }
 
@@ -328,16 +378,24 @@ static uint32_t decode(asess_t* a, uint32_t max)
     if (!have_audio_ms(a, 0)) return 0;
     mp3_inst = mp3->open(0, NULL);
     if (!mp3_inst) return 0;
+    core->mutex_lock(V.lock);
+    const uint32_t from = V.status.base_frame;
+    core->mutex_unlock(V.lock);
+    /* задержка кодека — не звук ролика: в счёт как тишина (поток с начала файла или с перемотки) */
+    a->content_shift -= (int64_t)(from ? MP3_DELAY_SEEK : MP3_DELAY_START);
   }
   uint32_t got = 0;
   const int r = mp3->render(mp3_inst, frames_buf, max, &got);
   if (r == ZM_RENDER_ERROR) { mp3_close(); return 0; }
-  if (got && !a->out_rate) {
+  if (got && (!a->out_rate || !a->mp3_bps)) {
     zm_info_t info;
     memset(&info, 0, sizeof info);
     mp3->info(mp3_inst, &info);
-    a->out_rate = info.rate;
-    a->out_ch = info.channels >= 2 ? 2 : 1;
+    if (!a->out_rate) {
+      a->out_rate = info.rate;
+      a->out_ch = info.channels >= 2 ? 2 : 1;
+    }
+    a->mp3_bps = (uint32_t)info.bitrate * 125u;   /* кбит/с -> байт/с */
   }
   return got;
 }
@@ -437,7 +495,7 @@ static void step(asess_t* a)
   }
 
   /* выдать на ЦАП, пока очередь короткая */
-  const uint32_t queue_ms = QUEUE_MS + (a->out_rate ? DMA_FRAMES * 1000u / a->out_rate : 0);
+  const uint32_t queue_ms = queue_extra_ms + (a->out_rate ? dma_frames * 1000u / a->out_rate : 0);
   while (V.running && V.session_live && (!a->open || core->pcm_queued_ms() < queue_ms)) {
     uint32_t n = decode(a, FRAMES);
     if (!n) break;
@@ -467,19 +525,11 @@ static void step(asess_t* a)
     core->log("sync: d %d tv %d written %u q %u shift %d gaps %d drop %u", (int)d, (int)tv, (unsigned)a->written,
               (unsigned)core->pcm_queued_ms(), (int)a->content_shift, (int)gap_shift, (unsigned)a->fix_drop);
 #endif
-    /* подстройка — обычное дело (звук приходит пачками): строкой на каждую журнал забивался целиком
-       и вытеснял всё остальное — теперь сводка раз в 5 с */
-    if (d > lim || d < -lim) {
-      const int32_t ad = (int32_t)(d > 0 ? d : -d);
-      if (ad > a->fix_max) a->fix_max = ad;
-      a->fix_n++;
-    }
-    if (a->fix_n && now - a->fix_log_ms >= 5000) {
-      core->log("video: audio sync adjusted %u times in 5 s, largest %d ms", (unsigned)a->fix_n, (int)a->fix_max);
-      a->fix_log_ms = now;
-      a->fix_n = 0;
-      a->fix_max = 0;
-    }
+    /* сводка за поток (sync_report): «+» — звук впереди картинки, «−» — позади */
+    if (!a->sync_n || d < a->sync_min) a->sync_min = (int32_t)d;
+    if (!a->sync_n || d > a->sync_max) a->sync_max = (int32_t)d;
+    a->sync_sum += d;
+    a->sync_n++;
     if (d > lim) {                           /* звук впереди: тишина */
       uint32_t ms = (uint32_t)(d > FIX_MAX_MS ? FIX_MAX_MS : d);
       uint32_t n = ms * a->out_rate / 1000u;
@@ -495,6 +545,10 @@ static void step(asess_t* a)
         n -= k;
       }
       a->content_shift -= (int64_t)(a->written - before);
+      if (a->written != before) {
+        a->fix_silence++;
+        a->silence_ms += (uint32_t)((a->written - before) * 1000u / a->out_rate);
+      }
     } else if (d < -lim) {
       /* звук позади: выбросить — но только из принятого сверх START_MS. Звук, лежащий в файле
          позже своих кадров дальше, чем разбор опережает показ (1–2 кадра), догнать нечем: он
@@ -506,6 +560,10 @@ static void step(asess_t* a)
       const uint32_t can = have > keep ? have - keep : 0;
       if (want > can) want = can;
       a->fix_drop += want;
+      if (want) {
+        a->fix_drops++;
+        a->drop_ms += want * 1000u / a->out_rate;
+      }
     }
   }
 }
@@ -524,6 +582,7 @@ static void session(void)
     step(&a);
     core->delay(STEP_MS);
   }
+  sync_report(&a);
   if (a.open) core->pcm_close();
   mp3_close();
   V.audio_state = 0;
@@ -533,6 +592,15 @@ void audio_task(void* arg)
 {
   (void)arg;
   core = V.core;
+  /* короткий буфер DMA ESP (0.1.129+): звук кадра приходит лишь за кадр до показа */
+  if (core->size >= offsetof(zm_core_t, pcm_low_latency) + sizeof core->pcm_low_latency && core->pcm_low_latency) {
+    dma_frames = core->pcm_low_latency(1);
+    queue_extra_ms = QUEUE_LOW_MS;
+    core->log("video: short DAC buffer, %u frames", (unsigned)dma_frames);
+  } else {
+    dma_frames = DMA_FRAMES;
+    queue_extra_ms = QUEUE_MS;
+  }
   ring_size = 2u << 20;
   while (!(ring = (uint8_t*)core->alloc(ring_size, ZM_MEM_PSRAM)) && ring_size > (128u << 10)) ring_size >>= 1;
   if (ring) core->log("video: audio ring %u KB", (unsigned)(ring_size >> 10));

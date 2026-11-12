@@ -6,7 +6,7 @@ set(VIDEO_MP3_DIR "${VDAC4_ROOT}/ESP32 S3 Zero N8R8/Sound/modules/mp3/main" CACH
 set(VIDEO_HELIX_DIR "${VDAC4_ROOT}/ESP32 S3 Zero N8R8/Firmware/managed_components/chmorgan__esp-libhelix-mp3/libhelix-mp3"
     CACHE PATH "Helix MP3")
 file(GLOB VIDEO_HELIX_SRCS "${VIDEO_HELIX_DIR}/*.c" "${VIDEO_HELIX_DIR}/real/*.c")
-idf_component_register(SRCS app.c avi_info.c audio.c hud.cpp "${PUI_FONT_DIR}/pui_font.cpp"
+idf_component_register(SRCS app.c avi_info.c audio.c feed.c hud.cpp "${PUI_FONT_DIR}/pui_font.cpp"
                             "${VIDEO_MP3_DIR}/mp3_source.c" ${VIDEO_HELIX_SRCS}
                        INCLUDE_DIRS "." "${ZM_SDK_INCLUDE}" "${PUI_FONT_DIR}" "${VIDEO_HELIX_DIR}/pub"
                        PRIV_INCLUDE_DIRS "${VIDEO_HELIX_DIR}/real")

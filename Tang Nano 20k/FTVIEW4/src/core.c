@@ -27,6 +27,11 @@
 // записи — заголовок до movi, выравнивающий JUNK, файл с записи; ESP получает кадр начала и
 // число байтов звука до записи. Список роликов (Enter, конец ролика) читает банк списка
 // (LIST_OP_READ), рисует ESP; выбор — новый ролик тем же ядром.
+// Ролик на SD2 под VDAC4 VFS (карта Tang или флешка USB ESP; ядро 1.47, VIDEO.ELF 0.10, прошивка
+// ESP 0.1.126): поток тот же, но подаёт его ESP (FEED #7A — первый кластер, длина, заголовок, база,
+// конец, JUNK; STOP #7B) — с карты Tang мостом прямо в ПЛИС, с флешки — чтением ESP; плагин файл
+// по-прежнему разбирает и читает (заголовок, таблица перемотки) через WC, а конец подачи узнаёт из
+// ответа STATUS. ESP отказала (не тот файл, старое ядро или прошивка) — подача, как прежде, отсюда.
 
 #include "avi_shared.h"
 #include "avi_list.h"
@@ -84,6 +89,8 @@ bool esp_call(u8 cmd, void *data, u16 len, u8 repeat, u16 polls)
 #define VC_LIST   0x77      // [показ][всего][первая][выбор][текущий LE16][сообщение,0][строки,0…]
 #define VC_MSG    0x78      // [вид][заголовок,0][строка,0][строка,0]
 #define VC_ROWS   0x79      // [первая][строки,0…] — строки страницы списка до VC_LIST (VIDEO.ELF 0.9)
+#define VC_FEED   0x7A      // [кластер][длина][заголовок][база][конец LE32][JUNK] -> [1 — подаёт ESP]
+#define VC_STOP   0x7B      // подачу ESP — стоп (ответ — когда встала)
 #define VC_RUNNING 2
 #define VC_BACK 3
 #define VC_ERROR 255
@@ -178,6 +185,21 @@ u32 cr_end, cr_left;         // конец подачи в файле; скол�
 u32 cr_disk_left;
 u16 cr_cache_pos;
 u8 cr_head, cr_tail, cr_count;
+u8 esp_feed;                 // поток подаёт ESP (ролик на SD2 под VDAC4 VFS)
+u8 feed_st;                  // ход подачи ESP из STATUS: 1 идёт, 2 всё подано, 3 ошибка
+u8 core_why;                 // почему ядро видео не взялось (окно для SD2, core_skip)
+
+// SD2 — VDAC4 VFS: заплатка WC 1.11i (JP #4FE8 по #501C, переходник ED 57 по #4FE8) и панель на
+// устройстве 6 (описатели панелей #7EA0/#7EC4, +#1D — устройство; панель — IX входа плагина, если он
+// один из них, иначе — любая на SD2: тот ли файл, ESP сверит по заголовку сама).
+bool sd2_vfs()
+{
+  u8 *jp = (u8*)0x501C, *tr = (u8*)0x4FE8;
+  u16 ix = ret_ix;
+  if (jp[0] != 0xC3 || jp[1] != 0xE8 || jp[2] != 0x4F || tr[0] != 0xED || tr[1] != 0x57) return false;
+  if (ix == 0x7EA0 || ix == 0x7EC4) return *(u8*)(ix + 0x1D) == 6;
+  return *(u8*)0x7EBD == 6 || *(u8*)0x7EE1 == 6;
+}
 
 bool cache_fill()
 {
@@ -288,6 +310,7 @@ bool core_status(bool body)
   }
   if (!esp_call(VC_STATUS, st_buf, p - st_buf, 1, ESP_POLLS)) return false;
   core_state = ESP->buf[0];
+  if (esp_feed) feed_st = ESP->buf[12];   // VIDEO.ELF 0.10: ход подачи
   return true;
 }
 
@@ -323,8 +346,12 @@ bool core_hdr()
 bool core_restart()
 {
   u32 base = avi.seek_pos & ~3UL;
+  bool sd2 = sd2_vfs();
   cr_base = avi.seek_frame;
   cr_audio = avi.seek_audio;
+  // подача ESP прежнего потока — стоп до сброса (слова после сброса пошли бы в новый поток)
+  if (sd2) esp_call(VC_STOP, 0, 0, 1, 0xFFFF);
+  esp_feed = 0;
   ft_wreg8(FT_REG_CPURESET, CR_RESET);
   core_status(true);
   ft_wreg8(FT_REG_CPURESET, 0);
@@ -335,6 +362,32 @@ bool core_restart()
   ended = 0;
   cr_end = avi.movi_end;
   if (cr_end > avi.size) cr_end = avi.size;
+  if (sd2)
+  {
+    // [кластер][длина][заголовок до movi][база][конец] и JUNK (как ниже: 8 байтов и выравнивание)
+    u8 *p = st_buf, fill = -(u8)(avi.movi_start + 8) & 3, i;
+    u32 hdr = base ? avi.movi_start : 0;
+    memcpy(p, &avi.cluster, 4); p += 4;
+    memcpy(p, &avi.size, 4); p += 4;
+    memcpy(p, &hdr, 4); p += 4;
+    memcpy(p, &base, 4); p += 4;
+    memcpy(p, &cr_end, 4); p += 4;
+    if (base)
+    {
+      memcpy(p, "JUNK", 4);
+      p[4] = fill + (avi.seek_pos & 3);
+      for (i = 5; i < 8 + fill; ++i) p[i] = 0;
+      p += 8 + fill;
+    }
+    if (esp_call(VC_FEED, st_buf, p - st_buf, 1, 0xFFFF) && ESP->buf[0] == 1)
+    {
+      esp_feed = 1;
+      feed_st = 1;
+      cr_left = cr_disk_left = 0;
+      cr_count = 0;
+      return true;
+    }
+  }
   if (base)
   {
     // Заголовок до 'movi' и JUNK до позиции записи (как index_header банка изображений).
@@ -654,6 +707,8 @@ bool core_open()
   return core_restart();
 }
 
+static u8 bg_n;                             // шагов фоновой таблицы с последнего STATUS по шагам
+
 void core_play()
 {
   u8 tick = *(volatile u8*)_TMN, idle = 0;
@@ -675,7 +730,18 @@ void core_play()
     if (bg_run && !view_failed &&
         (paused || cr_fifo - cr_room > BG_LEVEL ||
          (!fed && (cr_count == CACHE_PAGES || !cr_disk_left))))
+    {
       bg_call(LIST_OP_BG_STEP);
+      // Шаги читают файл через WC; на SD2 под VDAC4 VFS резидент держит прерывания закрытыми всё
+      // время обмена с ESP — тики WC (_TMN) теряются, и STATUS по тикам не уходил секундами: сторож
+      // VIDEO.ELF (2 с тишины) возвращал слот 0 на 3–7-й секунде ролика (12.11.2026 на плате).
+      // Поэтому STATUS — и после каждых 5 шагов, сколько бы тиков ни прошло.
+      if (++bg_n == 5)
+      {
+        bg_n = 0;
+        if (!core_status(true)) core_fail(LIST_OP_FILE);
+      }
+    }
     if (view_failed) core_fail(LIST_OP_FILE);
     keys_poll();
     if (*(volatile u8*)_TMN == tick) continue;
@@ -750,8 +816,10 @@ void core_play()
     // STATUS раз в 5 тиков (100 мс): панель, пауза; ESP жива — иначе выход.
     if (!(tick % 5) && !core_status(true)) core_fail(LIST_OP_FILE);
     if (core_state != VC_RUNNING && core_state != 0) { core_leave(); wc_exit(WC_EXIT); }
-    // Конец ролика: поток подан, FIFO пуст, кадры не идут секунду — список (как FTView).
-    if (!paused && !cr_left && cr_slots == last_slots && (core_word(7) & 4))
+    // Подача ESP оборвалась (карта, флешка вынута) — как ошибка чтения файла.
+    if (esp_feed && feed_st == 3) core_fail(LIST_OP_FILE);
+    // Конец ролика: поток подан (ESP — подала всё), FIFO пуст, кадры не идут секунду — список.
+    if (!paused && !cr_left && (!esp_feed || feed_st == 2) && cr_slots == last_slots && (core_word(7) & 4))
     {
       if (++idle == 50)
       {
@@ -799,6 +867,7 @@ bool esp_module()
   u8 dos = *(volatile u8*)0x600B, cloned = 0;
   bool ok = false;
   wc_map_buffer(1);
+  core_why = 3;                             // VIDEO.ELF в /WC/ESP не найден
   if (!wc_stream(0xFD, 0))
   {
     cloned = 1;
@@ -815,6 +884,7 @@ bool esp_module()
   wc_api_ix(_GDIR);
   if (!wc_fentry(fe_elf, &size)) goto back;
   wc_tentry(mod_entry);
+  core_why = 6;                             // VIDEO.ELF в кэш ESP не лёг
   q[0] = 0;                                 // флаги 0 — модуль (не ресурс)
   memcpy(q + 1, &size, 4);
   memcpy(q + 5, mod_entry + 22, 4);         // время и дата записи FAT
@@ -852,10 +922,13 @@ bool core_start()
   u16 n;
   bool ok = false;
   static const char name[] = "VIDEO";
+  core_why = 2;
   if (esp_init()) return false;
   if (!esp_module()) return false;
+  core_why = 4;
   if (!esp_call(CMD_APP_START, (void*)(fe_elf + 1), sizeof fe_elf - 1, 32, 0xFFFF) || ESP->buf[0])
     return false;
+  core_why = 5;
   // Под этим именем в кэше ESP оказалось другое приложение — ядру видео оно не хозяин.
   if (memcmp(ESP->buf + 1, "video", 6))
   {
@@ -895,6 +968,34 @@ bool core_start()
 }
 
 // Вход из банка изображений (core_try): играет ролик и выходит в WC сам; вернулся — путь FT812.
+// Почему ролик не пошёл ядром видео. Ролик с SD2 под VDAC4 VFS прежним путём (FT812) не играет:
+// ядро FT812 не грузится, пока WC держит карту Tang, а чтение SD2 через WC — десятки КБ/с; молча
+// уйти туда — несколько секунд картинки и выход (11.11.2026 на плате). Поэтому для SD2 — окно с
+// причиной и выход в WC; для прочих томов — прежний путь, как раньше.
+// Шаг (core_why): 1 — ролик не для ядра (не MJPEG до 2048×1536), 2 — нет связи с ESP, 3 — нет
+// /WC/ESP/VIDEO.ELF, 4 — VIDEO.ELF не запустился, 5 — ядро не встало (окно — у core_start),
+// 6 — VIDEO.ELF не лёг в кэш ESP. Одна строка с номером: банк ядра видео почти полон.
+static const char why_src[] = "\x0E" "SD2: video step 0";   // коротко: банк ядра полон
+char why_txt[sizeof why_src];      // копия в ОЗУ: номер шага (начальных данных в банке нет)
+WC_TX_WINDOW why_wnd;
+
+void core_skip()
+{
+  u8 n;
+  if (!sd2_vfs()) return;                   // не SD2 — прежний путь FT812
+  if (core_why != 5)                        // «ядро не встало» уже показал core_start
+  {
+    memcpy(&why_wnd, &core_fail_wnd, sizeof why_wnd);
+    memcpy(why_txt, why_src, sizeof why_txt);
+    why_txt[sizeof why_txt - 2] = '0' + core_why;
+    why_wnd.wnd_txt = (u16*)why_txt;
+    wc_api_u16(_PRWOW, (u16)&why_wnd);
+    for (n = 0; n < 150; ++n) { u8 t = *(volatile u8*)_TMN; while (*(volatile u8*)_TMN == t) ; }
+    wc_api_u16(_RRESB, (u16)&why_wnd);
+  }
+  wc_exit(WC_EXIT);
+}
+
 void far_entry(void *p)
 {
   p;
@@ -904,9 +1005,10 @@ void far_entry(void *p)
   graphics_active = 0;
   avi_first();
   // Ролик для ядра: MJPEG до 2048×1536 (больше 1024×768 ядро 1.38 кладёт вдвое меньше).
-  // Иначе — путь FT812 (его отказ скажет сам).
-  if (!avi_rewind() || !avi_probe()) { view_failed = 0; return; }
-  if (!core_start()) return;
+  // Иначе — путь FT812 (его отказ скажет сам); ролик с SD2 — окно с причиной.
+  core_why = 1;
+  if (!avi_rewind() || !avi_probe()) { view_failed = 0; core_skip(); return; }
+  if (!core_start()) { core_skip(); return; }
   core_play();
 }
 

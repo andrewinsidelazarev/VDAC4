@@ -7,7 +7,7 @@ Tang Nano 20K на VDAC4 работает с несколькими ядрами
 |---|---|---|---|
 | **TS-Config** — картинка Evo на HDMI 720p, меню Tang, FRAME BLEND | flash Tang, слот 0 | 1.46 | [`Firmware/firmware/ts_fb_hdmi_top.fs`](../Firmware/firmware/ts_fb_hdmi_top.fs) |
 | **FT812** — видеоускоритель для программ Evo, вывод 1366×768 | flash Tang, слот 1 | 1.45 | [`Firmware/firmware/ts_fb_slot1.fs`](../Firmware/firmware/ts_fb_slot1.fs) |
-| **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Evo, `/WC/ESP` | 1.43, слой ESP 0.9 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`VIDEO/esp/dist/VIDEO.ELF`](VIDEO/esp/dist/VIDEO.ELF) |
+| **Видео** — ролики MJPEG плагина FTVIEW4 декодирует ПЛИС | flash Tang, слот 3; слой ESP — карта Evo, `/WC/ESP` | 1.47, слой ESP 0.12 | [`Firmware/firmware/ts_fb_video.bin`](../Firmware/firmware/ts_fb_video.bin), [`VIDEO/esp/dist/VIDEO.ELF`](VIDEO/esp/dist/VIDEO.ELF) |
 | **ZX Spectrum Next** (на основе NextNano) — с часами Evo и картой Evo как второй SD | карта Tang, `CORES` | 0.40, слой ESP 0.10 | [`SD/CORES/NEXT.BIN`](SD/CORES/NEXT.BIN), [`NEXT.ELF`](SD/CORES/NEXT.ELF) |
 | **NES / Денди** (на основе NESTang) | карта Tang, `CORES` | 0.10, слой ESP 0.10 | [`SD/CORES/NES.BIN`](SD/CORES/NES.BIN), [`NES.ELF`](SD/CORES/NES.ELF) |
 | **Amiga / AGA** (на основе NanoMig) — 68020, 2 МиБ chip + 4 МиБ fast, дискета DF0, жёсткий диск HDF, HDMI 576p | карта Tang, `CORES` | 0.13.10, слой ESP 0.28 | [`SD/CORES/AMIGA.BIN`](SD/CORES/AMIGA.BIN), [`AMIGA.ELF`](SD/CORES/AMIGA.ELF) |
@@ -37,12 +37,16 @@ Evo порциями DMA, рисует «Loading the game», имя файла �
   приложение ESP, брошенное своей программой Z80 (сбой, сброс Evo), не держит кэш модулей, а
   FT-приложение выгружается само, когда Tang вернулся в слот 0 и M_SEL = 0: прежде такое
   приложение не давало места `VIDEO.ELF`, и FTVIEW4 молча играл ролик путём FT812.
+- Видео с SD2 WC (карта Tang, отданная WC, или флешка FAT32/exFAT в USB-C ESP через VDAC4 VFS): прошивка ESP
+  **vdac4-0.1.130**, ядро видео 1.47, `VIDEO.ELF` 0.12, FTVIEW4 186e, резидент VDAC4 VFS с чтением секторов
+  через DMA (`ESP32 S3 Zero N8R8/Network/VDAC4 VFS`). Проверено на плате 12.11.2026 с карты Tang: ролик
+  без выпадения, звук позади картинки в среднем на 66 мс.
 - Прошивка BL616 модуля Tang **38** — [`../BL616`](../BL616): её кэш ядер грузит ядро с карты в ПЛИС,
   по F12 возвращает TS-Config, ядро видео поднимает из слота 3 flash Tang.
 - Плагин Wild Commander **VDAC4 Cores** 0.13 (файл с панели экраном с полосой хода — 0.20 и прошивка ESP 0.1.123; 0.21 — повтор команд экрану) —
   [`ESP32 S3 Zero N8R8/Network/VDAC4 Cores`](../../ESP32%20S3%20Zero%20N8R8/Network/VDAC4%20Cores): меню ядер,
   часы Evo для Next, сектора карты Evo для Next, NES из меню — сразу в меню F1 ядра.
-- Для ядра видео — плагин Wild Commander **FTVIEW4** (сборка bb34) — [`../FTVIEW4`](../FTVIEW4):
+- Для ядра видео — плагин Wild Commander **FTVIEW4** (сборка 186e) — [`../FTVIEW4`](../FTVIEW4):
   `build/FTVIEW4.WMF` — в `/WC` карты Evo, `VIDEO.ELF` — в `/WC/ESP`.
 - Для Amiga — свой Kickstart на карте Tang: `AMIGA/KICK31.ROM`, 512 КиБ. ROM не выкладывается. Подробности —
   в [`AMIGA/README.md`](AMIGA/README.md).

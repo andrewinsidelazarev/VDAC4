@@ -4,14 +4,18 @@
 // вперёд, MOSI берётся по фронту SCK, MISO меняется по спаду), CS высокий — MISO = 1.
 // Команды: CMD0 (нужен CRC 0x95), CMD8 (CRC 0x87, эхо шаблона), CMD55 + ACMD41 (готова со второго
 // раза), CMD58 (OCR: SDHC, готова), CMD16, CMD17 (R1, NAC байтов 0xFF, маркер 0xFE, 512 байтов,
-// CRC16; блок вне карты — маркер ошибки 0x08), CMD24 (ждёт маркер 0xFE, 512 байтов и CRC16 —
+// CRC16; блок вне карты — маркер ошибки 0x08), CMD18 (R1, затем блоки подряд, как у CMD17, пока
+// не придёт CMD12; за последним блоком карты — маркер ошибки 0x08), CMD12 (поток обрывается: байт
+// мусора, NCR, R1 0x00 и BUSY_STOP байтов «занята»), CMD24 (ждёт маркер 0xFE, 512 байтов и CRC16 —
 // ответ 0xE5 «принято», BUSY байтов 0x00 — занята; CRC не тот — 0xEB, блок не пишется).
+// bad_crc_blk — у этого блока карта отдаёт неверный CRC16 (стенд проверки CRC в мосте).
 // Прочие — R1 0x04 (недопустимая команда). Ответ — через один байт 0xFF после команды (NCR).
 //
 module sd_card_model #(
     parameter int BLOCKS = 16,
     parameter int NAC    = 40,           // байтов 0xFF до маркера данных
-    parameter int BUSY   = 30            // байтов «занята» после записи блока
+    parameter int BUSY   = 30,           // байтов «занята» после записи блока
+    parameter int BUSY_STOP = 6          // байтов «занята» после CMD12
 ) (
     input  wire cs_n,
     input  wire sck,
@@ -28,11 +32,39 @@ module sd_card_model #(
     // очередь ответа
     reg [7:0] q [0:4095];
     integer   qh = 0, qt = 0;
-    task automatic push(input [7:0] b);
+    // счётчики команд (для стенда)
+    integer   n_cmd = 0, n_read = 0, n_write = 0, n_bad = 0;
+    integer   streaming = 0, sblk = 0;    // CMD18: идёт поток, следующий блок
+    integer   bad_crc_blk = -1;
+    // функции, а не задачи: их зовёт и функция pop
+    function automatic void push(input [7:0] b);
         begin q[qt % 4096] = b; qt = qt + 1; end
-    endtask
+    endfunction
+    // блок с маркером (CMD17, CMD18): NAC байтов 0xFF, 0xFE, данные, CRC16; вне карты — 0x08
+    function automatic void push_block(input integer blk);
+        integer k;
+        reg [15:0] c;
+        begin
+            for (k = 0; k < NAC; k = k + 1) push(8'hFF);
+            if (blk >= BLOCKS) push(8'h08);
+            else begin
+                push(8'hFE);
+                for (k = 0; k < 512; k = k + 1) push(mem[blk * 512 + k]);
+                c = crc16(blk * 512);
+                if (blk == bad_crc_blk) c = c ^ 16'h0100;
+                push(c[15:8]); push(c[7:0]);
+                n_read = n_read + 1;
+            end
+        end
+    endfunction
     function automatic [7:0] pop;
         begin
+            if (qh == qt && streaming != 0) begin
+                // CMD18: следующий блок — когда прежний отдан
+                push_block(sblk);
+                if (sblk >= BLOCKS) streaming = 0;
+                sblk = sblk + 1;
+            end
             if (qh == qt) pop = 8'hFF;
             else begin pop = q[qh % 4096]; qh = qh + 1; end
         end
@@ -50,8 +82,6 @@ module sd_card_model #(
         end
     endfunction
 
-    // счётчики команд (для стенда)
-    integer   n_cmd = 0, n_read = 0, n_write = 0, n_bad = 0;
 
     // приём команд и данных
     reg [7:0]  cmd [0:5];
@@ -70,6 +100,12 @@ module sd_card_model #(
             idx = cmd[0][5:0];
             arg = {cmd[1], cmd[2], cmd[3], cmd[4]};
             n_cmd = n_cmd + 1;
+            if (idx == 6'd12) begin
+                // стоп потока: то, что карта ещё не отдала, пропадает; первый байт — мусор
+                streaming = 0;
+                qh = qt;
+                push(8'h3C);
+            end
             push(8'hFF);                                     // NCR
             if (app && idx == 6'd41) begin
                 acmd41 = acmd41 + 1;
@@ -89,16 +125,15 @@ module sd_card_model #(
                 6'd16: push({7'd0, idle});
                 6'd17: begin
                     push(8'h00);
-                    for (k = 0; k < NAC; k = k + 1) push(8'hFF);
-                    if (arg >= BLOCKS) push(8'h08);              // маркер ошибки: вне карты
-                    else begin
-                        base = arg * 512;
-                        push(8'hFE);
-                        for (k = 0; k < 512; k = k + 1) push(mem[base + k]);
-                        c = crc16(base);
-                        push(c[15:8]); push(c[7:0]);
-                        n_read = n_read + 1;
-                    end
+                    push_block(arg);                              // вне карты — маркер ошибки
+                end
+                6'd18: begin
+                    push(8'h00);
+                    streaming = 1; sblk = arg;                    // блоки — в pop, по мере выдачи
+                end
+                6'd12: begin
+                    push(8'h00);
+                    for (k = 0; k < BUSY_STOP; k = k + 1) push(8'h00);
                 end
                 6'd24: begin
                     push(8'h00);

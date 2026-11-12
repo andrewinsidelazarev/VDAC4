@@ -22,6 +22,12 @@ static uint16_t le16(const uint8_t* p) { return (uint16_t)(p[0] | p[1] << 8); }
 
 void avi_info_reset(void) { hdr_len = 0; }
 
+uint32_t avi_info_bytes(const uint8_t** data)
+{
+  *data = hdr;
+  return hdr ? hdr_len : 0;
+}
+
 /* Чанки подряд в [at, end): RIFF и LIST — внутрь, strh «auds» запоминается, strf после него —
    формат. Вернёт 1, если формат найден. */
 static int walk(uint32_t at, uint32_t end, int* auds, uint16_t f[6], uint32_t rate[2])

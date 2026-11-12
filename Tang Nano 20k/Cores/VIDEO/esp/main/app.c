@@ -20,6 +20,8 @@
  *   77 LIST [показ][всего LE16][первая LE16][выбор LE16][текущий LE16][сообщение,0][строки,0…]
  *                                   → F7 [1]: окно списка роликов (показ 0 — убрать)
  *   78 MSG [вид: 0 убрать, 1 сведения, 2 ошибка][заголовок,0][строка,0][строка,0] → F8 [1]
+ *   7A FEED, 7B STOP — ролик с SD2 WC в ядро без Evo (0.10, feed.c). Ответ STATUS с 0.10:
+ *        [состояние][VERSION][слотов][отменено][звук][подача: 0 нет, 1 идёт, 2 всё, 3 ошибка][ошибка,0]
  * Состояния: 0 — ждёт START, 1 — грузит ядро, 2 — ядро работает, 3 — вернулись в слот 0,
  *            255 — ошибка (текст в STATUS).
  */
@@ -39,6 +41,11 @@ static char core_name[16] = "VIDEO";
 static char error_text[64];
 static void* wake;
 static volatile uint32_t status_ms;
+/* Для журнала при выходе по тишине (12.11.2026: «the plugin is silent» на 7-й секунде ролика с SD2,
+   причины журнал не показал): последняя команда плагина, паузы между STATUS за сеанс. */
+static volatile uint32_t last_cmd_ms;
+static volatile uint8_t last_cmd;
+static uint32_t gap_max, gap_n;
 
 static void wr32(uint8_t* p, uint32_t v)
 {
@@ -108,6 +115,7 @@ static int load_core(void)
   V.session_live = 1;
   core->mutex_unlock(V.link_lock);
   status_ms = core->millis();
+  gap_max = gap_n = 0;
   state = 2;
   core->log("video: core runs, VERSION %08X", (unsigned)V.core_version);
   return 1;
@@ -122,6 +130,7 @@ static void end_session(void)
 
 static void leave_core(void)
 {
+  feed_halt();                      /* подача с SD2 — до возврата: мост TS-Config другой */
   end_session();                    /* звук и панель отпускают LINK до возврата в слот 0 */
   if (V.core->core_back(10000) != ZM_OK) { fail("could not return the Tang to TS-Config (slot 0)"); return; }
   state = 3;
@@ -141,7 +150,13 @@ static void worker(void* arg)
          окне сообщения или списка */
       const uint32_t limit = (V.msg.shown || V.list.shown) ? SILENCE_LONG_MS : SILENCE_MS;
       if (exit_req || quiet > limit) {
-        core->log(exit_req ? "video: exit — back to slot 0" : "video: the plugin is silent — back to slot 0");
+        const uint32_t now = core->millis();
+        if (exit_req) core->log("video: exit — back to slot 0");
+        else
+          core->log("video: the plugin is silent %u ms — back to slot 0 (last command %02X %u ms ago, feed %u)",
+                    (unsigned)quiet, (unsigned)last_cmd, (unsigned)(now - last_cmd_ms), (unsigned)feed_state);
+        if (gap_n || !exit_req)
+          core->log("video: STATUS gaps over 0.5 s: %u, longest %u ms", (unsigned)gap_n, (unsigned)gap_max);
         leave_core();
         break;
       }
@@ -156,7 +171,12 @@ static void worker(void* arg)
 static int cmd_status(const uint8_t* p, uint16_t n)
 {
   const zm_core_t* core = V.core;
-  status_ms = core->millis();
+  const uint32_t now = core->millis(), gap = now - status_ms;
+  if (state == 2) {
+    if (gap > gap_max) gap_max = gap;
+    if (gap > 500) gap_n++;
+  }
+  status_ms = now;
   if (n >= 18 && p[0] == 1) {
     core->mutex_lock(V.lock);
     V.status.flags = p[1];
@@ -179,9 +199,10 @@ static int cmd_status(const uint8_t* p, uint16_t n)
   wr32(st + 5, slots);
   st[9] = (uint8_t)aborts; st[10] = (uint8_t)(aborts >> 8);
   st[11] = V.audio_state;
+  st[12] = feed_state;
   const size_t len = strlen(error_text);
-  memcpy(st + 12, error_text, len + 1);
-  return core->reply(0xF2, st, (uint16_t)(12 + len + 1));
+  memcpy(st + 13, error_text, len + 1);
+  return core->reply(0xF2, st, (uint16_t)(13 + len + 1));
 }
 
 /* Окно списка: [показ (#80 — строки за пришедшими не стирать: их раньше принёс VC_ROWS)][всего]
@@ -250,6 +271,8 @@ static int command(uint8_t cmd, const uint8_t* p, uint16_t n)
 {
   const zm_core_t* core = V.core;
   uint8_t ok = 0;
+  last_cmd = cmd;
+  last_cmd_ms = core->millis();
   switch (cmd) {
   case 0x70:                                    /* START */
     if ((state == 0 || state == 3 || state == 255) && n <= sizeof core_name && (n == 0 || p[n - 1] == 0)) {
@@ -293,6 +316,14 @@ static int command(uint8_t cmd, const uint8_t* p, uint16_t n)
     status_ms = core->millis();
     cmd_rows(p, n);
     return ZM_OK;
+  case 0x7A:                                    /* FEED: ролик с SD2 — подача отсюда */
+    status_ms = core->millis();
+    cmd_feed(p, n);
+    return ZM_OK;
+  case 0x7B:                                    /* STOP: подачу — стоп */
+    status_ms = core->millis();
+    cmd_stop();
+    return ZM_OK;
   default:
     return ZM_ERROR;
   }
@@ -324,6 +355,8 @@ static int start(const zm_core_t* c)
   hud_done = 0;
   r = c->task_start(hud_task, NULL, 6144, 1, 0);           /* панель — ядро 0, ниже всех */
   if (r != ZM_OK) { hud_done = 1; V.running = 0; return r; }
+  r = feed_init();                                         /* подача с SD2 — ядро 0, ниже звука */
+  if (r != ZM_OK) { feed_done = 1; V.running = 0; return r; }
   c->log("video: VIDEO.ELF " APP_VERSION " ready");
   return ZM_OK;
 }
@@ -332,7 +365,8 @@ static void stop(void)
 {
   V.running = 0;
   if (wake) V.core->signal_give(wake);
-  for (unsigned i = 0; i < 300 && !(worker_done && audio_done && hud_done); i++)
+  feed_halt();
+  for (unsigned i = 0; i < 300 && !(worker_done && audio_done && hud_done && feed_done); i++)
     V.core->delay(10);
 }
 

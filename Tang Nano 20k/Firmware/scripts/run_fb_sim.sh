@@ -8,10 +8,13 @@
 #                                       1 — 16:9; S: 0 — 100 %, 1 — 95 %, 2 — 90 % высоты (~25 мин);
 #                                       avg — с FRAME BLEND (ядро без FT812)
 #   sh scripts/run_fb_sim.sh flash    — только fb_flash: настройки во flash Tang и мост (секунды)
-#   sh scripts/run_fb_sim.sh sd       — только мост к microSD (fb_sdspi) с моделью карты (секунды)
+#   sh scripts/run_fb_sim.sh sd       — только мост к microSD (fb_sdspi) с моделью карты: TS-Config и
+#                                       ядро видео (поток STREAM); секунды
 #   sh scripts/run_fb_sim.sh ft       — только FT812: обмен заставки Weather 2 с bt8xxemu (~30 с;
 #                                       нужен sim/ft/weather2_spi.txt — запись обмена, см. tb_ft_weather2)
 #                                       и RAM_G в SDRAM против эталона (~20 с), смена листа
+#   sh scripts/run_fb_sim.sh video    — только ядро видео 1.47 по LINK: окно MF_DATA и поток моста
+#                                       microSD в медиа-FIFO, окно RX 0x3000 (tb_video_link; минуты)
 #   sh scripts/run_fb_sim.sh cp       — только связь с BL616 (сопроцессор): SPI 26,67 / 30 / 13,3 МГц
 #   sh scripts/run_fb_sim.sh ovl      — только оверлеи: холст меню окном LINK → SDRAM, вывод точек
 #                                       (RGB565 и режим 4 бит с палитрой; секунды)
@@ -75,12 +78,28 @@ flash() {
 
 sd() {
     mkdir -p sim/sdspi
-    echo "=== мост к microSD: инициализация, чтение и запись блока, маркеры, таймауты"
+    echo "=== мост к microSD (TS-Config): инициализация, чтение и запись блока, маркеры, таймауты"
     "$IV" -g2012 -DSIMULATION -s tb_fb_sdspi -o sim/sdspi/t.vvp rtl/fb_sdspi.sv tb/sd_card_model.sv tb/tb_fb_sdspi.sv
     (cd sim/sdspi && "$VVP" -n t.vvp | grep -v '^tb/')
+    echo "=== мост к microSD (ядро видео): то же без записи, поток STREAM (CMD18 → медиа-FIFO)"
+    "$IV" -g2012 -DSIMULATION -s tb_fb_sdspi -Ptb_fb_sdspi.VIDEO=1 -o sim/sdspi/tv.vvp rtl/fb_sdspi.sv \
+        tb/sd_card_model.sv tb/tb_fb_sdspi.sv
+    (cd sim/sdspi && "$VVP" -n tv.vvp | grep -v '^tb/')
+}
+
+video() {
+    mkdir -p sim/video
+    echo "=== ядро видео 1.47: окно MF_DATA и поток моста microSD → медиа-FIFO в SDRAM, окно RX 0x3000"
+    rtl=$(echo $SRC | tr ' ' '\n' | grep '^rtl/' | tr '\n' ' ')
+    # декодер JPEG — заглушкой: Icarus не разбирает jpeg_dht.v, декодирование проверяют стенды Verilator
+    "$IV" -g2012 -DSIMULATION -DVP_PLAIN -I rtl -s tb_video_link -o sim/video/t.vvp \
+        $rtl rtl/vp_core.sv rtl/vp_avi.sv rtl/vp_pace.sv rtl/vp_fbwrite.sv rtl/vp_dbk_lp.sv rtl/vp_noise_rom.sv \
+        tb/stub_jpeg_core.sv tb/vsys/sdram_cyc.sv tb/sd_card_model.sv tb/tb_video_link.sv
+    (cd sim/video && "$VVP" -n t.vvp | grep -v '^tb/')
 }
 
 if [ "$1" = "osd" ]; then osd; exit 0; fi
+if [ "$1" = "video" ]; then video; exit 0; fi
 if [ "$1" = "sd" ]; then sd; exit 0; fi
 if [ "$1" = "hd" ]; then hd "$2" "$3" "$4"; exit 0; fi
 ft() {

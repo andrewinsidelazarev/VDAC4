@@ -5,9 +5,13 @@
 // (READ — маркер и 514 байтов в RX, в том числе со смещением PTR), запись блока (XFER, ответ
 // данных, BUSY) и чтение записанного, маркер ошибки, ожидание без ответа, последнее неполное
 // слово RX. Ожидается: «ТЕСТ ПРОЙДЕН».
+// VIDEO = 1 — мост ядра видео (TX 16 слов, ROUTE): без записи блока (TX мал), зато поток STREAM —
+// CMD18, целые блоки мимо RX в поток (приёмник с задержками), продолжение того же CMD18, CMD12,
+// ошибка CRC блока, маркер ошибки за концом карты, таймаут; после потока — обычное чтение.
+// VIDEO = 0 — мост TS-Config: STREAM там нет (сразу «не дождались»).
 //
 `timescale 1ns/1ps
-module tb_fb_sdspi;
+module tb_fb_sdspi #(parameter bit VIDEO = 1'b0);
     localparam real CLK_NS = 13.468;          // 74,25 МГц
     localparam real RD_NS  = 25.0;            // SCK LINK 40 МГц
 
@@ -15,20 +19,29 @@ module tb_fb_sdspi;
     always #(CLK_NS / 2.0) clk = ~clk;
     always #(RD_NS / 2.0) rd_clk = ~rd_clk;
 
-    reg         ctrl_we = 1'b0, ptr_we = 1'b0, cmd_we = 1'b0, tx_we = 1'b0;
+    reg         ctrl_we = 1'b0, ptr_we = 1'b0, cmd_we = 1'b0, strm_we = 1'b0, tx_we = 1'b0;
     reg  [31:0] wdata = '0, tx_wdata = '0;
     reg  [8:0]  tx_waddr = '0, rd_addr = '0;
-    wire [31:0] ctrl_rd, ptr_rd, status, rd_q;
-    wire        sd_cs_n, sd_sck, sd_mosi, sd_miso;
+    wire [31:0] ctrl_rd, ptr_rd, status, rd_q, r_data;
+    wire        sd_cs_n, sd_sck, sd_mosi, sd_miso, r_valid;
+    reg         r_ready = 1'b1;
 
-    fb_sdspi #(.CLK_KHZ(74_250)) dut (
+    fb_sdspi #(.CLK_KHZ(74_250), .TX_AW(VIDEO ? 4 : 9), .ROUTE(VIDEO)) dut (
         .clk(clk), .rst_n(rst_n),
         .sd_cs_n(sd_cs_n), .sd_sck(sd_sck), .sd_mosi(sd_mosi), .sd_miso(sd_miso),
-        .ctrl_we(ctrl_we), .ptr_we(ptr_we), .cmd_we(cmd_we), .wdata(wdata),
-        .ctrl_rd(ctrl_rd), .ptr_rd(ptr_rd), .status(status),
+        .ctrl_we(ctrl_we), .ptr_we(ptr_we), .cmd_we(cmd_we), .strm_we(strm_we),
+        .wdata(wdata), .ctrl_rd(ctrl_rd), .ptr_rd(ptr_rd), .status(status),
         .tx_we(tx_we), .tx_waddr(tx_waddr), .tx_wdata(tx_wdata),
-        .rd_clk(rd_clk), .rd_addr(rd_addr), .rd_q(rd_q)
+        .rd_clk(rd_clk), .rd_addr(rd_addr), .rd_q(rd_q),
+        .r_valid(r_valid), .r_data(r_data), .r_ready(r_ready)
     );
+
+    // приёмник потока: берёт слово, когда готов (готовность — случайно, примерно 2 такта из 3)
+    reg  [31:0] got_w [0:4095];
+    integer     got_n = 0;
+    integer     seed = 7;
+    always @(posedge clk) if (r_valid && r_ready) begin got_w[got_n] = r_data; got_n = got_n + 1; end
+    always @(negedge clk) r_ready = ($urandom(seed) % 3) != 0;
     sd_card_model #(.BLOCKS(16), .NAC(40), .BUSY(30)) card (
         .cs_n(sd_cs_n), .sck(sd_sck), .mosi(sd_mosi), .miso(sd_miso)
     );
@@ -50,8 +63,9 @@ module tb_fb_sdspi;
             @(posedge clk); #1;
             wdata = v;
             ctrl_we = which == 0; ptr_we = which == 1; cmd_we = which == 2;
+            strm_we = which == 3;
             @(posedge clk); #1;
-            ctrl_we = 1'b0; ptr_we = 1'b0; cmd_we = 1'b0;
+            ctrl_we = 1'b0; ptr_we = 1'b0; cmd_we = 1'b0; strm_we = 1'b0;
         end
     endtask
     task automatic tx_wr(input integer w, input [31:0] v);
@@ -131,7 +145,41 @@ module tb_fb_sdspi;
         end
     endfunction
 
-    integer   k, bad_bytes;
+    // CMD12: команда, байт мусора (FILL 1), R1, конец «занята»
+    task automatic sd_stop(output [7:0] r1);
+        begin
+            tb[0] = 8'h4C; tb[1] = 0; tb[2] = 0; tb[3] = 0; tb[4] = 0; tb[5] = 8'h61; tb[6] = 8'hFF; tb[7] = 8'hFF;
+            reg_wr(1, {5'd0, 11'd514, 7'd0, 9'd0});
+            tx_bytes(0, 8);
+            op(0, 6);
+            op(1, 1);
+            op(2, 16);
+            r1 = status[15:8];
+            op(4, 100_000);
+            if (status[1]) begin errors = errors + 1; $display("ОШИБКА: CMD12 — карта не освободилась"); end
+        end
+    endtask
+
+    // поток: got_w с got0 — байты карты с адреса a, n байтов (последнее слово — с нулями)
+    task automatic check_stream(input string what, input integer got0, input integer a, input integer n);
+        integer i, bad;
+        reg [31:0] want;
+        begin
+            check({what, ": слов потока"}, got_n - got0, (n + 3) / 4);
+            bad = 0;
+            for (i = 0; i < (n + 3) / 4; i = i + 1) begin
+                want = 0;
+                for (int b = 0; b < 4; b++) if (4 * i + b < n) want[8 * b +: 8] = card.mem[a + 4 * i + b];
+                if (got_w[got0 + i] !== want) begin
+                    if (bad < 3) $display("  слово %0d: %08h, ожидалось %08h", i, got_w[got0 + i], want);
+                    bad = bad + 1;
+                end
+            end
+            check({what, ": слов не тех"}, bad, 0);
+        end
+    endtask
+
+    integer   k, bad_bytes, g0;
     reg [7:0] r1;
     reg [31:0] v, v2;
 
@@ -218,7 +266,11 @@ module tb_fb_sdspi;
         rx_rd(2, v);
         check("PTR 256: блок 3 в начале RX цел", v, {card.mem[1544], card.mem[1545], card.mem[1546], card.mem[1547]});
 
-        // 6. Запись блока 5: [FF FE данные CRC] одним XFER, ответ данных, BUSY
+        // 6. Запись блока 5: [FF FE данные CRC] одним XFER, ответ данных, BUSY (TX ядра видео мал —
+        //    там запись не проверяется; блок 5 для п. 7 — тот же образ, что пишется здесь)
+        if (VIDEO) for (k = 0; k < 512; k = k + 1) card.mem[2560 + k] = (k * 3 + 1) & 8'hFF;
+        for (k = 0; k < 512; k = k + 1) tb[1024 + k] = (k * 3 + 1) & 8'hFF;
+        if (!VIDEO) begin
         sd_cmd(6'd24, 32'd5, 8'hFF, r1); check("CMD24 R1", r1, 8'h00);
         tb[0] = 8'hFF; tb[1] = 8'hFE;
         for (k = 0; k < 512; k = k + 1) tb[2 + k] = (k * 3 + 1) & 8'hFF;
@@ -243,6 +295,18 @@ module tb_fb_sdspi;
             if (v !== v2) bad_bytes = bad_bytes + 1;
         end
         check("записанный блок 5 читается: слов не тех", bad_bytes, 0);
+        end else begin
+            // ядро видео: блок 5 (тот же образ) — чтением, чтобы RX был как после записи
+            sd_cmd(6'd17, 32'd5, 8'hFF, r1);
+            reg_wr(1, {5'd0, 11'd514, 7'd0, 9'd0});
+            op(3, 100_000);
+            bad_bytes = 0;
+            for (k = 0; k < 128; k = k + 1) begin
+                rx_rd(k, v);
+                if (v !== {tb[1024 + 4*k], tb[1025 + 4*k], tb[1026 + 4*k], tb[1027 + 4*k]}) bad_bytes = bad_bytes + 1;
+            end
+            check("ядро видео: блок 5 читается: слов не тех", bad_bytes, 0);
+        end
 
         // 7. Блок вне карты: маркер ошибки, RX не трогается
         sd_cmd(6'd17, 32'd99, 8'hFF, r1);
@@ -259,6 +323,81 @@ module tb_fb_sdspi;
         @(posedge clk); @(posedge clk);
         check("WAIT N = 0: сразу таймаут, не занят", status[1:0], 2'b10);
         check("карта: плохих команд", card.n_bad, 0);
+
+        if (!VIDEO) begin
+            // 9. STREAM у TS-Config нет: сразу «не дождались», не занят
+            reg_wr(2, {9'd0, 3'd5, 20'd1000});
+            @(posedge clk); @(posedge clk);
+            check("TS-Config: STREAM нет", status[1:0], 2'b10);
+            check("TS-Config: потока нет", got_n, 0);
+        end else begin
+            reg_wr(0, {23'd0, 1'b1, 8'd1});
+            // 9. CMD18 с блока 2: 3 блока (PTR — 514 байтов блока)
+            sd_cmd(6'd18, 32'd2, 8'hFF, r1); check("CMD18 R1", r1, 8'h00);
+            reg_wr(1, {5'd0, 11'd514, 7'd0, 9'd0});
+            reg_wr(3, 32'd3);
+            g0 = got_n;
+            op(5, 100_000);
+            check("STREAM: не таймаут, CRC верен", status[2:0], 3'b000);
+            check("STREAM: маркер", status[15:8], 8'hFE);
+            check_stream("STREAM блоки 2–4", g0, 2 * 512, 1536);
+            // продолжение того же CMD18 (блок 5)
+            reg_wr(3, 32'd1);
+            g0 = got_n;
+            op(5, 100_000);
+            check("STREAM блок 5: STAT", status[2:0], 3'b000);
+            check_stream("STREAM блок 5 (продолжение)", g0, 5 * 512, 512);
+            sd_stop(r1); check("CMD12 R1", r1, 8'h00);
+
+            // 10. После потока — обычное чтение в RX
+            sd_cmd(6'd17, 32'd9, 8'hFF, r1); check("CMD17 после потока R1", r1, 8'h00);
+            reg_wr(1, {5'd0, 11'd514, 7'd0, 9'd0});
+            op(3, 100_000);
+            bad_bytes = 0;
+            for (k = 0; k < 128; k = k + 1) begin
+                rx_rd(k, v);
+                if (v !== {card.mem[4608 + 4*k], card.mem[4609 + 4*k], card.mem[4610 + 4*k], card.mem[4611 + 4*k]})
+                    bad_bytes = bad_bytes + 1;
+            end
+            check("READ после потока: слов не тех", bad_bytes, 0);
+
+            // 11. Ошибка CRC второго блока: STAT 2, счётчик 1, данные всё равно в потоке
+            card.bad_crc_blk = 7;
+            sd_cmd(6'd18, 32'd6, 8'hFF, r1);
+            reg_wr(1, {5'd0, 11'd514, 7'd0, 9'd0});
+            reg_wr(3, 32'd2);
+            g0 = got_n;
+            op(5, 100_000);
+            check("STREAM, плохой CRC: STAT 2", status[2:0], 3'b100);
+            check_stream("STREAM блоки 6–7", g0, 6 * 512, 1024);
+            sd_stop(r1);
+            card.bad_crc_blk = -1;
+
+            // 12. За концом карты — маркер ошибки: операция кончается, в потоке — один блок
+            sd_cmd(6'd18, 32'd15, 8'hFF, r1);
+            reg_wr(1, {5'd0, 11'd514, 7'd0, 9'd0});
+            reg_wr(3, 32'd3);
+            g0 = got_n;
+            op(5, 100_000);
+            check("STREAM за концом карты: маркер ошибки", status[15:8], 8'h08);
+            check("STREAM за концом карты: не таймаут", status[1:0], 2'b00);
+            check_stream("STREAM блок 15", g0, 15 * 512, 512);
+            sd_stop(r1); check("CMD12 после маркера ошибки R1", r1, 8'h00);
+
+            // 13. Таймаут: CS неактивен — маркера нет
+            reg_wr(0, {23'd0, 1'b0, 8'd1});
+            reg_wr(3, 32'd1);
+            g0 = got_n;
+            op(5, 20);
+            check("STREAM без карты: таймаут", status[1:0], 2'b10);
+            check("STREAM без карты: потока нет", got_n - g0, 0);
+            // блоков 0 — сразу «не дождались»
+            reg_wr(3, 32'd0);
+            reg_wr(2, {9'd0, 3'd5, 20'd100});
+            @(posedge clk); @(posedge clk);
+            check("STREAM блоков 0: сразу таймаут", status[1:0], 2'b10);
+            check("STREAM: карта — плохих команд", card.n_bad, 0);
+        end
 
         $display("проверок %0d, ошибок %0d", checks, errors);
         if (errors) $display("ТЕСТ НЕ ПРОЙДЕН");

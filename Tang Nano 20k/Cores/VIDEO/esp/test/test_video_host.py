@@ -51,7 +51,8 @@ US_FRAME = 40000
 # же, а модель ядра опережает на 1–2 кадра, и то не всегда: предел «позже кадра» больше на этот
 # буфер (при 44,1 кГц — 87 мс, при 22,05 — 174). Обрывы звука (то, из-за чего ролик 22 кГц
 # «тормозил», 28.10.2026) ловит отдельно common(): ЦАП не пустеет посреди звука.
-DMA_FRAMES = 3840
+DMA_FRAMES = 1440      # короткий буфер DMA ESP 0.1.129 (pcm_low_latency, 6 × 240): прежний — 3840
+OLD_DMA_FRAMES = 3840
 BEEP_MS = 40
 
 
@@ -72,6 +73,7 @@ def build() -> pathlib.Path | None:
         (c11, APP / 'app.c', 'app.obj'),
         (c11, APP / 'audio.c', 'audio.obj'),
         (c11, APP / 'avi_info.c', 'avi_info.obj'),
+        (c11, APP / 'feed.c', 'feed.obj'),
         (cpp, APP / 'hud.cpp', 'hud.obj'),
         (cpp, SOUND / 'player_ui' / 'fonts' / 'pui_font.cpp', 'pui_font.obj'),
         (f'{c11} /Dmain=mp3_main', SOUND / 'modules' / 'mp3' / 'main' / 'mp3_source.c', 'mp3_source.obj'),
@@ -175,7 +177,11 @@ def make_avi(path: pathlib.Path, frames: int, fmt: bytes | None, audio: bytes, s
 
 
 def run(avi: pathlib.Path, *args: str, timeout: int = 180) -> dict[str, str]:
-    r = subprocess.run([str(BUILD / 'video_host.exe'), str(avi), *args], capture_output=True, timeout=timeout)
+    # стенд идёт в реальном времени (ЦАП, темп ядра): при загруженном ПК (сборки, другие стенды) обычный
+    # приоритет давал обрывы ЦАП, которых в коде нет (11.11.2026) — высокий приоритет Windows
+    flags = getattr(subprocess, 'HIGH_PRIORITY_CLASS', 0)
+    r = subprocess.run([str(BUILD / 'video_host.exe'), str(avi), *args], capture_output=True, timeout=timeout,
+                       creationflags=flags)
     out = r.stdout.decode('utf-8', 'replace')
     log = r.stderr.decode('utf-8', 'replace')
     (BUILD / (avi.stem + '.log')).write_text(out + '\n' + log, encoding='utf-8')
@@ -226,9 +232,10 @@ class VideoHostTest(unittest.TestCase):
             gaps = [u for u in map(float, filter(None, res['pcm_underruns'].split(','))) if u < end - 250]   # хвост: звук кончается чуть раньше последнего кадра
             self.assertEqual(gaps, [], f'ЦАП опустел посреди звука: {res["pcm_underruns"]}')
 
-    def check_sync(self, res, first: int, last: int, lo: float, hi: float, skip=(), rate: int = 0):
+    def check_sync(self, res, first: int, last: int, lo: float, hi: float, skip=(), rate: int = 0,
+                   dma: int = DMA_FRAMES):
         if rate:
-            hi += DMA_FRAMES * 1000 / rate
+            hi += dma * 1000 / rate
         got = dict(offsets(res))
         for s in range(first, last + 1):
             if s in skip:
@@ -340,7 +347,9 @@ class VideoHostTest(unittest.TestCase):
         self.assertEqual(len(missing), 1, res['frames_missing'])
         lo_skip = (int(missing[0].split("-")[0]) * US_FRAME // 1000 - 200) // 1000 + 1   # пик у места перемотки — неясен
         # MP3: задержка кодера и декодера (~1600 отсчётов, ~37 мс) лежит в самом файле
-        self.check_sync(res, 1, 11, -40, 80, rate=44100, skip=[3, *range(lo_skip, 10)])   # пик 3 — на месте паузы
+        # 0.11: звук MP3 позади кадра на 60–90 мс от начала (стартовый набор 2 КБ, задержка кодека),
+        # ~25 мс после перемотки; с прежним буфером DMA 87 мс — 136 мс
+        self.check_sync(res, 1, 11, -40, 60, rate=44100, skip=[3, *range(lo_skip, 10)])   # пик 3 — на месте паузы
 
     def test_mp3_seek_with_wrong_avg_bytes(self):
         # nAvgBytesPerSec заголовка у MP3 (VBR) неточен или 0 — после перемотки время звука берётся
@@ -355,7 +364,7 @@ class VideoHostTest(unittest.TestCase):
                 make_avi(avi, frames, wfx(0x55, 2, 44100, 0, avg, 1), mp3)
                 res = run(avi, '--seek-at', '3000', '--seek-frame', '150')
                 self.common(res, 44100, 2)
-                self.check_sync(res, 7, 11, -40, 80, rate=44100)
+                self.check_sync(res, 7, 11, -40, 60, rate=44100)
 
     def test_mp3_short(self):
         # ролик с MP3 без паузы и перемотки: звук со своего декодера, синхронно с картинкой
@@ -368,7 +377,57 @@ class VideoHostTest(unittest.TestCase):
         res = run(avi)
         self.common(res, 44100, 2)
         self.assertEqual(res['frames_missing'], '')
-        self.check_sync(res, 1, 5, -40, 80, rate=44100)
+        # 0.11: короткий буфер DMA ESP — прежде пик звучал на 131–136 мс позже кадра
+        self.check_sync(res, 1, 5, -40, 60, rate=44100)
+
+    def test_old_firmware_keeps_the_long_dac_buffer(self):
+        # прошивка до 0.1.129 (pcm_low_latency нет): как прежде — буфер DMA 87 мс, звук позже, но целиком
+        if not FFMPEG.exists():
+            self.skipTest('нет ffmpeg')
+        frames = 150
+        avi = BUILD / 'mp3_old_fw.avi'
+        make_avi(avi, frames, wfx(0x55, 2, 44100, 0, 16000, 1), mp3_bytes(frames * US_FRAME / 1e6))
+        res = run(avi, '--old-firmware', '1')
+        self.common(res, 44100, 2)
+        self.check_sync(res, 1, 5, -40, 80, rate=44100, dma=OLD_DMA_FRAMES)
+
+    # --- подача с SD2 (feed.c, 0.10): ролик с карты Tang (мост) или тома VFS (флешка USB) в ядро 1.47
+    def feed_avi(self) -> pathlib.Path:
+        # ~3,6 МБ (PCM 44,1 кГц стерео, 20 с): больше кольца медиа-FIFO 2 МБ — подача упирается в место
+        avi = BUILD / 'feed.avi'
+        if not avi.exists():
+            frames = 500
+            audio = pcm_bytes(beeps(frames * US_FRAME / 1e6, 44100, 2), 16)
+            make_avi(avi, frames, wfx(1, 2, 44100, 16, 176400, 4), audio)
+        return avi
+
+    def check_feed(self, res: dict[str, str]):
+        self.assertEqual(res['feed_wrong_cluster'], '0', 'чужой кластер — отказ')
+        self.assertEqual(res['stop_state'], '0', 'STOP посреди подачи')
+        self.assertEqual(res['feed_reply'], '1')
+        self.assertEqual(res['feed_state'], '2', 'подача не кончилась')
+        self.assertEqual(res['feed_bad_words'], '0', f"слов не тех (первое {res['feed_first_bad']})")
+        self.assertEqual(res['overflow'], '0', 'кольцо переполнено: подача не смотрела место')
+        self.assertEqual(res['misaligned'], '0', 'поток мостом не целыми секторами')
+        self.assertGreater(int(res['max_fill']), 300000, 'подача не дошла до упора в кольцо')
+
+    def test_feed_raw_from_start(self):
+        res = run(self.feed_avi(), '--feed', 'raw')
+        self.check_feed(res)
+        self.assertGreater(int(res['bridge_bytes']), 3_000_000, 'тело файла — мостом')
+
+    def test_feed_raw_seek(self):
+        # перемотка не на границе сектора и слова: заголовок + JUNK, начало до сектора, мост, хвост
+        res = run(self.feed_avi(), '--feed', 'raw', '--feed-base', '1000003')
+        self.check_feed(res)
+        self.assertGreater(int(res['bridge_bytes']), 2_000_000)
+        self.assertGreater(int(res['burst_words']), 0)
+
+    def test_feed_vfs_seek(self):
+        # чтение ESP тома VFS медленнее моста: разбор — 160 КБ/с, чтобы подача упёрлась в кольцо
+        res = run(self.feed_avi(), '--feed', 'vfs', '--feed-base', '777777', '--drain', '40')
+        self.check_feed(res)
+        self.assertEqual(res['bridge_bytes'], '0', 'том VFS — без моста')
 
 
 if __name__ == '__main__':

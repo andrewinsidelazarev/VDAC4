@@ -176,7 +176,8 @@ struct Tang {
     if (a >= W_AUDIO && a < W_AUDIO + 4096) return au_mem[(a - W_AUDIO) / 4];
     if (a >= 0xC0 && a < 0xE0) return ovl[(a - 0xC0) / 16][(a & 15) / 4];
     switch (a) {
-    case R_VERSION: return 0x0501012A;
+    case R_VERSION: return 0x0501012F;
+    case 0x124: return mf_stat();
     case R_SLOTS: return slots;
     case R_ABORTS: return 512u << 16;
     case R_CFG: return cfg;
@@ -195,10 +196,98 @@ struct Tang {
     case R_AU_WP: au_rp = v & 2047; break;
     case R_AU_CTL: ctl = v; break;
     case R_AU_CLK: aclk = v; break;
+    case 0x124: mf_clear(); break;
     default: break;
     }
   }
+  uint32_t mf_stat();
+  void mf_clear();
 } tang;
+
+// --- подача с SD2 (feed.c, ядро 1.47): файл SD2, кольцо медиа-FIFO — слова MF_DATA и потока моста по
+// порядку; разбор берёт их со скоростью drain (слов в мс), на паузе — не берёт
+struct Sd2 {
+  std::mutex m;
+  const std::vector<uint8_t>* file = nullptr;
+  uint32_t cluster = 4321;
+  bool raw = true;
+  std::vector<uint32_t> words;
+  double consumed = 0, last = -1, drain = 100;   // 100 слов/мс — 400 КБ/с
+  bool lost = false, overflow = false, misaligned = false;
+  uint64_t bridge_bytes = 0, burst_words = 0;
+  uint32_t max_fill = 0;
+  int streams = 0;
+  void advance()
+  {
+    const double t = now_ms();
+    if (last >= 0) consumed = std::min<double>((double)words.size(), consumed + (t - last) * drain);
+    last = t;
+  }
+  uint32_t fill() { advance(); return (uint32_t)(words.size() - (size_t)consumed); }
+  void push(uint32_t w)
+  {
+    words.push_back(w);
+    const uint32_t f = fill();
+    max_fill = std::max(max_fill, f);
+    if (f > (1u << 19) - 64) overflow = true;      // ядро остановило бы вход (запас 64 слова)
+  }
+} sd2;
+uint32_t Tang::mf_stat()
+{
+  std::lock_guard<std::mutex> g(sd2.m);
+  const uint32_t f = sd2.fill() / 16;
+  return (uint32_t)epoch << 24 | (sd2.lost ? 1u << 23 : 0u) | std::min<uint32_t>(f, 0x7FFF);
+}
+void Tang::mf_clear() { std::lock_guard<std::mutex> g(sd2.m); sd2.lost = false; }
+int c_sd2_open(uint32_t cluster, uint32_t size, void** file, int* raw)
+{
+  std::lock_guard<std::mutex> g(sd2.m);
+  if (!sd2.file || cluster != sd2.cluster || size != sd2.file->size()) return ZM_NOT_FOUND;
+  *file = &sd2;
+  *raw = sd2.raw ? 1 : 0;
+  return ZM_OK;
+}
+int c_sd2_read(void*, uint32_t off, uint8_t* d, uint32_t n, uint32_t* got)
+{
+  const size_t size = sd2.file->size();
+  const uint32_t k = off >= size ? 0 : (uint32_t)std::min<size_t>(n, size - off);
+  std::memcpy(d, sd2.file->data() + off, k);
+  *got = k;
+  sleep_ms(k / 1000.0);                                        // ~1 МБ/с: чтение ESP
+  return ZM_OK;
+}
+int c_sd2_stream(void*, uint32_t off, uint32_t n, uint32_t* crc)
+{
+  *crc = 0;
+  if (!sd2.raw) return ZM_NOT_FOUND;
+  if ((off | n) & 511) { sd2.misaligned = true; return ZM_ERROR; }
+  sleep_ms(n / 2000.0);                                        // мост: ~2 МБ/с
+  std::lock_guard<std::mutex> g(sd2.m);
+  const std::vector<uint8_t>& f = *sd2.file;
+  for (uint32_t i = 0; i < n; i += 4) {
+    uint32_t w = 0;
+    for (uint32_t k = 0; k < 4; k++) if (off + i + k < f.size()) w |= (uint32_t)f[off + i + k] << (8 * k);
+    sd2.push(w);
+  }
+  sd2.bridge_bytes += n;
+  sd2.streams++;
+  return ZM_OK;
+}
+void c_sd2_close(void*) {}
+int c_link_burst(uint32_t a, const uint32_t* w, uint32_t n)
+{
+  {
+    std::lock_guard<std::mutex> g(tang.m);
+    if (!tang.alive) return ZM_ERROR;
+    tang.link_ops++;
+  }
+  if (a != 0x40000) return ZM_ERROR;
+  sleep_ms(n / 600.0);                                         // LINK: ~2,4 МБ/с
+  std::lock_guard<std::mutex> g(sd2.m);
+  for (uint32_t i = 0; i < n; i++) sd2.push(w[i]);
+  sd2.burst_words += n;
+  return ZM_OK;
+}
 
 std::atomic<bool> model_run{true};
 void model_thread()
@@ -217,6 +306,7 @@ struct Sink {
   std::deque<float> q;
   double last = 0, frac = 0;
   double last_write = 0;           // как у ESP: буфер DMA I2S (8 × 480 кадров) доигрывает после записи
+  double dma = 3840.0;             // глубина DMA, кадров: pcm_low_latency (прошивка 0.1.129) — 1440
   uint64_t played = 0, writes = 0;
   int quiet = 1 << 30;             // кадров тишины подряд
   std::vector<double> onsets;      // когда зазвучал пик (мс)
@@ -239,7 +329,7 @@ struct Sink {
       if (peak > 0.05f) {
         // слышен — после буфера DMA I2S ESP (8 × 480 кадров): кадр уходит из кольца в DMA и звучит
         // через 3840 кадров (при 22,05 кГц — 174 мс)
-        if (quiet >= (int)(rate / 50)) onsets.push_back(last + (double)i * 1000.0 / rate + 3840.0 * 1000 / rate);
+        if (quiet >= (int)(rate / 50)) onsets.push_back(last + (double)i * 1000.0 / rate + dma * 1000 / rate);
         quiet = 0;
       } else if (peak < 0.01f) {
         quiet++;
@@ -294,7 +384,7 @@ uint32_t pcm_queued_ms()
   if (!sink.rate) return 0;
   // как AudioPlayer::pcmQueuedMs прошивки: кольцо + то, что DMA (8 × 480 кадров) ещё не доиграл
   // после последней записи — при 22,05 кГц это 174 мс
-  const double tail = 3840.0 * 1000 / sink.rate, since = t - sink.last_write;
+  const double tail = sink.dma * 1000 / sink.rate, since = t - sink.last_write;
   return (uint32_t)(sink.q.size() / sink.ch * 1000 / sink.rate) + (since < tail ? (uint32_t)(tail - since) : 0);
 }
 void pcm_flush()
@@ -388,7 +478,7 @@ int c_core_load(const char* name, uint32_t* version)
   std::lock_guard<std::mutex> g(tang.m);
   tang.alive = true;
   tang.vt_next = (int64_t)(now_ms() / 20 + 1) * 20;
-  *version = 0x0501012A;
+  *version = 0x0501012F;
   return ZM_OK;
 }
 int c_core_back(uint32_t)
@@ -420,6 +510,14 @@ int c_link_write(uint32_t a, const uint32_t* w, uint32_t n)
 int c_ui_available() { return 0; }
 void c_app_done() {}
 
+bool old_firmware = false;   // --old-firmware 1: прошивка до 0.1.129 (pcm_low_latency нет)
+uint32_t c_pcm_low_latency(int on)
+{
+  std::lock_guard<std::mutex> g(sink.m);
+  sink.dma = on ? 1440.0 : 3840.0;
+  return (uint32_t)sink.dma;
+}
+
 zm_core_t make_core()
 {
   zm_core_t c;
@@ -438,6 +536,9 @@ zm_core_t make_core()
   c.module_open = c_module_open; c.module_close = c_module_close;
   c.core_load = c_core_load; c.core_back = c_core_back; c.link_read = c_link_read; c.link_write = c_link_write;
   c.ui_available = c_ui_available; c.app_done = c_app_done;
+  c.sd2_open = c_sd2_open; c.sd2_read = c_sd2_read; c.sd2_stream = c_sd2_stream; c.sd2_close = c_sd2_close;
+  c.link_burst = c_link_burst;
+  c.pcm_low_latency = old_firmware ? nullptr : c_pcm_low_latency;
   return c;
 }
 
@@ -574,7 +675,8 @@ int main(int argc, char** argv)
   if (argc < 2) { std::fprintf(stderr, "video_host файл.avi [ключи]\n"); return 2; }
   double seek_at = -1, pause_at = -1, pause_ms = 1500;
   uint32_t seek_frame = 0;
-  std::string shots;
+  std::string shots, feed;
+  uint32_t feed_base = 0;
   for (int i = 2; i + 1 < argc; i += 2) {
     const std::string k = argv[i];
     const char* v = argv[i + 1];
@@ -586,6 +688,10 @@ int main(int argc, char** argv)
     else if (k == "--cfg") tang.cfg = (uint32_t)std::strtoul(v, nullptr, 0);
     else if (k == "--shots") shots = v;
     else if (k == "--psram-max") psram_max = (size_t)std::strtoul(v, nullptr, 0);
+    else if (k == "--feed") feed = v;                      // raw — сама карта Tang, vfs — том VFS
+    else if (k == "--feed-base") feed_base = (uint32_t)std::strtoul(v, nullptr, 0);
+    else if (k == "--drain") sd2.drain = std::atof(v);
+    else if (k == "--old-firmware") old_firmware = std::atoi(v) != 0;
   }
   Avi avi;
   if (!load_avi(argv[1], avi)) { std::fprintf(stderr, "нет AVI %s\n", argv[1]); return 2; }
@@ -620,6 +726,76 @@ int main(int argc, char** argv)
     b.push_back(off + n >= hdr_len);
     b.insert(b.end(), avi.file.begin() + off, avi.file.begin() + off + n);
     cmd(0x76, b);
+  }
+  if (!feed.empty()) {
+    // --- подача с SD2: поток как у FTVIEW4 — с начала или [заголовок][JUNK][файл с base], до конца
+    sd2.file = &avi.file;
+    sd2.raw = feed == "raw";
+    const uint32_t size = (uint32_t)avi.file.size(), movi_start = (uint32_t)hdr_len;
+    std::vector<uint8_t> want, junk;
+    const uint32_t base = feed_base & ~3u;
+    if (feed_base) {
+      const uint8_t fill = (uint8_t)(-(int)(movi_start + 8) & 3);
+      junk = {'J', 'U', 'N', 'K'};
+      put32(junk, fill + (feed_base & 3));
+      for (int i = 0; i < fill; i++) junk.push_back(0);
+      want.assign(avi.file.begin(), avi.file.begin() + movi_start);
+      want.insert(want.end(), junk.begin(), junk.end());
+    }
+    want.insert(want.end(), avi.file.begin() + base, avi.file.end());
+    while (want.size() & 3) want.push_back(0);
+    auto feed_cmd = [&](uint32_t cluster) {
+      std::vector<uint8_t> b;
+      put32(b, cluster); put32(b, size); put32(b, feed_base ? movi_start : 0); put32(b, base); put32(b, size);
+      b.insert(b.end(), junk.begin(), junk.end());
+      return cmd(0x7A, b);
+    };
+    r = feed_cmd(sd2.cluster + 1);
+    std::printf("feed_wrong_cluster=%u\n", r.empty() ? 255 : r[0]);
+    // остановка посреди подачи: разбор медленный — подача упирается в кольцо
+    const double drain = sd2.drain;
+    sd2.drain = 2;
+    tang.reset_stream({}, 0);
+    r = feed_cmd(sd2.cluster);
+    sleep_ms(300);
+    r = cmd(0x7B, {});
+    r = pl.status();
+    std::printf("stop_state=%u\nstop_words=%zu\n", r.size() > 12 ? r[12] : 255, sd2.words.size());
+    // заново: сброс потока (эпоха), кольцо пусто
+    {
+      std::lock_guard<std::mutex> g(sd2.m);
+      sd2.words.clear(); sd2.consumed = 0; sd2.last = -1; sd2.max_fill = 0; sd2.overflow = false;
+      sd2.bridge_bytes = sd2.burst_words = 0; sd2.streams = 0;
+      sd2.drain = drain;
+    }
+    tang.reset_stream({}, 0);
+    r = feed_cmd(sd2.cluster);
+    std::printf("feed_reply=%u\n", r.empty() ? 255 : r[0]);
+    int fs = 1;
+    const double t0 = now_ms();
+    for (double until = now_ms() + 60000; now_ms() < until; sleep_ms(20)) {
+      r = pl.status();
+      fs = r.size() > 12 ? r[12] : 255;
+      if (fs != 1) break;
+    }
+    const double ms = now_ms() - t0;
+    std::lock_guard<std::mutex> g(sd2.m);
+    size_t bad = 0, first_bad = SIZE_MAX;
+    const size_t nw = want.size() / 4;
+    for (size_t i = 0; i < std::max(nw, sd2.words.size()); i++) {
+      const uint32_t w = i < nw ? le32(want.data() + 4 * i) : 0xFFFFFFFF;
+      if (i >= sd2.words.size() || sd2.words[i] != w) { bad++; if (first_bad == SIZE_MAX) first_bad = i; }
+    }
+    std::printf("feed_state=%d\nfeed_ms=%.0f\nfeed_words=%zu\nwant_words=%zu\nfeed_bad_words=%zu\nfeed_first_bad=%lld\n",
+                fs, ms, sd2.words.size(), nw, bad, first_bad == SIZE_MAX ? -1LL : (long long)first_bad);
+    std::printf("bridge_bytes=%llu\nburst_words=%llu\nstreams=%d\nmax_fill=%u\noverflow=%d\nmisaligned=%d\n",
+                (unsigned long long)sd2.bridge_bytes, (unsigned long long)sd2.burst_words, sd2.streams, sd2.max_fill,
+                sd2.overflow ? 1 : 0, sd2.misaligned ? 1 : 0);
+    model_run = false;
+    model.join();
+    cmd(0x73, {});
+    app->stop();
+    return 0;
   }
   // поток с начала
   tang.reset_stream(avi.chunks, 0);

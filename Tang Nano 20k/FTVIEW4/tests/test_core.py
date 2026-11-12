@@ -267,6 +267,63 @@ class VideoElf:
         return frame(0xEE, b'unknown')
 
 
+class FeedElf(VideoElf):
+    """VIDEO.ELF 0.10: ролик с SD2 под VDAC4 VFS подаёт ESP (FEED #7A, STOP #7B). Подача — сразу в
+    модель ядра (как второй вход медиа-FIFO), ход — байт 12 ответа STATUS (2 — подано всё)."""
+
+    def __init__(self, data, refuse=False, **kw):
+        super().__init__(**kw)
+        self.data, self.refuse = data, refuse
+        self.feeds, self.stops = [], 0
+        self.pending = b''
+        self.feed_state = 0
+
+    def __call__(self, cmd, payload):
+        if self.app is not None and cmd == 0x7A:
+            self.commands.append(cmd)
+            self.feeds.append(bytes(payload))
+            if self.refuse:
+                return frame(0xFA, b'\0')
+            cluster, size, hdr, base, end = struct.unpack_from('<IIIII', payload)
+            junk = payload[20:]
+            self.pending = (self.data[:hdr] + junk if base else b'') + self.data[base:end]
+            self.pending += bytes(-len(self.pending) & 3)
+            self.feed_state = 1
+            return frame(0xFA, b'\1')
+        if self.app is not None and cmd == 0x7B:
+            self.commands.append(cmd)
+            self.stops += 1
+            self.pending, self.feed_state = b'', 0
+            return frame(0xFB, b'\1')
+        r = super().__call__(cmd, payload)
+        if cmd == 0x72 and self.app is not None:
+            core = self.machine.core
+            while self.pending and not core.creset:       # подача — во второй вход ядра
+                n = min(len(self.pending), core.FIFO - core.level() - 4)
+                if n <= 0:
+                    break
+                for b in self.pending[:n]:
+                    core.fifo[core.wr] = b
+                    core.wr = (core.wr + 1) & (core.FIFO - 1)
+                self.pending = self.pending[n:]
+                core.consume()
+            if self.feed_state == 1 and not self.pending:
+                self.feed_state = 2
+            # ответ STATUS 0.10: [состояние][VERSION][слотов][отменено][звук][подача][ошибка,0]
+            return frame(0xF2, bytes([self.state]) + struct.pack('<IIHB', 0x0501012F, 0, 0, 0) +
+                         bytes([self.feed_state]) + b'\0')
+        return r
+
+
+def vfs_sd2(m, device=6, ix=0x7EA0):
+    """WC 1.11i с VDAC4 VFS: заплатка (JP #4FE8 по #501C, ED 57 по #4FE8), панель IX на устройстве."""
+    mem = m.cpu.memory
+    mem[0x501C:0x501F] = b'\xC3\xE8\x4F'
+    mem[0x4FE8:0x4FEA] = b'\xED\x57'
+    mem[0xBFE2:0xBFE4] = ix.to_bytes(2, 'little')
+    mem[ix + 0x1D] = device
+
+
 class CoreMachine(Machine):
     """Банк ядра видео: ESP — за портами #57/#77 (выбор #13), ядро видео — chip модели FT812.
 
@@ -302,6 +359,7 @@ class CoreMachine(Machine):
         self.held, self.held_from, self.ready = (), 0, None
         self.wc_calls = []
         self.page_log = []                 # A' каждого вызова API (страница у API 0 и 79)
+        self.tick_freeze = None            # функция(машина) -> True: тик WC потерян (прерывания закрыты)
         # wc_exit: SP входа WC — адрес возврата 0x7000, который кладёт call()
         self.set('_ret_sp', 0x5D00, 2)
 
@@ -450,7 +508,7 @@ class CoreMachine(Machine):
         for _ in range(limit):
             m.ticks_to_stop = 200000
             event = m.run()
-            if event & 8:
+            if event & 8 and not (self.tick_freeze and self.tick_freeze(self)):
                 m.memory[0x6009] = (m.memory[0x6009] + 1) & 255
             if m.pc == 0x7000:
                 return
@@ -522,6 +580,19 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(m.elf.commands, [], 'без VIDEO.ELF ESP не зовётся')
         self.assertEqual(m.core.cpureset, [])
         self.assertEqual(m.cpu.memory[0x600B], STREAM_PAGE[0], 'поток — тот, с которым запущен плагин')
+
+    def test_sd2_without_video_elf_shows_step_and_exits(self):
+        """Ролик на SD2 под VDAC4 VFS, а VIDEO.ELF нет: путь FT812 там не играет (ядро FT812 не грузится,
+        пока WC держит карту) — окно с шагом (3) и выход в WC, а не возврат в банк изображений."""
+        data, info = avi_file()
+        m = CoreMachine(data, elf_file=None)
+        vfs_sd2(m)
+        self.run_core(m)
+        self.assertEqual(m.elf.commands, [], 'без VIDEO.ELF ESP не зовётся')
+        self.assertIn(0x01, m.api_calls, 'окно причины (PRWOW)')
+        self.assertIn(0x02, m.api_calls, 'окно убрано (RRESB)')
+        self.assertTrue(any(b'step 3' in bytes(m.cpu.memory[a:a + 40]) for a in range(0xB000, 0xC000, 32)) or
+                        b'step 3' in bytes(m.cpu.memory[0x8000:0xC000]), 'шаг 3 — нет VIDEO.ELF')
 
     def test_video_elf_delivered_from_wc_esp(self):
         """VIDEO.ELF — из /WC/ESP: MOD_QUERY (длина, время записи), его нет в кэше ESP — MOD_PUT по
@@ -601,6 +672,117 @@ class CoreTests(unittest.TestCase):
         self.assertIn('Супер клип'.encode('cp866'), rows)
         self.assertIn('Ёлка'.encode('cp866'), rows)
         self.assertNotIn(b'XVID', rows)
+        self.check_exit(m)
+
+    def test_sd2_video_fed_by_esp(self):
+        """Ролик на SD2 под VDAC4 VFS (карта Tang или флешка USB): поток подаёт ESP (FEED), плагин окно
+        FIFO не пишет; конец ролика — когда ESP подала всё и FIFO пуст: список, Esc — выход."""
+        data, info = avi_file(40)
+        end = movi_end(data, info)
+        script = [
+            (lambda m: len(m.elf.lists) >= 2, (API_ESC,)),
+            (lambda m: m.elf.lists and m.elf.lists[-1][0] == 0, lambda m: m.cpu.memory.__setitem__(0x6004, 1)),
+        ]
+        m = CoreMachine(data, script=script, elf=FeedElf(data))
+        vfs_sd2(m)
+        writes = []
+        orig = m.core.write
+        m.core.write = lambda addr, d: (writes.append(addr), orig(addr, d))[1]
+        list_volume(m)
+        self.run_core(m)
+        e = m.elf
+        self.assertEqual(len(e.feeds), 1, 'FEED — один раз')
+        cluster, size, hdr, base, fend = struct.unpack_from('<IIIII', e.feeds[0])
+        self.assertEqual((size, hdr, base, fend), (len(data), 0, 0, end))
+        self.assertEqual(len(e.feeds[0]), 20, 'с начала — без JUNK')
+        self.assertGreaterEqual(e.stops, 1, 'STOP перед сбросом потока')
+        self.assertLess(e.commands.index(0x7B), e.commands.index(0x7A), 'STOP — до FEED')
+        self.assertFalse([a for a in writes if 0xE0000 <= a < 0x2E0000], 'плагин писал окно FIFO')
+        self.assertFalse([a for a in writes if a == 0x309018], 'плагин писал REG_MEDIAFIFO_WRITE')
+        self.assertEqual(bytes(m.core.streams[-1]), data[:end] + bytes(-end & 3))
+        self.assertEqual(m.core.parser.frames, 40)
+        self.assertIn(b'Reading folder...', e.lists[0])
+        self.check_exit(m)
+
+    def test_sd2_status_goes_while_wc_ticks_stand(self):
+        """Под VDAC4 VFS резидент держит прерывания закрытыми, пока читает SD2, — тики WC (#6009) стоят,
+        пока фоновая таблица перемотки читает файл. STATUS всё равно уходит: после каждых 5 шагов
+        (12.11.2026 на плате сторож VIDEO.ELF — 2 с без STATUS — возвращал слот 0 на 3–7-й секунде)."""
+        data, info = avi_file(300)
+        script = [
+            (lambda m: len(m.elf.status) >= 1, (API_SPKE,)),          # пауза: таблица строится шагами
+            (lambda m: bg_state(m) == 2, lambda m: m.cpu.memory.__setitem__(0x6004, 1)),
+        ]
+        m = CoreMachine(data, script=script, elf=FeedElf(data))
+        vfs_sd2(m)
+        list_volume(m)
+        seen = []
+
+        def freeze(mm):
+            run = bg_state(mm) == 1                                  # BG_RUN: шаги читают файл
+            if run:
+                seen.append(len(mm.elf.status))
+            return run
+        m.tick_freeze = freeze
+        self.run_core(m)
+        self.assertTrue(seen, 'фоновая таблица строилась')
+        self.assertGreaterEqual(seen[-1] - seen[0], 2, 'STATUS шли, пока тики WC стояли (прежде — ни одного)')
+        self.check_exit(m)
+
+    def test_sd2_seek_feed_carries_header_and_junk(self):
+        """Перемотка ролика с SD2: FEED с заголовком до movi, JUNK и базой — тот же поток, что плагин
+        слал бы сам."""
+        frames = 300
+        data, info = avi_file(frames)
+        script = [
+            (lambda m: len(m.elf.status) >= 1, (API_RGGG,)),
+            (lambda m: m.core.epoch >= 2 and len(m.elf.status) >= 6,
+             lambda m: m.cpu.memory.__setitem__(0x6004, 1)),
+        ]
+        m = CoreMachine(data, script=script, elf=FeedElf(data))
+        vfs_sd2(m)
+        list_volume(m)
+        self.run_core(m)
+        e = m.elf
+        self.assertGreaterEqual(len(e.feeds), 2)
+        cluster, size, hdr, base, fend = struct.unpack_from('<IIIII', e.feeds[-1])
+        junk = e.feeds[-1][20:]
+        self.assertEqual(hdr, info['movi_start'])
+        self.assertGreater(base, 0)
+        self.assertEqual(base & 3, 0)
+        self.assertEqual(junk[:4], b'JUNK')
+        self.assertEqual((hdr + len(junk)) & 3, 0, 'заголовок с JUNK — целыми словами')
+        self.check_seek(m, data, info)
+
+    def test_sd2_esp_refuses_plugin_feeds_itself(self):
+        """ESP отказала (не тот файл, старое ядро): поток — как прежде, из плагина."""
+        data, info = avi_file(40)
+        end = movi_end(data, info)
+        script = [
+            (lambda m: len(m.elf.lists) >= 2, (API_ESC,)),
+            (lambda m: m.elf.lists and m.elf.lists[-1][0] == 0, lambda m: m.cpu.memory.__setitem__(0x6004, 1)),
+        ]
+        m = CoreMachine(data, script=script, elf=FeedElf(data, refuse=True))
+        vfs_sd2(m)
+        list_volume(m)
+        self.run_core(m)
+        self.assertEqual(len(m.elf.feeds), 1)
+        self.assertEqual(bytes(m.core.streams[-1]), data[:end])
+        self.check_exit(m)
+
+    def test_not_sd2_no_feed(self):
+        """Ролик не на SD2 (карта Evo) — FEED не шлётся."""
+        data, info = avi_file(40)
+        script = [
+            (lambda m: len(m.elf.lists) >= 2, (API_ESC,)),
+            (lambda m: m.elf.lists and m.elf.lists[-1][0] == 0, lambda m: m.cpu.memory.__setitem__(0x6004, 1)),
+        ]
+        m = CoreMachine(data, script=script, elf=FeedElf(data))
+        vfs_sd2(m, device=2)
+        list_volume(m)
+        self.run_core(m)
+        self.assertNotIn(0x7A, m.elf.commands)
+        self.assertNotIn(0x7B, m.elf.commands)
         self.check_exit(m)
 
     def test_exit_at_timer_wrap(self):

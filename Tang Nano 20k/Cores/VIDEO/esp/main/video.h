@@ -5,7 +5,8 @@
  * перемотку и список, а сюда — что рисовать.
  *
  * Общие объявления частей приложения: app.c (команды, загрузка ядра, сеанс), audio.c (звук),
- * avi_info.c (заголовок AVI), hud.cpp (панель и окна).
+ * avi_info.c (заголовок AVI), hud.cpp (панель и окна), feed.c (0.10: ролик с SD2 WC — карта Tang
+ * или флешка USB через VDAC4 VFS — в медиа-FIFO ядра 1.47 без Evo).
  */
 #ifndef VIDEO_H
 #define VIDEO_H
@@ -19,7 +20,7 @@
 extern "C" {
 #endif
 
-#define APP_VERSION "0.9"
+#define APP_VERSION "0.12"
 #define VIDEO_PERSONALITY 0x05u
 
 /* --- регистры LINK ядра видео (байтовые адреса; ts_fb_core, HAS_VIDEO) ------------------------ */
@@ -114,6 +115,15 @@ int vlink_wr(uint32_t address, uint32_t value);
 /* avi_info.c: заголовок AVI (hdrl) — частями, по мере прихода */
 void avi_info_reset(void);
 void avi_info_add(uint32_t offset, const uint8_t* data, uint32_t length, int last);
+uint32_t avi_info_bytes(const uint8_t** data);     /* принятое начало файла (до 16 КБ) */
+
+/* feed.c: подача с SD2 (команды 7A FEED, 7B STOP; ход — feed_state: 0 нет, 1 идёт, 2 всё, 3 ошибка) */
+extern volatile uint8_t feed_state;
+extern volatile int feed_done;
+int feed_init(void);
+void feed_halt(void);
+int cmd_feed(const uint8_t* p, uint16_t n);
+int cmd_stop(void);
 
 /* audio.c */
 void audio_task(void* arg);

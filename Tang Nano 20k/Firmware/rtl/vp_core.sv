@@ -39,6 +39,17 @@
 // всё же полон, слово теряется и ставится флаг (слово 7). Чтение — выборкой наперёд (pf, 32
 // слова) пакетами от fw до конца группы или до объявленной позиции; разбору — байт за байтом.
 //
+// ВТОРОЙ ВХОД (1.47) — x_*: слова потока по порядку, без адресов (первый байт — [7:0]): их подаёт
+// ESP — файл с флешки USB или с карты Tang через FatFs (окно LINK), или мост microSD ядра (fb_sdspi,
+// операция STREAM: блоки CMD18 карты Tang мимо ESP). Слова ложатся в тот же приёмник, с позиции
+// x_pos (слов с начала потока; сброс потока — с нуля); позицию записи ядро объявляет само — на
+// границе каждой группы из 8 слов (пакеты в SDRAM целые) и после паузы входа в X_IDLE тактов
+// (хвост порции; неполная группа). Хост (SPI FT812) в это время данных FIFO не пишет — пишет
+// только REG_CPURESET. Вход стоит (x_ready = 0), пока кольцо заполнено до X_MARGIN слов от
+// непрочитанного (x_pos − позиция разбора): поток моста ждёт, SCK карты стоит; ESP по LINK видит
+// заполнение (st_fill — по 16 слов) и не шлёт больше, чем есть места. Во время сброса потока вход
+// принимает слова и выбрасывает (старые не попадут в новый поток).
+//
 // Поток: FIFO → vp_avi (чанки, кадры, avih) → jpeg_core → vp_fbwrite (кадры FT в SDRAM) →
 // объявление по vp_pace (темп по выходным кадрам vtick).
 //
@@ -84,6 +95,12 @@ module vp_core #(
     output reg  [7:0]   spi_rd_byte,
 
     input  wire         vtick,                 // импульс: начало выходного кадра (домен clk)
+
+    // второй вход медиа-FIFO (см. начало файла)
+    input  wire         x_valid,
+    input  wire [31:0]  x_data,
+    output wire         x_ready,
+    output reg  [FIFO_AW-5:0] st_fill,         // второй вход: слов кольца не разобрано, по 16 (вниз)
 
     // SDRAM: медиа-FIFO (запись и чтение) и запись кадров — клиент sdram_burst, пакет 8 слов;
     // метка — снаружи (запись 101, чтение 100)
@@ -162,8 +179,22 @@ module vp_core #(
     reg  [FIFO_AW-1:0] sw;                              // слово SDRAM (от FIFO_BASE) для stg[stg_rp]
     reg  [FIFO_AW-1:0] sw_tail;                         // куда ляжет следующее принятое
     reg           ovf, seq_err;                         // приёмник переполнялся; запись не подряд
+
+    // второй вход: слово — в приёмник, если такт не занят словом хоста и в кольце есть место
+    localparam int X_MARGIN = 64;                       // слов кольца — запас (выборка, пакеты)
+    localparam int X_IDLE   = 1023;                     // тактов без слов — объявить хвост
+    reg  [FIFO_AW-1:0] x_pos;                           // слов второго входа с начала потока
+    wire [FIFO_AW-1:0] x_fill = x_pos - rd_pos[FB-1:2]; // слов кольца ещё не разобрано
+    wire          x_room = x_fill < FIFO_AW'((1 << FIFO_AW) - X_MARGIN);
+    wire          x_ins  = x_valid && !creset && !w_word && !stg_full && x_room;
+    assign        x_ready = creset || (!w_word && !stg_full && x_room);
+    reg           x_dirty;                              // есть слова, позиция которых не объявлена
+    reg  [9:0]    x_idle;
+    reg           x_decl;                               // объявить x_pos (такт после слова)
+
     always_ff @(posedge clk)
         if (w_word && !stg_full) stg[stg_wp[SAW-1:0]] <= {spi_b, w_acc};
+        else if (x_ins)          stg[stg_wp[SAW-1:0]] <= x_data;
 
     // объявление позиции записи: ждёт, пока в SDRAM уйдут все слова, принятые до него
     reg           pend_v;
@@ -261,6 +292,8 @@ module vp_core #(
                     sw_tail <= w_off[FB-1:2] + 1'b1;
                     if (w_off[FB-1:2] != sw_tail) seq_err <= 1'b1;
                 end
+            end else if (x_ins) begin
+                stg_wp <= stg_wp + 1'b1;
             end
 
             // разъём
@@ -305,6 +338,29 @@ module vp_core #(
                 stg_wp <= '0; stg_rp <= '0; sw <= '0; sw_tail <= '0; ovf <= 1'b0; seq_err <= 1'b0;
                 pf_wp <= '0; pf_rp <= '0; fw <= '0; pq_ok <= 1'b0; ob_v <= 1'b0;
                 if (p_own != P_NONE && !(p_ev && p_cnt == 3'd7)) p_kill <= 1'b1;
+            end
+        end
+    end
+
+    // второй вход: позиция, объявление (группа из 8 слов собрана или пауза входа), позиции для ESP
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            x_pos <= '0; x_dirty <= 1'b0; x_idle <= '0; x_decl <= 1'b0; st_fill <= '0;
+        end else begin
+            x_decl  <= 1'b0;
+            st_fill <= x_fill[FIFO_AW-1:4];
+            if (creset) begin
+                x_pos <= '0; x_dirty <= 1'b0; x_idle <= '0;
+            end else if (x_ins) begin
+                x_pos  <= x_pos + 1'b1;
+                x_idle <= '0;
+                if (x_pos[2:0] == 3'd7) begin x_decl <= 1'b1; x_dirty <= 1'b0; end
+                else x_dirty <= 1'b1;
+            end else if (x_dirty) begin
+                if (x_idle == 10'(X_IDLE)) begin
+                    x_decl <= 1'b1; x_dirty <= 1'b0; x_idle <= '0;
+                end else
+                    x_idle <= x_idle + 1'b1;
             end
         end
     end
@@ -403,7 +459,13 @@ module vp_core #(
     reg  [1:0]  sk_n;                                    // точек в очереди (ниже)
     // объявлен до декодера: Gowin иначе берёт неявный провод без драйвера и выбрасывает декодер
     wire        sk_flush = wd_abort || creset || dec_rst != 3'd0;
-    wire        d_accept = sk_n != 2'd2 && !sk_flush;
+    // Приём декодера — прямо с триггера (1.47): «очередь не полна» на следующий такт. Прежде
+    // (sk_n != 2 && !sk_flush) путь «сторож → приём → счётчик u_ram_cb выхода декодера» в тесной
+    // раскладке ядра с мостом microSD не укладывался в такт (−1,5 нс, 14 уровней). Очистка очереди
+    // приём больше не запрещает: в эти такты декодер сбрасывается (dec_rst) или поток сбрасывается
+    // (creset), и взятая точка выбрасывается вместе с очередью, как выбросил бы её сброс.
+    reg         d_acc_q;
+    wire        d_accept = d_acc_q;
     jpeg_core #(.SUPPORT_WRITABLE_DHT(1)) dec (
         .clk_i(clk), .rst_i(!rst_n || dec_rst != 3'd0),
         .inport_valid_i(j_valid), .inport_data_i(j_data), .inport_strb_i(j_strb),
@@ -429,18 +491,21 @@ module vp_core #(
     wire [55:0] d_px = {d_x, d_y, d_r, d_g, d_b};
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            sk_n <= 2'd0; sk0 <= '0; sk1 <= '0;
+            sk_n <= 2'd0; sk0 <= '0; sk1 <= '0; d_acc_q <= 1'b1;
         end else if (sk_flush) begin
             sk_n <= 2'd0;
+            d_acc_q <= 1'b1;
         end else begin
             case ({d_take, f_take})
                 2'b10: begin
                     if (sk_n == 2'd0) sk0 <= d_px; else sk1 <= d_px;
                     sk_n <= sk_n + 2'd1;
+                    d_acc_q <= sk_n == 2'd0;             // станет 1 — ещё есть место, 2 — нет
                 end
                 2'b01: begin
                     sk0 <= sk1;
                     sk_n <= sk_n - 2'd1;
+                    d_acc_q <= 1'b1;
                 end
                 2'b11: begin                             // одна в очереди: она уходит, приходит новая
                     sk0 <= d_px;
@@ -542,6 +607,13 @@ module vp_core #(
             if (pend_done) begin
                 wr_pos <= pend_pos;
                 pend_v <= 1'b0;
+            end
+            // второй вход объявляет свою позицию сам: x_pos и stg_wp — одного такта (слово,
+            // принятое на этом такте, войдёт в следующее объявление)
+            if (x_decl && !creset) begin
+                pend_pos <= {x_pos, 2'b00};
+                pend_wp  <= stg_wp;
+                pend_v   <= 1'b1;
             end
 
             if (ev) begin

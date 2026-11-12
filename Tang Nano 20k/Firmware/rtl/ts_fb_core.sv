@@ -235,6 +235,12 @@ module ts_fb_core #(
     wire [7:0]  vp_au_ep_p;              // эпоха звука
     wire        vp_au_pause_p;           // пауза плеера (бит 2 REG_CPURESET)
     wire [31:0] vp_au_q;                 // окно FIFO звука (домен LINK SCK)
+    // ядро видео 1.47: второй вход медиа-FIFO (домен пикселей → clk_mem) и позиции для ESP
+    wire        vx_we;                   // слово во второй вход (окно MF_DATA или поток моста)
+    wire [31:0] vx_wd;
+    wire        vx_full;                 // почтовый ящик между доменами занят
+    wire        vx_lost;                 // MF_STAT [23]
+    wire [14:0] vp_fill_p;               // слов кольца не разобрано, по 16 (домен пикселей)
 
     // ------------------------------------------------------------------
     // LINK: регистры для ESP (домен пикселей). Адрес — байтовый, регистр 32 бита.
@@ -296,7 +302,11 @@ module ts_fb_core #(
     //                     (иначе при кадре дольше периода смен и записи в RAM_G каждый кадр экран стоял);
     //                     1.46 — номер занят TS-Config слота 0 (собран из дерева 1.32 + DRIVE=4): окно
     //                     захвата растров Evo по замерам на плате (raster_detect: TS-Config 153/51,
-    //                     Base Conf 158) — правка окна есть и здесь
+    //                     Base Conf 158) — правка окна есть и здесь;
+    //                     1.47 — ядро видео: видео с карты Tang и флешки USB ESP — мост к microSD
+    //                     (SD_* с 0x110, RX с 0x3000; операция STREAM — блоки CMD18 прямо в медиа-FIFO)
+    //                     и окно MF_DATA (0x40000…) — слова ESP в медиа-FIFO; заполнение MF_STAT;
+    //                     поправки окна по растрам (захват Evo) в ядре видео не держатся — место мосту
     //   0x08 STATUS   R   [15:0] флаги: 0 растр захвачен, 3:1 режим raster_detect, 4/5 HS/VS
     //                     активны низким, 6/7 окно по картинке H/V, 8 границы картинки есть,
     //                     9 в SDRAM таблица, 10 SDRAM готова, 11 есть кадр, 12 M_SEL,
@@ -399,6 +409,20 @@ module ts_fb_core #(
     //                     маркер), [31:16] 0x5D01; без моста (ядро FT812) — 0
     //   0x2000…0x27FC SD_TX W / SD_RX R  буферы моста, по 512 слов (байт 0 — старший байт слова):
     //                     запись — то, что уйдёт карте, чтение — её ответ (из BSRAM по фронту SCK)
+    //   ЯДРО ВИДЕО (1.47; 0x100…0x108 и окно 0x2000 там — звук, см. ниже у AU_*):
+    //   0x110 SD_CTRL, 0x114 SD_PTR, 0x118 SD_CMD / SD_STAT — мост к microSD Tang, как у TS-Config;
+    //        TX — 16 слов (окно 0x2000…0x203C, дальше по кругу): только команды, запись блоков карты
+    //        в ядре видео нет; RX — окно чтения 0x3000…0x37FC. Операция 5 STREAM (fb_sdspi) — целые
+    //        блоки CMD18 в медиа-FIFO:
+    //   0x11C SD_STRM  W  [11:0] блоков операции STREAM
+    //   0x124 MF_STAT  R  второй вход медиа-FIFO (окно MF_DATA и STREAM): [14:0] слов кольца не
+    //                     разобрано, по 16 (вниз; кольцо — 2^19 слов, ядро держит запас 64 слова и
+    //                     само останавливает вход), [23] слово MF_DATA потеряно (почтовый ящик между
+    //                     доменами занят — ESP шлёт быстрее, чем ядро берёт), [31:24] эпоха потока
+    //                     (растёт при сбросе потока REG_CPURESET); запись — сбросить [23]
+    //   0x40000…0x7FFFF MF_DATA W слова потока в медиа-FIFO по порядку (адрес внутри окна не важен;
+    //                     первый байт потока — [7:0]), транзакцией любой длины: ящик — на слово,
+    //                     ядро берёт его за ~0,15 мкс, LINK шлёт слово за 0,3 мкс
     //   0x200…0x3FC MBOX W  почтовый ящик ESP → BL616 (cp_link, 512 слов): слово
     //                     MB_PAGE × 128 + (адрес − 0x200) / 4; BL616 читает его по 0x3F0000…
     //                     (протокол — bl616/app/fw_update.c)
@@ -949,29 +973,63 @@ module ts_fb_core #(
         assign fl_load_stb = 1'b0; assign fl_load_cfg = '0; assign fl_load_adj = '0;
     end endgenerate
 
-    // Мост к microSD Tang (только ядро с Evo — TS-Config, слот 0)
+    // Мост к microSD Tang: TS-Config (слот 0) — для ESP; ядро видео (1.47) — ещё и поток STREAM в
+    // медиа-FIFO (видео с карты Tang мимо ESP: ESP шлёт CMD18 и порции блоков, данные идут в ПЛИС)
     wire [31:0] sd_ctrl_rd, sd_ptr_rd, sd_stat, sd_rx_q;
     generate if (HAS_EVO) begin : g_tf
         fb_sdspi #(.CLK_KHZ(PIX_KHZ)) sdspi (
             .clk(pixel_clk), .rst_n(rst_pix_n),
             .sd_cs_n(sd_cs_n), .sd_sck(sd_sck), .sd_mosi(sd_mosi), .sd_miso(sd_miso),
             .ctrl_we(lk_wr_stb && lk_wr_addr == 8'h40), .ptr_we(lk_wr_stb && lk_wr_addr == 8'h41),
-            .cmd_we(lk_wr_stb && lk_wr_addr == 8'h42), .wdata(lk_wr_data),
+            .cmd_we(lk_wr_stb && lk_wr_addr == 8'h42), .strm_we(1'b0), .wdata(lk_wr_data),
             .ctrl_rd(sd_ctrl_rd), .ptr_rd(sd_ptr_rd), .status(sd_stat),
             .tx_we(lk_wr_stb_w && lk_wr_word[17:9] == 9'd4), .tx_waddr(lk_wr_word[8:0]),
             .tx_wdata(lk_wr_data),
-            .rd_clk(link_sck), .rd_addr(lk_rd_addr[8:0]), .rd_q(sd_rx_q)
+            .rd_clk(link_sck), .rd_addr(lk_rd_addr[8:0]), .rd_q(sd_rx_q),
+            .r_valid(), .r_data(), .r_ready(1'b1)
         );
+        assign vx_we = 1'b0; assign vx_wd = '0; assign vx_lost = 1'b0;
+    end else if (HAS_VIDEO) begin : g_tf_video
+        // регистры с 0x44 (0x40…0x42 — звук), TX — 16 слов (BSRAM в ядре видео нет), RX — окно 0x3000
+        wire        r_valid;
+        wire [31:0] r_data;
+        // второй вход медиа-FIFO: окно MF_DATA (ESP) — первым, поток моста ждёт (SCK карты стоит)
+        wire        lk_x_we = lk_wr_stb_w && lk_wr_word[17:16] == 2'b01;
+        wire        r_ready = !vx_full && !lk_x_we;
+        fb_sdspi #(.CLK_KHZ(PIX_KHZ), .TX_AW(4), .ROUTE(1'b1)) sdspi (
+            .clk(pixel_clk), .rst_n(rst_pix_n),
+            .sd_cs_n(sd_cs_n), .sd_sck(sd_sck), .sd_mosi(sd_mosi), .sd_miso(sd_miso),
+            .ctrl_we(lk_wr_stb && lk_wr_addr == 8'h44), .ptr_we(lk_wr_stb && lk_wr_addr == 8'h45),
+            .cmd_we(lk_wr_stb && lk_wr_addr == 8'h46), .strm_we(lk_wr_stb && lk_wr_addr == 8'h47),
+            .wdata(lk_wr_data),
+            .ctrl_rd(sd_ctrl_rd), .ptr_rd(sd_ptr_rd), .status(sd_stat),
+            .tx_we(lk_wr_stb_w && lk_wr_word[17:9] == 9'd4), .tx_waddr(lk_wr_word[8:0]),
+            .tx_wdata(lk_wr_data),
+            .rd_clk(link_sck), .rd_addr(lk_rd_addr[8:0]), .rd_q(sd_rx_q),
+            .r_valid(r_valid), .r_data(r_data), .r_ready(r_ready)
+        );
+        assign vx_we = lk_x_we || (r_valid && r_ready);
+        assign vx_wd = lk_x_we ? lk_wr_data : r_data;
+        // слово MF_DATA при занятом ящике теряется (ядро берёт слово за ~0,15 мкс, LINK шлёт его за
+        // 0,3 мкс; ящик занят дольше, только если кольцо полно — ESP пишет лишь в свободное место)
+        reg x_lost;
+        always_ff @(posedge pixel_clk or negedge rst_pix_n)
+            if (!rst_pix_n) x_lost <= 1'b0;
+            else if (lk_x_we && vx_full) x_lost <= 1'b1;
+            else if (lk_wr_stb && lk_wr_addr == 8'h49) x_lost <= 1'b0;
+        assign vx_lost = x_lost;
     end else begin : g_no_tf
         assign sd_cs_n = 1'b1; assign sd_sck = 1'b0; assign sd_mosi = 1'b1;
         assign sd_ctrl_rd = '0; assign sd_ptr_rd = '0; assign sd_stat = '0; assign sd_rx_q = '0;
+        assign vx_we = 1'b0; assign vx_wd = '0; assign vx_lost = 1'b0;
     end endgenerate
 
     always_comb begin
-        if (lk_rd_addr[11]) lk_rd_data = HAS_VIDEO ? vp_au_q : sd_rx_q;   // 0x2000…: окно RX моста к microSD (ядро видео — FIFO звука)
+        // 0x2000…: окно RX моста к microSD; у ядра видео 0x2000… — FIFO звука, RX моста — с 0x3000
+        if (lk_rd_addr[11]) lk_rd_data = HAS_VIDEO ? (lk_rd_addr[10] ? sd_rx_q : vp_au_q) : sd_rx_q;
         else case (lk_rd_addr[7:0])
             8'h00: lk_rd_data = 32'h5644_4334;
-            8'h01: lk_rd_data = {HAS_EVO ? 8'h01 : HAS_VIDEO ? 8'h05 : 8'h02, 8'h01, 16'h012D};   // личность: 05 — ядро видео (03 — Next, 04 — NES)
+            8'h01: lk_rd_data = {HAS_EVO ? 8'h01 : HAS_VIDEO ? 8'h05 : 8'h02, 8'h01, 16'h012F};   // личность: 05 — ядро видео (03 — Next, 04 — NES)
             8'h02: lk_rd_data = {pclk_khz, cal_fail, cal_done, cal_busy, blank, p_have_frame,
                                  p_mem_ready, p_pattern_on, p_bb_valid, p_aligned_v, p_aligned_h,
                                  p_vs_low, p_hs_low, p_mode, p_locked};
@@ -1000,6 +1058,10 @@ module ts_fb_core #(
             8'h40: lk_rd_data = HAS_VIDEO ? {vp_au_ep_p, vp_au_pause_p, 12'd0, vp_au_wp_p} : sd_ctrl_rd;
             8'h41: lk_rd_data = HAS_VIDEO ? {16'd0, au_ctl_p} : sd_ptr_rd;
             8'h42: lk_rd_data = HAS_VIDEO ? aclk_p : sd_stat;
+            8'h44: lk_rd_data = HAS_VIDEO ? sd_ctrl_rd : 32'd0;
+            8'h45: lk_rd_data = HAS_VIDEO ? sd_ptr_rd : 32'd0;
+            8'h46: lk_rd_data = HAS_VIDEO ? sd_stat : 32'd0;
+            8'h49: lk_rd_data = HAS_VIDEO ? {vp_au_ep_p, vx_lost, 8'd0, vp_fill_p} : 32'd0;
             8'h17: lk_rd_data = {ft_busy, ft_int_core, ft_dl_active, ft_copro_hold, ft_cfg_3mb,
                                  ft_ramg_late, ft_ramg_drop, cp_ovf, ft_status, 1'b0, ft_lost, ft_cfg_nodith, ft_cfg_esp, ft_cmd_write};
             default:
@@ -1021,11 +1083,11 @@ module ts_fb_core #(
         // ядро видео записи CTRL с LINK не принимает: настройки — свои, из flash (ESP 0.1.102
         // писала ему CTRL целиком и сбрасывала точку выборки SDRAM SD READ — мусор на картинке)
         .ext_ctrl_we(ui_ctrl_we && !HAS_VIDEO), .ext_ctrl(ui_wr_data[17:0]), .ext_src_auto(evo_rst),
-        .ext_adj_we(ui_adj_we),
+        .ext_adj_we(ui_adj_we && !HAS_VIDEO),       // ядро видео (1.47): поправок окна захвата нет
         .ext_h_adj(ui_wr_data[7:0]), .ext_v_adj(ui_wr_data[15:8]),
-        .ext_tab_we(ui_tab_we), .ext_tab_idx(ui_tab_idx),
+        .ext_tab_we(ui_tab_we && !HAS_VIDEO), .ext_tab_idx(ui_tab_idx),
         .ext_tab_data(ui_wr_data[15:0]),
-        .ext_load_stb(fl_load_stb), .ext_load_cfg(fl_load_cfg), .ext_load_adj(fl_load_adj),
+        .ext_load_stb(fl_load_stb), .ext_load_cfg(fl_load_cfg), .ext_load_adj(HAS_VIDEO ? 128'd0 : fl_load_adj),
         .mode(p_mode), .adj_tab(adj_tab),
         .set_src(set_src), .cfg_src(cfg_src), .cfg_phase(cfg_phase), .cfg_delay(cfg_delay),
         .cfg_clock(cfg_clock), .cfg_h_adj(cfg_h_adj), .cfg_v_adj(cfg_v_adj), .cfg_align(cfg_align),
@@ -1334,6 +1396,7 @@ module ts_fb_core #(
             .pub_h(ft_pub_h), .status(rd_status), .frame_time(rd_time)
         );
         assign vp_au_wp_p = '0; assign vp_au_ep_p = '0; assign vp_au_q = '0; assign vp_au_pause_p = 1'b0;
+        assign vx_full = 1'b1; assign vp_fill_p = '0;
         assign rd_wmask = 4'hF;
     end else if (HAS_VIDEO) begin : g_video
         // Ядро видео — на разъёме растеризатора: запись кадров FT fb_core и медиа-FIFO (метка 101),
@@ -1346,11 +1409,40 @@ module ts_fb_core #(
         wire [31:0] aclk_m;
         wire [7:0]  au_ep_m;
         wire        au_pause_m;
+        // второй вход (1.47): слово домена пикселей — почтовым ящиком в clk_mem (переключатель и
+        // слово; слово стоит, пока clk_mem его не взял и переключатель не вернулся). Ящик занят
+        // ~0,15 мкс (2 такта синхронизатора в каждую сторону), LINK шлёт слово за 0,3 мкс
+        reg         mb_tg;                       // домен пикселей: слово положено
+        reg  [31:0] mb_d;
+        reg  [1:0]  mb_ack_s /* synthesis syn_srlstyle = "registers" */;
+        reg  [1:0]  mb_tg_s /* synthesis syn_srlstyle = "registers" */;
+        reg         mb_ack;                      // домен clk_mem: слово взято
+        wire        x_ready_m;
+        wire        mb_v = mb_tg_s[1] != mb_ack;
+        assign vx_full = mb_tg != mb_ack_s[1];
+        always_ff @(posedge pixel_clk or negedge rst_pix_n)
+            if (!rst_pix_n) begin
+                mb_tg <= 1'b0; mb_d <= '0; mb_ack_s <= '0;
+            end else begin
+                mb_ack_s <= {mb_ack_s[0], mb_ack};
+                if (vx_we && !vx_full) begin mb_d <= vx_wd; mb_tg <= ~mb_tg; end
+            end
+        always_ff @(posedge clk_mem or negedge rst_mem_n)
+            if (!rst_mem_n) begin
+                mb_tg_s <= '0; mb_ack <= 1'b0;
+            end else begin
+                mb_tg_s <= {mb_tg_s[0], mb_tg};
+                if (mb_v && x_ready_m) mb_ack <= ~mb_ack;
+            end
+        // заполнение для ESP: по 16 слов (меняется не чаще раза в 16 слов разбора — cdc_bus успевает)
+        wire [14:0] fill_m;
+        cdc_bus #(.W(15)) fill_cdc (.clk(pixel_clk), .rst_n(rst_pix_n), .d(fill_m), .q(vp_fill_p));
         vp_core #(.OUT_US(20_000)) video (
             .clk(clk_mem), .rst_n(rst_mem_n),
             .spi_tg(ft_tg), .spi_kind(ft_kind), .spi_h0(ft_h0), .spi_h1(ft_h1), .spi_b(ft_b),
             .spi_rd_byte(vp_rd_byte),
             .vtick(vp_vtick),
+            .x_valid(mb_v), .x_data(mb_d), .x_ready(x_ready_m), .st_fill(fill_m),
             .s_req(rd_req), .s_we(rd_we), .s_addr(rd_addr), .s_len(rd_len),
             .s_ack(sd_ack && sd_ack_tag[2:1] == 2'd2),
             .s_wr_take(mem_wr_take_any && sd_wr_tag == 3'b101), .s_wdata(rd_wdata), .s_wmask(rd_wmask),
@@ -1375,6 +1467,7 @@ module ts_fb_core #(
         assign rd_time = vp_aborts;
     end else begin : g_no_render
         assign vp_au_wp_p = '0; assign vp_au_ep_p = '0; assign vp_au_q = '0; assign vp_au_pause_p = 1'b0;
+        assign vx_full = 1'b1; assign vp_fill_p = '0;
         assign rd_req = 1'b0; assign rd_we = 1'b0; assign rd_addr = '0; assign rd_len = '0;
         assign rd_wdata2 = '0;
         assign rd_sub = 1'b0; assign rd_wdata = '0; assign rd_dl_addr = '0; assign rd_wmask = 4'hF;
@@ -1556,7 +1649,9 @@ module ts_fb_core #(
     // 1366×768 — не формат CEA-861: VIC 0, пропорции не указаны (так его на плате приняли
     // телевизор, карта захвата и мониторы, 28.10.2026)
     hdmi_tx #(
-        .SHORT_TMDS(HAS_FT && !HAS_EVO && !HAS_VIDEO),
+        // кодер с коротким путём — ядра FT812 и видео (1.47: в ядре видео с мостом microSD путь
+        // «линия задержки → disparity» обычного кодера не укладывался в 74,25 МГц, −0,9 нс)
+        .SHORT_TMDS(!HAS_EVO && (HAS_FT || HAS_VIDEO)),
         .HDMI(HDMI), .VS_HIGH(!VS_NEG),
         .VIC(OUT768 ? 8'd0 : SCALE ? ((HAS_EVO || HAS_VIDEO) ? 8'd19 : 8'd4) : 8'd17),   // 4 — 720p60 (ядро FT812 до 1.41)
         .PIC_AR(OUT768 ? 2'b00 : SCALE ? 2'b10 : 2'b01)
