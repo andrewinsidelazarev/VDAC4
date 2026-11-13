@@ -291,8 +291,32 @@ int main() {
   CHECK(root2.size() == 3 && tang.listed.empty());
   auto top2 = r2.list(root2[1].cluster);
   CHECK(top2.size() == 6 && tang.listed.size() == 1);
+  // 0.1.142: источник не перечисляется (флешки в OTG нет) — папка всё равно с «.» и «..» (из неё —
+  // наверх), без файлов; флешку вставили — следующее чтение папки её перечисляет
+  {
+    Fake tang2("TANG"), none("USB");
+    tang2.add("", "readme.txt", false, 1, 1);
+    Source* two[] = {&tang2, &none};
+    Volume v3;
+    v3.configure(two, 2);
+    Reader r3(v3);
+    r3.mount();
+    auto root3 = r3.list(r3.root);
+    CHECK(root3.size() == 3 && root3[2].name == "USB" && root3[2].dir);
+    auto empty = r3.list(root3[2].cluster);
+    CHECK(!none.listed.empty());           // спрашивали (пока не перечислился — на каждый сектор)
+    const size_t asked = none.listed.size();
+    CHECK(empty.size() == 2 && empty[0].sfn == ".          " && empty[1].sfn == "..         ");
+    CHECK(empty[0].cluster == root3[2].cluster && empty[1].cluster == 0);   // «..» — корень тома
+    none.add("", "NEW.TXT", false, 3, 12);
+    auto plugged = r3.list(root3[2].cluster);
+    CHECK(none.listed.size() > asked);
+    CHECK(plugged.size() == 3 && plugged[2].name == "NEW.TXT" && plugged[2].size == 3);
+    CHECK(r3.clusterData(plugged[2].cluster, 3) == pattern(3, 12));
+  }
+
   printf("PASS %u checks: FAT32 boot/FSInfo/backup, root folders and label, nested dirs, LFN (Cyrillic, emoji, long),"
-         " unique 8.3, file bytes (empty, 1 B, cluster, 384 KiB), lazy listing, >2048 truncation, source failure, reset;"
-         " %zu nodes, %u clusters\n", checks, v.nodeCount(), v.clustersUsed());
+         " unique 8.3, file bytes (empty, 1 B, cluster, 384 KiB), lazy listing, >2048 truncation, source failure, reset,"
+         " unlisted source keeps . and ..; %zu nodes, %u clusters\n", checks, v.nodeCount(), v.clustersUsed());
   return 0;
 }

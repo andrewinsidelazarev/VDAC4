@@ -53,6 +53,7 @@ def sector(lba: int) -> bytes:
     """Сектор карты Evo в модели драйвера WC."""
     return bytes((lba * 31 + (lba >> 8) + i * 7 + (i >> 8)) & 0xFF for i in range(512))
 FN_UP, FN_DOWN, FN_ENTER, FN_WAITUP = 0x11, 0x12, 0x16, 0x2E
+FN_ANYK = 0x2D                           # любая клавиша: NZ — нажата (0.22, окно отказа)
 FN_MNGV_PL, FN_GVMOD = 0x40, 0x42      # текст WC (A' = 0); видеорежим плагина (A')
 FN_TURBOPL, FN_LOAD512 = 0x0E, 0x30     # частота Z80; сектор открытого файла панели
 FN_MNGC_PL = 0x00                        # страница плагина (A') — в окно #C000
@@ -541,6 +542,10 @@ class CoresHarness(spi.SpiHarness):
             self.waitups += 1
             self.flags(zero=True)
             self.ret()
+        elif m.a == FN_ANYK:                 # окно отказа ждёт клавишу — нажата
+            self.calls.append(m.a)
+            self.flags(zero=False)
+            self.ret()
         elif m.a in (FN_GVMOD, FN_MNGV_PL):
             self.calls.append(m.a)
             self.video.append((m.a, m.alt_a))
@@ -664,14 +669,38 @@ class CoresPluginTest(unittest.TestCase):
 
     def test_header_names_the_plugin(self) -> None:
         data = CORES_WMF.read_bytes()
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.21")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Cores v0.22")
         self.assertEqual(data[34], 2, "две страницы: код и (0.20) таблицы с буфером порции")
-        self.assertEqual((data[36], data[38], data[39]), (0, 1, 1), "страница 1 — сектор таблиц CRC16")
+        self.assertEqual((data[36], data[38], data[39]), (0, 1, 2),
+                         "страница 1 — таблицы CRC16 и (0.22) окно отказа при VDAC4 VFS")
         self.assertEqual(len(data) % 512, 0, "файл — целыми секторами")
         h = CoresHarness()
         self.assertEqual(h.symbol("Crc16Hi"), 0xC000, "таблицы — с начала страницы 1")
         self.assertLessEqual(h.symbol("page1End"), h.symbol("RAW_BUF"))
         self.assertEqual(h.symbol("RAW_BUF") + RAW_MAX, 0x10000, "порция — до конца окна #C000")
+
+    def test_vdac4_vfs_on_refuses_start(self) -> None:
+        """0.22: включён VDAC4 VFS (на SD2 — карта Tang или том VFS через ESP) — окно с причиной,
+        как у FTP и SMB, к ESP ни одной команды; и из меню WC, и с файлом панели."""
+        for file_name in (None, b"GAME.NES"):
+            with self.subTest(file=file_name):
+                h = CoresHarness()
+                esp = CoresEsp()
+                # VDAC4VFS.WMF в WC v1.11i: «JP #4FE8» вместо «LD HL,DR2» и переходник LD A,I
+                h.memory[0x501C:0x501F] = bytes([0xC3, 0xE8, 0x4F])
+                h.memory[0x4FE8:0x4FEA] = bytes([0xED, 0x57])
+                h.start(esp, file_name=file_name, file=bytes(16) if file_name else b"")
+                self.assertEqual(esp.commands, [], "ESP не трогали")
+                self.assertEqual(h.machine.a, 0, "панели не перечитывать")
+                self.assertEqual(len(h.prwow_windows), 1)
+                window = h.prwow_windows[0]
+                self.assertEqual((window[4], window[5], window[6]), (40, 9, 0x2F), "окно ошибки")
+                text = h.symbol("SdData") + h.symbol("VfsRefuseText") - h.symbol("VfsRefuseWin")
+                shown = bytes(h.memory[text:text + 240])
+                self.assertIn(b"Cores cannot start: VDAC4 VFS is on.", shown)
+                self.assertIn(b"then start VDAC4 Cores again.", shown)
+                self.assertIn(FN_ANYK, h.calls, "ждёт клавишу")
+                self.assertEqual(h.calls.count(base.FN_RRESB), 1, "окно закрыто")
 
     def test_next_session(self) -> None:
         h = CoresHarness()

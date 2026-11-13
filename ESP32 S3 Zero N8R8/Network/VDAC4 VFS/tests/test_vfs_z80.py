@@ -34,6 +34,12 @@ RES_PAGE, TOGGLE_PAGE = 0x61, 0x62
 WINDOW, WINDO2 = 0x7EA0, 0x7EC4
 DRACT, ORIGA, XPAN, STATUS, GATE, SELDEV_INV = 0x6868, 0x63ED, 0x6149, 0x8723, 0x5123, 0x5BE4
 SPACE, ENTER, ESC = 0x10, 0x16, 0x17
+UP, DOWN = 0x11, 0x12
+ANY = 0xFF                              # любая клавиша: её берёт только ANYK (окно итога)
+CHOICE = {None: [], 'esc': [ESC], 'sd': [ENTER], 'tang': [DOWN, ENTER], 'vfs': [DOWN, DOWN, ENTER]}
+API_TABLE = 0x6FEF                      # PLUGIN_API_TABLE WC: адреса функций API (MD20.ASM)
+REAL_UI = (0x01, 0x02, 0x0B)            # PRWOW, RRESB, TXTPR: с real_ui — настоящий код WC (WCIF.ASM)
+DEV_SD1, DEV_SD2 = 1, 6                 # (IX+#1D) панели: первый и второй SD ZC
 
 
 def symbols(path):
@@ -191,7 +197,13 @@ class Vdisk:
 class Wc:
     """Z80 и память WC: страницы, окна, заглушки, канал до ESP."""
 
-    def __init__(self, *, resident=True):
+    def __init__(self, *, resident=True, real_ui=False):
+        """real_ui — окна рисует настоящий код WC (PRWOW, RRESB, TXTPR) в текстовый экран: страница 0
+        в окне #C000, строка — 256 байт, знаки с 0, цвета с 128; после каждого TXTPR снимок экрана —
+        в self.screens."""
+        self.real_ui = real_ui
+        self.screens = []
+        self._snap = False
         self.res_sym = symbols(BUILD / 'VFSRES.sym')
         self.tog_sym = symbols(BUILD / 'VDAC4VFS.sym')
         self.m = z80.Z80Machine()
@@ -210,6 +222,14 @@ class Wc:
         p5[SNIPPET - 0x4000:SNIPPET - 0x4000 + len(snippet)] = snippet
         for page in (0xF0, 0xF1):
             self.page(page)[0x38:0x3A] = bytes([0xFB, 0xC9])     # IM1: EI, RET
+        if real_ui:                     # переменные экрана WC: 80×30, фон окон — с #8000 страницы #1D
+            p5[0x200E] = 30
+            p5[0x3F1D] = 80
+            p5[0x2011:0x2013] = (0x8000).to_bytes(2, 'little')
+            screen = self.page(0x00)
+            for y in range(30):         # фон: белые точки по синему, чтобы видеть восстановление
+                screen[y * 256:y * 256 + 80] = b'.' * 80
+                screen[y * 256 + 128:y * 256 + 208] = bytes([0x17]) * 80
         self.res_page, self.res_file = wmf_page(BUILD / 'VFSRES.WMF')
         if resident:
             self.pages[RES_PAGE] = bytearray(self.res_page)
@@ -226,7 +246,8 @@ class Wc:
         self.hooks = {}
         self.calls = []
         self.api = []
-        self.keys = []                  # очередь нажатий: ENTER #16, ESC #17, SPACE #10
+        self.keys = []                  # очередь нажатий: ENTER #16, ESC #17, SPACE #10, ↑ #11, ↓ #12, ANY
+        self.windows = []               # окна PRWOW: первые 8 байт описателя (X, Y, W, H, цвет)
         self.interrupts = 0
         self.ticks = 0
         # канал SPI и «прошивка»
@@ -266,6 +287,12 @@ class Wc:
     def shadow_all(self):
         for w in range(4):
             self.mem[0x6000 + w] = self.window[w]
+
+    def screen(self):
+        """Текстовый экран WC (страница 0): живой, если она в окне #C000."""
+        if self.window[3] == 0x00:
+            return bytes(self.mem[0xC000:0x10000])
+        return bytes(self.page(0x00))
 
     def peek(self, a):
         return self.mem[a]
@@ -334,12 +361,28 @@ class Wc:
         if pc == API:
             fn = m.a
             self.api.append(fn)
+            if self._snap:              # прошлый вызов — TXTPR: окно дорисовано
+                self.screens.append(self.screen())
+                self._snap = False
+            if self.real_ui and fn in REAL_UI:
+                if fn == 0x01:
+                    self.windows.append(bytes(self.mem[m.ix:m.ix + 8]))
+                self._snap = fn == 0x0B
+                m.pc = self.word(API_TABLE + 2 * fn)       # возврат — к вызвавшему, как из FUN WC
+                return
             m.f &= ~0x40
-            if fn in (0x10, 0x16, 0x17):            # SPACE, ENTER, ESC: NZ — нажата
+            if fn in (0x10, 0x11, 0x12, 0x16, 0x17):    # SPACE, ↑, ↓, ENTER, ESC: NZ — нажата
                 if self.keys and self.keys[0] == fn:
                     self.keys.pop(0)
                 else:
                     m.f |= 0x40
+            elif fn == 0x2D:                            # ANYK: NZ — нажата любая
+                if self.keys:
+                    self.keys.pop(0)
+                else:
+                    m.f |= 0x40
+            elif fn == 0x01:                            # PRWOW
+                self.windows.append(bytes(self.mem[m.ix:m.ix + 8]))
             m.step_over_breakpoint()
             return
         if pc == DRACT:
@@ -417,19 +460,38 @@ class Wc:
         self.map(2, 0x02)
         self.poke(0x6002, 0x02)
 
-    def toggle(self, choice=None):
-        """choice — клавиша окна выбора при включении: ENTER (карта Tang), SPACE (VFS), ESC."""
+    def toggle(self, choice=None, ix=WINDOW):
+        """choice — что выбрать в окне переключателей (13.11.2026): 'sd' — SD-Card 2, 'tang' — SD Tang,
+        'vfs' — VFS, 'esc' — отмена; None — до окна выбора не дошло (отказ раньше). ix — активная
+        панель (WC передаёт её плагину в IX). Итог: (первая строка сообщения окна итога — '', если
+        окна не было; первая строка второго сообщения; подробности: прошлая работа драйвера, доклад
+        ESP, самопроверка резидента)."""
         self.map(2, TOGGLE_PAGE)
         self.poke(0x6002, TOGGLE_PAGE)
-        self.keys = ([choice] if choice else []) + [ESC]   # и Esc — закрыть окно итога
-        self.run(0x8000, a=0x03, ix=WINDOW)
+        self.keys = CHOICE[choice] + [ANY]          # и любая клавиша — закрыть окно итога, если будет
+        self.windows.clear()
+        self.run(0x8000, a=0x03, ix=ix)
+        if self.keys == [ANY]:
+            self.keys = []                          # окна итога не было
         assert self.keys == [], ('не все клавиши взяты', self.keys)
         assert self.window[2] == TOGGLE_PAGE and self.peek(0x6002) == TOGGLE_PAGE, 'окно #8000 не вернулось плагину'
         self.flush()
         text = self.page(TOGGLE_PAGE)
-        # строки окна: итог, панель, диагностика драйвера, доклад ESP, самопроверка резидента
-        msg = tuple(bytes(text[self.tog_sym[name] - 0x8000:self.tog_sym[name] - 0x8000 + 44]).decode().strip()
-                    for name in ('T_Line1', 'T_Line2', 'T_Line3', 'T_Line4', 'T_Line5'))
+
+        def string(address):
+            if not address:
+                return ''
+            at = address - 0x8000
+            end = text.index(0, at)
+            return bytes(text[at:end]).decode()
+
+        def first_line(address):     # без кодов TXTPR (центр, цвета)
+            return ''.join(ch for ch in string(address).split('\r')[0] if ch >= ' ').strip()
+
+        word = lambda name: int.from_bytes(text[self.tog_sym[name] - 0x8000:self.tog_sym[name] - 0x7FFE], 'little')
+        msg = (first_line(word('T_Msg')), first_line(word('T_Msg2')),
+               string(self.tog_sym['T_Diag3']).strip(), string(self.tog_sym['T_Diag4']).strip(),
+               string(self.tog_sym['T_Diag5']).strip())
         self.map(2, 0x02)
         self.poke(0x6002, 0x02)
         return msg
@@ -443,6 +505,17 @@ ORIGINAL = bytes(16) + bytes.fromhex('06002176 51B7281F 215D533D 28192101 563D28
                                      '28092176 513D2803 215D53DD E5110038 CD235119 CDE45B00 DDE1C9'.replace(' ', ''))
 
 
+def cells(scr, x, y, n):
+    """Знаки и цвета n клеток текстового экрана WC с (x, y)."""
+    at = y * 256 + x
+    return bytes(scr[at:at + n]), bytes(scr[at + 128:at + 128 + n])
+
+
+def window_at(w, h):
+    """X, Y окна по центру экрана 80×30 — как PRWOW для X/Y=#FF."""
+    return (80 - w) // 2, (30 - h) // 2
+
+
 class Vfs(unittest.TestCase):
     def setUp(self):
         for name in ('VFSRES.WMF', 'VDAC4VFS.WMF', 'wc/page05.bin'):
@@ -450,8 +523,8 @@ class Vfs(unittest.TestCase):
                 raise unittest.SkipTest('нет сборки: ' + name)
 
     def installed(self, wc):
-        msg = wc.toggle(SPACE)
-        self.assertEqual(msg[0], 'SD2 = VDAC4 VFS (ESP: TANG = Tang microSD)', msg)
+        msg = wc.toggle('vfs')
+        self.assertEqual(wc.page(RES_PAGE)[0x10A], 1, msg)      # SIG_STATE: том VFS
         return msg
 
     def test_resident_init(self):
@@ -503,14 +576,190 @@ class Vfs(unittest.TestCase):
         self.assertEqual(wc.window[3], 0x00)
         # выключение: эталонные байты, SD2 снова штатный
         wc.calls.clear()
-        msg = wc.toggle()
-        self.assertEqual(msg[0], 'SD2 = second SD card again')
+        msg = wc.toggle('sd')
+        self.assertEqual(msg[0], '', 'удачная смена — без окна итога')
         # в записи — работа драйвера при перемонтировании: образ ставился, последнее — чтение сектора
         self.assertRegex(msg[2], r'^DRV SW000[1-9] IO[0-9A-F]{4} READ OK W0000 R')
         self.assertEqual(wc.core_bytes(0x4FE8, len(ORIGINAL)), ORIGINAL)
         self.assertEqual(wc.page(RES_PAGE)[0x10A], 0)
-        self.assertEqual(wc.calls[:3], [('DRACT', WINDOW), ('GATE', 0x19), ('SELDEV', 1)])
+        # панель, где был VFS, — на диске 1: (13.11.2026): SD-ZC, DEVINI, корень
+        self.assertEqual(wc.peek(WINDOW + 0x1D), DEV_SD1)
+        self.assertEqual(wc.calls[:2], [('DRACT', WINDOW), ('GATE', 0x19)])
+        self.assertIn(('ORIGA', WINDOW), wc.calls)
         self.assertEqual(bytes(wc.page(0xF0)[0x3800:0x3804]), b'SDZC')
+
+    def test_toggle_keeps_sd1_driver_of_active_panel(self):
+        """13.11.2026: активна панель на SD1 (в окне #0000 — её страница WildDOS с драйвером SD-ZC),
+        вторая — на SD2. Самопроверка переключателя (INFO резидента) прежде писала флаги READN по
+        #38DB — в код SD-ZC той панели, и её каталоги не читались до перечитывания. Теперь страница
+        панели на SD1 не меняется; драйвер VFS — в странице панели на SD2, с флагами READN."""
+        for choice, mode in (('tang', 'Tang'), ('vfs', 'VFS')):
+            with self.subTest(mode=mode):
+                wc = Wc()
+                wc.vdisk.readn = wc.vdisk.readdma = True   # прошивка 0.1.128+: INFO с флагами #30
+                wc.install_resident()
+                wc.poke(WINDOW + 0x1D, 6)          # левая панель — на SD2
+                wc.poke(WINDO2 + 0x1D, 1)          # правая (активная) — на SD1
+                sdzc = bytes((0xC3, 0x40, 0x3A, 0xC3, 0x60, 0x3A, 0xC3, 0x80, 0x3A)) + bytes(range(256)) * 3
+                wc.page(0xF1)[0x3800:0x3800 + len(sdzc)] = sdzc
+                wc.map(0, 0xF1)                    # окно #0000 — страница активной панели
+                msg = wc.toggle(choice, ix=WINDO2)
+                self.assertEqual(msg[0], '', msg)
+                self.assertEqual(wc.page(RES_PAGE)[0x10A], 2 if mode == 'Tang' else 1)
+                wc.flush()
+                self.assertEqual(bytes(wc.page(0xF1)[0x3800:0x3800 + len(sdzc)]), sdzc,
+                                 'драйвер SD1 активной панели не тронут')
+                image = bytes(wc.res_page[0x3000:0x3000 + wc.res_sym['D_END'] - 0x3800])
+                readn = wc.res_sym['D_READN'] - 0x3800
+                left = wc.page(0xF0)
+                self.assertEqual(bytes(left[0x3800:0x3809]), image[:9], 'драйвер VFS — у панели на SD2')
+                self.assertEqual(left[0x3800 + readn], 0x30, 'флаги READN — в живом драйвере VFS')
+
+    def selector(self, scr):
+        """Окно выбора на экране: строка полосы (0…2) и строка метки «◄ now» (0…2 или None);
+        заодно — рамка, разделитель, вопрос, цвета строк и клавиш."""
+        w, h = 56, 11
+        x, y = window_at(w, h)
+        chars, colours = cells(scr, x, y, w)
+        self.assertEqual((chars[0], chars[-1]), (0xC9, 0xBB), 'двойная рамка')
+        self.assertIn(b' VDAC4 VFS ', chars)
+        head = chars.index(b' VDAC4 VFS ')
+        self.assertEqual(set(colours[head:head + 11]), {0x71}, 'заголовок — инверсией окна')
+        chars, colours = cells(scr, x, y + 8, w)
+        self.assertEqual(chars, bytes([0xC7]) + bytes([0xC4]) * (w - 2) + bytes([0xB6]), 'разделитель ╟──╢')
+        chars, colours = cells(scr, x, y + 2, w)
+        title = chars.index(b'Choose what drive SD2 shows')
+        self.assertEqual(set(colours[title:title + 27]), {0x1F})
+        bar, now = None, None
+        names = (b'SD-Card 2', b'SD Tang', b'VFS')
+        for i in range(3):
+            chars, colours = cells(scr, x, y + 4 + i, w)
+            self.assertEqual(chars[5:5 + len(names[i])], names[i])
+            if colours[2] == 0x50:              # полоса: чёрный по голубому, «►», по знаку поля с боков
+                self.assertIsNone(bar, 'полоса — одна')
+                bar = i
+                self.assertEqual(colours[1:], bytes([0x17]) + bytes([0x50]) * (w - 4) + bytes([0x17]) * 2)
+                self.assertEqual(chars[3], 0x10)
+            else:                               # имя ярко-белым, пояснение голубым
+                self.assertEqual(set(colours[5:5 + 12]), {0x1F})
+                self.assertEqual(set(colours[17:17 + 31]), {0x15})
+                self.assertEqual(chars[3], 0x20)
+            if chars[48:53] == b'\x11 now':
+                now = i
+                if bar != i:
+                    self.assertEqual(set(colours[48:53]), {0x1C}, '«◄ now» — ярко-зелёным')
+            else:
+                self.assertEqual(chars[48:53], b'     ')
+        chars, colours = cells(scr, x, y + 9, w)
+        for key in (b'\x18\x19', b'Enter', b'Esc'):
+            at = chars.index(key)
+            self.assertEqual(set(colours[at:at + len(key)]), {0x1E}, 'клавиши — жёлтым')
+        at = chars.index(b' choose')
+        self.assertEqual(set(colours[at:at + 7]), {0x17})
+        return bar, now
+
+    def test_selector_window(self):
+        """13.11.2026: окно выбора «SD-Card 2 / SD Tang / VFS» в оформлении WC (настоящие PRWOW и
+        TXTPR): двойная рамка с тенью, вопрос ярко-белым, выбранная строка — полоса чёрным по
+        голубому со стрелкой «►», что стоит сейчас — зелёная метка «◄ now», под разделителем ╟──╢ —
+        клавиши жёлтым. По умолчанию выбран SD-Card 2; ↑/↓ двигают полосу, прежняя строка
+        перерисовывается целиком. Удачная смена окна итога не даёт; Esc и закрытие окна
+        возвращают экран под ним."""
+        wc = Wc(real_ui=True)
+        wc.install_resident()
+        wc.poke(WINDOW + 0x1D, 6)
+        background = wc.screen()
+        msg = wc.toggle('esc')
+        self.assertEqual(msg[0], '')
+        self.assertEqual(len(wc.windows), 1, 'только окно выбора')
+        self.assertEqual((wc.windows[0][4], wc.windows[0][5], wc.windows[0][6]), (56, 11, 0x17))
+        self.assertEqual(len(wc.screens), 1)
+        self.assertEqual(self.selector(wc.screens[0]), (0, 0), 'полоса и метка — на SD-Card 2')
+        self.assertEqual(wc.screen(), background, 'окно закрыто, экран под ним — прежний')
+        self.assertEqual(wc.core_bytes(0x4FE8, 16), bytes(16), 'Esc ничего не менял')
+        # ↓, ↓, ↑ — полоса на VFS, затем на SD Tang; Esc — отмена
+        wc.screens.clear()
+        wc.map(2, TOGGLE_PAGE)
+        wc.poke(0x6002, TOGGLE_PAGE)
+        wc.keys = [DOWN, DOWN, UP, ESC]
+        wc.run(0x8000, a=0x03, ix=WINDOW)
+        self.assertEqual([self.selector(s) for s in wc.screens], [(0, 0), (1, 0), (2, 0), (1, 0)])
+        self.assertEqual(wc.screen(), background)
+        # VFS поставлен: метка — на VFS, выбор по умолчанию — снова SD-Card 2
+        wc.map(2, 0x02)
+        wc.poke(0x6002, 0x02)
+        self.installed(wc)
+        self.assertEqual(len(wc.windows), 1, 'удачная смена — без окна итога')
+        wc.screens.clear()
+        wc.toggle('esc')
+        self.assertEqual(self.selector(wc.screens[0]), (0, 2))
+
+    def test_switch_between_modes(self):
+        """Любой режим — в любой одним выбором: VFS -> SD Tang -> VFS -> SD-Card 2."""
+        wc = Wc()
+        wc.install_resident()
+        wc.poke(WINDOW + 0x1D, 6)
+        self.installed(wc)
+        self.assertEqual(wc.toggle('tang')[0], '')
+        self.assertEqual(wc.page(RES_PAGE)[0x10A], 2)
+        self.assertEqual(wc.core_bytes(0x501C, 3), bytes([0xC3, 0xE8, 0x4F]))
+        self.assertEqual(wc.toggle('vfs')[0], '')
+        self.assertEqual(wc.page(RES_PAGE)[0x10A], 1)
+        self.assertEqual(wc.vdisk.modes[-2:], [1, 0], 'карта Tang — WC, затем снова ESP')
+        self.assertEqual(wc.peek(WINDOW + 0x1D), DEV_SD2, 'между VFS и SD Tang панель — на SD2')
+        self.assertEqual(wc.toggle('sd')[0], '')
+        self.assertEqual(wc.page(RES_PAGE)[0x10A], 0)
+        self.assertEqual(wc.core_bytes(0x4FE8, len(ORIGINAL)), ORIGINAL)
+        self.assertEqual(wc.peek(WINDOW + 0x1D), DEV_SD1, 'возврат SD-Card 2: панель — на 1:')
+        # выбран тот же режим — ничего не делается
+        self.assertEqual(wc.toggle('sd')[0], '')
+        self.assertEqual(wc.core_bytes(0x4FE8, len(ORIGINAL)), ORIGINAL)
+        # в странице #02 — копия перелёта с устройством 1:; новая смена её принимает (байт устройства
+        # в сверку не входит), иначе было бы окно «SD2 has changed»
+        r_dev = wc.tog_sym['R_DEV_ARG'] - 0x8000
+        self.assertEqual(wc.page(0x02)[r_dev], DEV_SD1)
+        wc.poke(WINDO2 + 0x1D, 6)                  # правая панель — на SD2
+        self.assertEqual(wc.toggle('tang')[0], '')
+        self.assertEqual(wc.page(0x02)[r_dev], DEV_SD2)
+        self.assertEqual((wc.peek(WINDOW + 0x1D), wc.peek(WINDO2 + 0x1D)), (DEV_SD1, DEV_SD2))
+        self.assertEqual(wc.toggle('sd')[0], '')
+        self.assertEqual(wc.peek(WINDO2 + 0x1D), DEV_SD1)
+
+    def test_error_window_red_with_details(self):
+        """Ошибка — красное окно (как отказ FTP и SMB): что не так и что сделать, под ними —
+        подробности для разбора; любая клавиша — назад в WC."""
+        wc = Wc(real_ui=True)
+        wc.install_resident()
+        wc.vdisk.no_service = True
+        background = wc.screen()
+        msg = wc.toggle('vfs')
+        self.assertEqual(msg[0], 'The ESP firmware has no VDAC4 VFS.')
+        self.assertEqual(len(wc.windows), 2)
+        self.assertEqual((wc.windows[1][4], wc.windows[1][6]), (56, 0x2F))
+        text = wc.page(TOGGLE_PAGE)
+        at = wc.tog_sym['T_Text'] - 0x8000
+        shown = bytes(text[at:text.index(0, at)]).decode()
+        h = wc.windows[1][5]
+        self.assertEqual(h, shown.count('\r') + 3, 'высота — по строкам')
+        # на экране: пустая строка, сообщение ярко-белым, подробности серым, пустая строка,
+        # разделитель, «Any key» жёлтым
+        scr = wc.screens[-1]
+        x, y = window_at(56, h)
+        rows = [cells(scr, x, y + i, 56) for i in range(h)]
+        self.assertEqual(rows[1][0][1:-1], b' ' * 54)
+        line = rows[2][0].index(b'The ESP firmware has no VDAC4 VFS.')
+        self.assertEqual(set(rows[2][1][line:line + 34]), {0x2F})
+        self.assertIn(b'Update the ESP: vdac4-0.1.99 or newer.', rows[3][0])
+        self.assertEqual(rows[5][0][1:12], b'  Details: ')
+        self.assertEqual(rows[5][1][3], 0x27)
+        self.assertEqual(rows[6][0][1:7], b'  DRV ')
+        self.assertTrue(any(r[0][1:8] == b'  SELF ' and r[1][3] == 0x27 for r in rows))
+        self.assertEqual(rows[h - 3][0], bytes([0xC7]) + bytes([0xC4]) * 54 + bytes([0xB6]))
+        self.assertEqual(rows[h - 4][0][1:-1], b' ' * 54)
+        key = rows[h - 2][0].index(b'Any key - back to Wild Commander')
+        self.assertEqual(set(rows[h - 2][1][key:key + 7]), {0x2E})
+        self.assertEqual(set(rows[h - 2][1][key + 7:key + 32]), {0x2F})
+        self.assertEqual(wc.screen(), background, 'любая клавиша — окно закрыто')
 
     def test_dos_swp_keeps_pages_ix_and_interrupts(self):
         for iff in (0, 1):
@@ -728,8 +977,8 @@ class Vfs(unittest.TestCase):
         wc = Wc()
         wc.install_resident()
         wc.vdisk.flags = 0x02
-        msg = wc.toggle(SPACE)
-        self.assertEqual(msg[0], 'ESP VFS is empty: needs firmware 0.1.99+', msg)
+        msg = wc.toggle('vfs')
+        self.assertEqual(msg[0], 'The VFS volume has no sources.', msg)
         self.assertRegex(msg[4], r'^SELF SW0000 IO0002 INFO NOTREADY W0000 R02$')
         self.assertEqual(wc.core_bytes(0x4FE8, len(ORIGINAL)), ORIGINAL)
         self.assertEqual(wc.page(RES_PAGE)[0x10A], 0)
@@ -740,15 +989,15 @@ class Vfs(unittest.TestCase):
         wc.flush()
         wc.page(0x05)[0x5000 - 0x4000] ^= 1          # чужая сборка WC
         wc.mem[0x5000] ^= 1
-        self.assertEqual(wc.toggle()[0], 'Needs Wild Commander Improved v1.11i')
+        self.assertEqual(wc.toggle()[0], 'VDAC4 VFS needs Wild Commander')
         self.assertEqual(wc.core_bytes(0x4FE8, 16), bytes(16))
         wc2 = Wc(resident=False)
-        self.assertEqual(wc2.toggle()[0], 'VFSRES.WMF not loaded: add it to [PLUGINS]')
+        self.assertEqual(wc2.toggle()[0], 'VFSRES.WMF is not loaded.')
         self.assertEqual(wc2.core_bytes(0x501C, 3), bytes([0x21, 0x5D, 0x53]))
         wc3 = Wc()
         wc3.install_resident()
         wc3.vdisk.no_service = True
-        self.assertEqual(wc3.toggle(SPACE)[0], 'ESP has no VFS: needs firmware vdac4-0.1.99')
+        self.assertEqual(wc3.toggle('vfs')[0], 'The ESP firmware has no VDAC4 VFS.')
         self.assertEqual(wc3.core_bytes(0x501C, 3), bytes([0x21, 0x5D, 0x53]))
         wc4 = Wc()
         wc4.install_resident()
@@ -756,15 +1005,15 @@ class Vfs(unittest.TestCase):
         wc4.map(2, 0x02)
         wc4.mem[0xAB60] ^= 0x55                       # область #02 кто-то занял
         msg = self.installed(wc4)
-        self.assertEqual(msg[1], 'Choose SD2 again in the drive menu')
+        self.assertEqual(msg[0], 'SD2 has changed. Choose the drive')
         self.assertNotIn('DRACT', [c[0] for c in wc4.calls])
 
     # --- SD2 = карта Tang с записью (0.1.100) ----------------------------------------------------
     def tang_driver(self):
         wc = Wc()
         wc.install_resident()
-        msg = wc.toggle(ENTER)
-        self.assertEqual(msg[0], 'SD2 = Tang microSD card, read/write', msg)
+        msg = wc.toggle('tang')
+        self.assertEqual(msg[0], '', msg)
         self.assertEqual(wc.page(RES_PAGE)[0x10A], 2)
         self.assertEqual(wc.vdisk.modes, [0, 1])
         wc.map(0, 0xF1)
@@ -777,8 +1026,8 @@ class Vfs(unittest.TestCase):
         wc = Wc()
         wc.vdisk.readn = True
         wc.install_resident()
-        msg = wc.toggle(ENTER)
-        self.assertEqual(msg[0], 'SD2 = Tang microSD card, read/write', msg)
+        msg = wc.toggle('tang')
+        self.assertEqual((msg[0], wc.page(RES_PAGE)[0x10A]), ('', 2), msg)
         wc.map(0, 0xF1)
         wc.run(0x4FF8, a=6, ix=0)
         wc.map(3, 0x44)
@@ -828,8 +1077,8 @@ class Vfs(unittest.TestCase):
         wc.run(0x3812, a=1, hl=0xC100)
         self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0, 1))
         # выключение: карта Tang — снова ESP
-        msg = wc.toggle()
-        self.assertEqual(msg[0], 'SD2 = second SD card again', msg)
+        msg = wc.toggle('sd')
+        self.assertEqual(msg[0], '', msg)
         self.assertEqual(wc.vdisk.modes, [0, 1, 0])
         self.assertEqual(wc.page(RES_PAGE)[0x10A], 0)
         self.assertEqual(wc.core_bytes(0x4FE8, len(ORIGINAL)), ORIGINAL)
@@ -841,31 +1090,31 @@ class Vfs(unittest.TestCase):
         wc.run(0x3812, a=1, hl=0xC000)
         self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0, 1))
         self.assertEqual(wc.vdisk.writes, [])
-        self.assertRegex(wc.toggle()[2], r'^DRV .* WRITE RESULT W0000 R03$')
+        self.assertRegex(wc.toggle('sd')[2], r'^DRV .* WRITE RESULT W0000 R03$')
 
     def test_choice_cancel_and_tang_refusals(self):
         wc = Wc()
         wc.install_resident()
-        self.assertEqual(wc.toggle(ESC)[0], 'SD2 left as it was')
+        self.assertEqual(wc.toggle('esc')[0], '')          # отмена — без окна итога
         self.assertEqual(wc.core_bytes(0x4FE8, 16), bytes(16))
         self.assertEqual(wc.vdisk.modes, [0])           # только освобождение при старте WC
         wc.vdisk.no_card = True
-        self.assertEqual(wc.toggle(ENTER)[0], 'No Tang card: needs TS-Config 1.30+ and SD')
+        self.assertEqual(wc.toggle('tang')[0], 'No Tang microSD card.')
         self.assertEqual(wc.core_bytes(0x501C, 3), bytes([0x21, 0x5D, 0x53]))
         wc2 = Wc()
         wc2.vdisk.no_mode = True                         # прошивка 0.1.99
         start = wc2.ticks
         wc2.install_resident()
         self.assertLess(wc2.ticks - start, 80_000_000, 'старт WC без MODE не ждёт долго')
-        self.assertEqual(wc2.toggle(ENTER)[0], 'SD2 = Tang card needs ESP firmware 0.1.100')
+        self.assertEqual(wc2.toggle('tang')[0], 'SD Tang needs ESP firmware')
         self.assertEqual(wc2.page(RES_PAGE)[0x10A], 0)
-        self.assertEqual(self.installed(wc2)[0], 'SD2 = VDAC4 VFS (ESP: TANG = Tang microSD)')
+        self.assertEqual(self.installed(wc2)[0], '')
 
     def test_release_without_answer_still_switches_off(self):
         wc = self.tang_driver()
         wc.vdisk.no_mode = True
-        msg = wc.toggle()
-        self.assertEqual(msg[0], 'SD2 normal; ESP did not answer the release', msg)
+        msg = wc.toggle('sd')
+        self.assertEqual(msg[0], 'SD2 is the second SD card again.', msg)
         self.assertEqual(wc.page(RES_PAGE)[0x10A], 0)
         self.assertEqual(wc.core_bytes(0x4FE8, len(ORIGINAL)), ORIGINAL)
 

@@ -377,7 +377,11 @@ void Volume::renderFat(uint32_t sector, uint8_t* out) const {
 
 bool Volume::renderDir(uint32_t index, uint64_t offset, uint8_t* out) {
   memset(out, 0, kSectorSize);
-  if (!load(index)) return false;
+  // (0.1.142) Источник не перечислился (флешки в OTG ESP нет, карта Tang недоступна) — каталог всё
+  // равно отдаётся, с «.» и «..». Прежде сектор каталога не отдавался вовсе: в WC папка была пустой
+  // и без «..» — наверх из неё не выйти (13.11.2026). Узел остаётся незагруженным: появится
+  // источник — следующее чтение каталога его перечислит.
+  load(index);
   const uint32_t from = (uint32_t)(offset / 32), to = from + kSectorSize / 32;
   uint32_t record = 0;
   auto emit = [&](const uint8_t* r) {

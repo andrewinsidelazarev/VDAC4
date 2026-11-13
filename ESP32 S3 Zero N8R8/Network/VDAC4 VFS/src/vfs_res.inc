@@ -115,3 +115,4 @@ LINK_F_SECTOR   equ #20                 ; флаг запроса канала: 
 VDISK_CHUNK     equ 248
 
 DEV_SD2         equ 6                   ; DOS_SWP: второй SD ZC — его место и занимает VFS
+DEV_SD1         equ 1                   ; DOS_SWP: первый SD ZC — диск 1: WC

@@ -311,10 +311,27 @@ RES_IO:
 .got_info:
         ld a,(ProtoBuf+1)
         ld (DIAG+SIG_RES),a
-        ; READN — в живой драйвер (#3800…) и в его образ: RES_SWAP кладёт образ заново на каждый DOS_SWP
+        ; READN — в образ драйвера (RES_SWAP кладёт его заново на каждый DOS_SWP) и в живой драйвер
+        ; (#3800…), но в живой — только если там наш: таблица переходов та же, что в образе. INFO зовёт
+        ; и переключатель (самопроверка) из окна плагина, а в окне #0000 тогда — страница WildDOS
+        ; активной панели. У панели на SD1 там драйвер SD-ZC, и #38DB (D_READN) — уже его код: байт
+        ; флагов портил инструкцию, и каталоги той панели не читались до перечитывания (13.11.2026).
         and VDISK_READN|VDISK_READDMA
-        ld (D_READN),a
         ld (RES_WINDOW+RES_IMG+(D_READN-#3800)),a
+        ld c,a
+        ld hl,#3800
+        ld de,RES_WINDOW+RES_IMG
+        ld b,9                          ; SELDEV, DEVINI, REINI: три перехода
+.info_ours:
+        ld a,(de)
+        cp (hl)
+        jr nz,.info_flags_done          ; по #3800 чужой драйвер — его не трогать
+        inc hl
+        inc de
+        djnz .info_ours
+        ld a,c
+        ld (D_READN),a
+.info_flags_done:
         ld a,(ProtoBuf+1)
         and VDISK_READY
         ld a,DIAG_NOTREADY

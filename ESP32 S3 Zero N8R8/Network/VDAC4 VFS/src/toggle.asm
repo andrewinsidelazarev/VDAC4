@@ -1,14 +1,16 @@
 ; VDAC4VFS.WMF — переключатель VDAC4 VFS (меню F10): SD2 Wild Commander -> диск ESP и обратно.
-; Каждый запуск меняет состояние на противоположное. Включение спрашивает, что будет на SD2:
-; Enter — сама карта Tang с записью (ESP отдаёт её WC: MODE 1 — FatFs ESP карту не монтирует, ядро
-; Tang не меняется); Space — том VFS с папками источников, только чтение. Выключение карту Tang
-; возвращает ESP (MODE 0); не вышло — её вернёт резидент при следующем старте WC.
+; Окно с переключателями (13.11.2026): «SD-Card 2» — второй SD Evo, «SD Tang» — сама карта Tang с
+; записью (ESP отдаёт её WC: MODE 1 — FatFs ESP карту не монтирует, ядро Tang не меняется), «VFS» —
+; том VFS с папками источников, только чтение; по умолчанию выбран «SD-Card 2». Возврат к SD-Card 2
+; карту Tang отдаёт ESP (MODE 0); не вышло — её вернёт резидент при следующем старте WC.
 ;
 ; Включение: сверить WC Improved v1.11i побайтно (wc111i.inc), найти страницу резидента VFSRES.WMF
 ; по подписи, убедиться, что прошивка ESP умеет VDISK (INFO), сбросить её том (RESET), поставить
 ; переходник перед DOS_SWP и «JP WC_TRAMP» на месте «LD HL,DR2» ветки A=6. Выключение — вернуть
 ; эталонные байты. Панели, что стоят на SD2, перемонтируются как при выборе диска (как MEDIA_IDLE
-; ядра: (IX+#1C)=0, DRACT, ORIGA, затем DRACT, XPAN, STATUS, XPAN). Этот код WC ждёт свою
+; ядра: (IX+#1C)=0, DRACT, ORIGA, затем DRACT, XPAN, STATUS, XPAN); при возврате SD-Card 2 они
+; переходят на диск 1: (13.11.2026, по слову пользователя: на них был VFS или SD Tang, а не второй
+; SD — показывать его вместо них незачем). Этот код WC ждёт свою
 ; страницу #02 в окне #8000, а там — плагин; поэтому перемонтирование идёт «перелётом»: копия
 ; R_START лежит в свободной после запуска области страницы #02 (WC_FREE02), туда и обратно ведёт
 ; MNG8 — возврат из него приходит уже в другую страницу по тому же адресу.
@@ -52,76 +54,108 @@ PLUGIN:
         xor a
         ret
 
-; Всё, кроме окна. В T_Msg — текст итога.
+; Всё, кроме окон: выбор (T_Select) и смена режима. Итог, если есть что сказать, — в T_Msg/T_Msg2;
+; T_Err — ошибка (окно красное, с подробностями для разбора). Удачная смена окна итога не даёт:
+; панели на SD2 переключатель перемонтирует сам.
 T_Main:
+        xor a
+        ld (T_Err),a
+        ld (T_Kept),a
+        ld hl,0
+        ld (T_Msg),hl
+        ld (T_Msg2),hl
         call T_CheckWc
-        ld hl,T_MsgWc
-        jp c,.done
+        ld hl,T_ErrWc
+        jp c,.error
         call T_FindRes
-        ld hl,T_MsgRes
-        jp c,.done
+        ld hl,T_ErrRes
+        jp c,.error
         call T_Diag                     ; что было с драйвером до этого запуска
         call T_SelfTest                 ; код резидента: BEGIN и INFO, как у драйвера
+        ; что сейчас на SD2: переходника нет — второй SD; есть — режим из подписи резидента
+        xor a
+        ld (T_Cur),a
         ld a,(T_On)
         or a
-        jr nz,.off
-        call T_Choose                   ; (T_Mode): STATE_TANG или STATE_VFS; CF=1 — Esc
-        ld hl,T_MsgCancel
-        jr c,.done
-        call T_Esp
-        ld hl,T_MsgEsp
-        jr c,.done
+        jr z,.cur_known
+        call T_GetState
+        cp STATE_TANG
+        jr z,.cur_set
+        ld a,STATE_VFS
+.cur_set:
+        ld (T_Cur),a
+.cur_known:
+        call T_Select                   ; A — выбранный режим; CF=1 — Esc
+        ret c                           ; отмена: SD2 как был, окна итога нет
+        ld hl,T_Cur
+        cp (hl)
+        ret z                           ; выбран тот, что уже стоит
+        ld (T_Mode),a
+        or a
+        jp z,.to_sd2
+        call T_Esp                      ; у прошивки есть VDISK; её том — заново
+        ld hl,T_ErrEsp
+        jp c,.error
         ld a,(T_Mode)
         cp STATE_TANG
-        jr z,.tang
+        jr z,.to_tang
         ld a,(T_EspFlags)               ; том без источников драйвер не примет (DEVINI)
         and VDISK_READY
-        ld hl,T_MsgEmpty
-        jr z,.done
+        ld hl,T_ErrEmpty
+        jp z,.error
         xor a                           ; ESP — том VFS (карту Tang, если была у WC, — себе);
         call T_EspMode                  ; прошивка до 0.1.100 MODE не знает — не важно
         ld a,STATE_VFS
         call T_Install
-        ld hl,T_MsgOn
         jr .remount
-.tang:
+.to_tang:
         ld a,1                          ; карту Tang — WC: ESP её не монтирует и не меняет ядро
         call T_EspMode
-        ld hl,T_MsgOld
-        jr c,.done                      ; ответа нет: прошивка без MODE
+        ld hl,T_ErrOld
+        jp c,.error                     ; ответа нет: прошивка без MODE
         ld a,(ProtoBuf)
         or a
-        ld hl,T_MsgNoCard
-        jr nz,.done
+        ld hl,T_ErrNoCard
+        jp nz,.error
         ld a,STATE_TANG
         call T_Install
-        ld hl,T_MsgOnTang
         jr .remount
-.off:
-        call T_GetState
+.to_sd2:
+        ld a,(T_Cur)
         cp STATE_TANG
-        ld hl,T_MsgOff
         jr nz,.uninstall
         xor a                           ; карту Tang — снова ESP
         call T_EspMode
-        ld hl,T_MsgKept
-        jr c,.uninstall                 ; не ответила: отдаст при старте WC (резидент)
-        ld hl,T_MsgOff
+        jr nc,.uninstall
+        ld a,1
+        ld (T_Kept),a                   ; не ответила: отдаст резидент при старте WC
 .uninstall:
-        push hl
         call T_Uninstall
-        pop hl
 .remount:
-        ld (T_Msg),hl
         call T_Remount
         ld a,(T_NoRemount)
         or a
+        jr z,.no_panel
+        ld hl,T_InfoPanel
+        ld (T_Msg),hl
+.no_panel:
+        ld a,(T_Kept)
+        or a
         ret z
-        ld hl,T_MsgPanel
+        ld hl,T_InfoKept
+        ld de,(T_Msg)
+        ld a,d
+        or e
+        jr z,.kept_first
         ld (T_Msg2),hl
         ret
-.done:
+.kept_first:
         ld (T_Msg),hl
+        ret
+.error:
+        ld (T_Msg),hl
+        ld a,1
+        ld (T_Err),a
         ret
 
 ; BC байтов по HL и DE: CF=0 — равны, CF=1 — нет. Портит A, BC, DE, HL.
@@ -493,13 +527,44 @@ T_GetState:
         pop af
         ret
 
-; Окно выбора: Enter — карта Tang с записью, Space — том VFS, Esc — отмена (CF=1).
-T_Choose:
+; Окно выбора: что будет на SD2 (13.11.2026, по слову пользователя). «SD-Card 2» — второй SD Evo,
+; «SD Tang» — карта Tang через ESP с записью, «VFS» — том ESP с папками TANG и USB, только чтение.
+; По умолчанию выбран «SD-Card 2». ↑/↓ — выбор, Enter — поставить, Esc — ничего не менять (CF=1).
+; Выход: A — STATE_* выбранного, CF=0.
+;
+; Оформление (13.11.2026: «красивый текстовый консольный дизайн» вместо скобок «(*)»): выбранная
+; строка — полоса чёрным по голубому со стрелкой «►», как курсор панелей WC; имена — ярко-белым,
+; пояснения — голубым; что стоит сейчас — зелёная метка «◄ now»; под разделителем ╟──╢ — клавиши
+; жёлтым. Всё это умеет сам WC, своего вывода на экран у плагина нет:
+; - цвет меняют коды TXTPR внутри строки (WCIF.ASM, L7828_96): код 1…8 и за ним знак — цвет знаков
+;   «код AND 7» на фоне окна; два одинаковых кода c,c — яркий цвет c (c+8) на фоне окна; два разных
+;   p,i — фон p-1 и цвет знаков i-1; #09 — фон и знаки местами; #0D (новая строка) — снова цвет
+;   окна. Знаки #10 «►», #11 «◄», #18 «↑», #19 «↓» шрифта WC (CP866) TXTPR печатает как есть;
+; - разделитель ╟──╢ рисует PRWOW: байт +#0A описателя — его строка, считая от нижней рамки
+;   (1 — последняя строка внутри окна).
+T_Select:
         call WC_WAITUP_                 ; Enter, которым запустили плагин, — не выбор
-        ld ix,T_ChoiceWin
+        ld a,(T_Cur)                    ; строка того, что стоит сейчас: 0, 1 или 2
+        ld c,0
+        or a
+        jr z,.now
+        inc c
+        cp STATE_TANG
+        jr z,.now
+        inc c
+.now:
+        ld a,c
+        ld (T_NowRow),a
+        xor a
+        ld (T_Sel),a
+        ld ix,T_SelWin
+        ld (ix+2),#FF                   ; центр текущего режима экрана
+        ld (ix+3),#FF
         call WC_PRWOW_
-        ld ix,T_ChoiceWin
-        ld hl,T_ChoiceText
+.draw:
+        call T_SelBuild                 ; текст окна — в T_Text: строки целиком, полоса — заново
+        ld ix,T_SelWin
+        ld hl,T_Text
         ld de,#0101
         call WC_TXTPR_
 .wait:
@@ -508,25 +573,108 @@ T_Choose:
         call WC_ESC_
         jr nz,.cancel
         call WC_ENTER_
-        ld a,STATE_TANG
         jr nz,.chosen
-        call WC_SPACE_
-        ld a,STATE_VFS
-        jr nz,.chosen
+        call WC_DOWN_
+        jr nz,.down
+        call WC_UP_
+        jr nz,.up
         jr .wait
-.chosen:
-        ld (T_Mode),a
-        call .close
+.down:
+        ld a,(T_Sel)
+        cp 2
+        jr nc,.wait
+        inc a
+        ld (T_Sel),a
+        jr .draw
+.up:
+        ld a,(T_Sel)
         or a
+        jr z,.wait
+        dec a
+        ld (T_Sel),a
+        jr .draw
+.chosen:
+        call .close
+        ld a,(T_Sel)
+        ld e,a
+        ld d,0
+        ld hl,T_SelStates
+        add hl,de
+        ld a,(hl)
+        or a                            ; CF=0
         ret
 .cancel:
         call .close
         scf
         ret
 .close:
-        call WC_WAITUP_                 ; та же клавиша не закроет окно итога
-        ld ix,T_ChoiceWin
+        call WC_WAITUP_                 ; та же клавиша не уйдёт в WC и не закроет окно итога
+        ld ix,T_SelWin
         jp WC_RRESB_
+
+; Текст окна выбора — в T_Text: вопрос, три строки, пустая строка, разделитель, клавиши. Каждая
+; строка выбора — одной ширины (T_ROW_W знаков без кодов) в обоих видах: полоса, ушедшая со
+; строки, затирается целиком.
+T_SelBuild:
+        ld de,T_Text
+        ld hl,T_SelHead
+        call T_Put
+        ld hl,T_SelRows
+        ld b,0                          ; номер строки
+.row:
+        ld a,' '                        ; поле слева — цветом окна
+        ld (de),a
+        inc de
+        ld a,(T_Sel)
+        sub b
+        ld (T_InBar),a                  ; 0 — строка под полосой
+        push hl
+        ld hl,T_SelBar                  ; полоса: коды 6,1 (чёрный по голубому) и « ► »
+        jr z,.lead
+        ld hl,T_SelLead
+.lead:
+        call T_Put
+        pop hl
+        call T_PutRow                   ; имя и пояснение; HL — за нулём строки
+        push hl
+        ld hl,T_SelNowMark              ; «◄ now» ярко-зелёным (под полосой — её цветом)
+        ld a,(T_NowRow)
+        cp b
+        jr z,.mark
+        ld hl,T_SelNoMark
+.mark:
+        call T_PutRow
+        ld hl,T_SelEnd                  ; пробел и новая строка
+        call T_Put
+        pop hl
+        inc b
+        ld a,b
+        cp 3
+        jr c,.row
+        ld hl,T_SelFoot
+        call T_Put
+        xor a
+        ld (de),a
+        ret
+
+; Строку HL до нуля — в DE; под полосой (T_InBar=0) — без кодов цвета (байты 1…9): строка
+; полосы — одним её цветом. Выход: HL — за нулём, DE — за строкой.
+T_PutRow:
+        ld a,(hl)
+        inc hl
+        or a
+        ret z
+        cp #0A
+        jr nc,.char
+        ld c,a
+        ld a,(T_InBar)
+        or a
+        jr z,T_PutRow                   ; под полосой код пропустить
+        ld a,c
+.char:
+        ld (de),a
+        inc de
+        jr T_PutRow
 
 ; A — STATE_VFS или STATE_TANG
 T_Install:
@@ -568,6 +716,9 @@ T_SetState:
         jp T_UnmapC000
 
 ; Перемонтировать панели на SD2: копия R_START — в страницу #02, перелёт. Нет места — T_NoRemount.
+; Возврат SD-Card 2 (T_Mode=0): на этих панелях был VFS или SD Tang — они переходят на диск 1:
+; (13.11.2026, по слову пользователя), прочие режимы — снова SD2 с новым томом. Устройство, как и
+; страница возврата, ставится в копию после сверки: от запуска к запуску оно разное.
 T_Remount:
         xor a
         ld (T_NoRemount),a
@@ -580,11 +731,17 @@ T_Remount:
 .need:
         ld a,#02
         call T_MapC000
-        ld hl,R_START+#4000             ; наша копия уже там?
+        ld hl,R_START+#4000             ; наша копия уже там? (кроме байта устройства)
         ld de,R_START
-        ld bc,R_BACK+1-R_START
+        ld bc,R_DEV_ARG-R_START
+        call T_Same
+        jr c,.foreign
+        ld hl,R_DEV_ARG+1+#4000
+        ld de,R_DEV_ARG+1
+        ld bc,R_BACK-R_DEV_ARG
         call T_Same
         jr nc,.copy
+.foreign:
         ld hl,WC_FREE02+#4000           ; иначе область должна быть как в boot.$C
         ld bc,WC_FREE02_END-WC_FREE02
         ld de,0
@@ -615,66 +772,122 @@ T_Remount:
         ldir
         ld a,(T_Own)
         ld (R_BACK+1+#4000),a
+        ld a,(T_Mode)
+        or a
+        ld a,DEV_SD2
+        jr nz,.device
+        ld a,DEV_SD1
+.device:
+        ld (R_DEV_ARG+#4000),a            ; LD (IX+#1D),n
         call T_UnmapC000
         ld ix,(T_IX)                    ; DRACT в конце — активной панели
         jp R_FLIP                       ; назад — через T_CONT, к вызвавшему
 
-; Окно итога: T_Msg, T_Msg2 (если есть); ждать Enter или Esc.
+; Окно итога (T_Msg; 0 — окна нет): сообщение и T_Msg2. Ошибка (T_Err) — окно красное, как отказ
+; FTP и SMB, и под сообщением — подробности для разбора: прошлая работа драйвера, доклад ESP,
+; самопроверка резидента (серым). Под разделителем ╟──╢ — «Any key» жёлтым. Высота — по числу
+; строк. Любая клавиша — назад в WC.
 T_Show:
         ld hl,(T_Msg)
-        ld de,T_Line1
-        call T_CopyLine
+        ld a,h
+        or l
+        ret z
+        ld de,T_Text
+        ld a,#0D                        ; первая строка окна — пустая
+        ld (de),a
+        inc de
+        call T_Put
         ld hl,(T_Msg2)
-        ld de,T_Line2
-        call T_CopyLine
+        ld a,h
+        or l
+        jr z,.one
+        ld a,#0D
+        ld (de),a
+        inc de
+        call T_Put
+.one:
+        ld a,(T_Err)
+        or a
+        jr z,.footer
+        ld hl,T_TxtDetails
+        call T_Put
         ld hl,T_Diag3
-        ld de,T_Line3
-        call T_CopyLine
+        call .diag
         ld hl,T_Diag4
-        ld de,T_Line4
-        call T_CopyLine
+        call .diag
         ld hl,T_Diag5
-        ld de,T_Line5
-        call T_CopyLine
-        ld ix,T_Window
+        call .diag
+.footer:
+        ld hl,T_TxtFooter
+        call T_Put
+        xor a
+        ld (de),a
+        ld hl,T_Text                    ; высота: строк текста + 2 (рамка)
+        ld b,3
+.count:
+        ld a,(hl)
+        inc hl
+        or a
+        jr z,.counted
+        cp #0D
+        jr nz,.count
+        inc b
+        jr .count
+.counted:
+        ld ix,T_ResWin
+        ld (ix+2),#FF                   ; центр текущего режима экрана
+        ld (ix+3),#FF
+        ld (ix+5),b
+        ld a,(T_Err)
+        or a
+        ld a,#17                        ; сообщение — цветом окна выбора
+        jr z,.colour
+        ld a,#2F                        ; ошибка: ярко-белые по красному, как у FTP и SMB
+.colour:
+        ld (ix+6),a
         call WC_PRWOW_
-        ld ix,T_Window
+        ld ix,T_ResWin
         ld hl,T_Text
         ld de,#0101
         call WC_TXTPR_
+        call WC_WAITUP_
 .wait:
         ei
         halt
         call WC_ESC_
         jr nz,.close
-        call WC_ENTER_
+        call WC_ANYK_                   ; любая клавиша (KBSCN с обычной таблицей её не видит)
         jr z,.wait
 .close:
-        ld ix,T_Window
+        call WC_WAITUP_                 ; отпущена — WC её не примет за свою команду
+        ld ix,T_ResWin
         jp WC_RRESB_
-
-; Строка HL (0 — пусто) в поле DE шириной T_WIDTH, остаток — пробелы.
-T_CopyLine:
-        ld b,T_WIDTH
-.copy:
-        ld a,h
-        or l
-        jr z,.space
+.diag:                                  ; строка подробностей — если не пустая, серым
         ld a,(hl)
         or a
-        jr z,.space
+        ret z
+        ld a,#0D
+        ld (de),a
+        inc de
+        ld a,7                          ; код TXTPR: знаки цвета 7 на фоне окна
+        ld (de),a
+        inc de
+        ld a,' '                        ; отступ — как у «Details:»
+        ld (de),a
+        inc de
+        ld (de),a
+        inc de
+        jp T_Put
+
+; Строку HL до нуля — в DE (без нуля); DE — за ней.
+T_Put:
+        ld a,(hl)
+        or a
+        ret z
         ld (de),a
         inc hl
         inc de
-        djnz .copy
-        ret
-.space:
-        ld hl,0
-        ld a,' '
-        ld (de),a
-        inc de
-        djnz .copy
-        ret
+        jr T_Put
 
 WC_PRWOW_:
         ld a,FN_PRWOW
@@ -691,66 +904,116 @@ WC_ESC_:
 WC_ENTER_:
         ld a,FN_ENTER
         jp WC_API
-WC_SPACE_:
-        ld a,FN_SPACE
+WC_UP_:
+        ld a,FN_UP
+        jp WC_API
+WC_DOWN_:
+        ld a,FN_DOWN
+        jp WC_API
+WC_ANYK_:                               ; NZ — нажата любая клавиша
+        ld a,FN_ANYK
         jp WC_API
 WC_WAITUP_:
         ld a,FN_WAITUP
         jp WC_API
 
-T_WIDTH         equ 44
-T_Window:
-        db #81,0
-        db 13,7                         ; X,Y
-        db T_WIDTH+4,10                 ; W,H
-        db #17,0
-        dw 0
-        db 0,0
-        dw T_Header
-        dw 0
-        dw 0
+T_WIDTH         equ 44                  ; строка подробностей (T_Diag3…T_Diag5)
+T_WINW          equ 56                  ; ширина окон: 54 знака внутри рамки
+T_COLOUR        equ #17                 ; окна: белые знаки по синему фону, как у WC
+T_INK           equ T_COLOUR&7          ; код TXTPR «снова цвет окна» (после жёлтого)
+T_NAME_W        equ 12                  ; поле имени в строке выбора
+T_DESC_W        equ 31                  ; поле пояснения
+T_ROW_W         equ 3+T_NAME_W+T_DESC_W+5+1   ; строка полосы: « ► », имя, пояснение, метка, пробел
+        ASSERT 1+T_ROW_W+1 == T_WINW-2, полоса — во всю ширину окна, по знаку поля с боков
 T_Header:       db #0E,9," VDAC4 VFS ",0
-T_ChoiceWin:
-        db #81,0
-        db 13,9                         ; X,Y
-        db T_WIDTH+4,7                  ; W,H
-        db #17,0
+T_SelWin:
+        db #81,0                        ; тень и рамка стиля 1 (двойная)
+        db #FF,#FF                      ; X,Y: центр
+        db T_WINW,11                    ; 9 строк внутри
+        db T_COLOUR,0
         dw 0
-        db 0,0
+        db 2,0                          ; разделитель ╟──╢ — над строкой клавиш
         dw T_Header
         dw 0
         dw 0
-T_ChoiceText:
+T_SelHead:
         db #0D
-        db " Enter - SD2 = Tang microSD (read/write)",#0D
-        db " Space - SD2 = VDAC4 VFS (read only)",#0D
-        db " Esc   - leave SD2 as it is",0
-T_Text:
-        db #0D
-T_Line1:        ds T_WIDTH,' '
-        db #0D
-T_Line2:        ds T_WIDTH,' '
-        db #0D
-T_Line3:        ds T_WIDTH,' '          ; диагностика: прошлая работа драйвера
-        db #0D
-T_Line4:        ds T_WIDTH,' '          ;   доклад ESP об ошибке
-        db #0D
-T_Line5:        ds T_WIDTH,' '          ;   самопроверка кода резидента
-        db #0D,#0D
-        db "      Enter / Esc - back to Wild Commander",0
+        db #0E,7,7,"Choose what drive SD2 shows",#0D
+        db #0D,0
+T_SelBar:       db 6,1," ",#10," ",0    ; полоса: чёрный (1-1) по голубому (6-1), « ► »
+T_SelLead:      db "   ",0
+; Строки выбора: имя ярко-белым (7,7) в T_NAME_W знаков, пояснение голубым (5) в T_DESC_W
+T_SelRows:
+.r0:    db 7,7,"SD-Card 2"
+        ds T_NAME_W-($-.r0-2),' '
+.d0:    db 5,"the second SD card of the Evo"
+        ds T_DESC_W-($-.d0-1),' '
+        db 0
+.r1:    db 7,7,"SD Tang"
+        ds T_NAME_W-($-.r1-2),' '
+.d1:    db 5,"Tang microSD, read and write"
+        ds T_DESC_W-($-.d1-1),' '
+        db 0
+.r2:    db 7,7,"VFS"
+        ds T_NAME_W-($-.r2-2),' '
+.d2:    db 5,"TANG + USB folders, read only"
+        ds T_DESC_W-($-.d2-1),' '
+        db 0
+T_SelNowMark:   db 4,4,#11," now",0     ; «◄ now» ярко-зелёным
+T_SelNoMark:    db "     ",0
+T_SelEnd:       db " ",#0D,0
+T_SelFoot:
+        db #0D                          ; пустая строка
+        db #0D                          ; строка разделителя (его рисует PRWOW)
+        db #0E,6,6,#18,#19,T_INK," choose      "
+        db 6,6,"Enter",T_INK," set      "
+        db 6,6,"Esc",T_INK," cancel",0
+T_SelStates:    db 0,STATE_TANG,STATE_VFS
+T_ResWin:
+        db #81,0
+        db #FF,#FF
+        db T_WINW,4                     ; высоту и цвет ставит T_Show
+        db T_COLOUR,0
+        dw 0
+        db 2,0                          ; разделитель ╟──╢ — над строкой «Any key»
+        dw T_Header
+        dw 0
+        dw 0
+T_TxtDetails:   db #0D,#0D,7,"  Details:",0
+T_TxtFooter:
+        db #0D                          ; конец последней строки сообщения
+        db #0D                          ; пустая строка
+        db #0D                          ; строка разделителя
+        db #0E,6,6,"Any key",7,7," - back to Wild Commander",0
 
-T_MsgOn:        db "SD2 = VDAC4 VFS (ESP: TANG = Tang microSD)",0
-T_MsgOnTang:    db "SD2 = Tang microSD card, read/write",0
-T_MsgOff:       db "SD2 = second SD card again",0
-T_MsgKept:      db "SD2 normal; ESP did not answer the release",0
-T_MsgCancel:    db "SD2 left as it was",0
-T_MsgOld:       db "SD2 = Tang card needs ESP firmware 0.1.100",0
-T_MsgNoCard:    db "No Tang card: needs TS-Config 1.30+ and SD",0
-T_MsgWc:        db "Needs Wild Commander Improved v1.11i",0
-T_MsgRes:       db "VFSRES.WMF not loaded: add it to [PLUGINS]",0
-T_MsgEsp:       db "ESP has no VFS: needs firmware vdac4-0.1.99",0
-T_MsgEmpty:     db "ESP VFS is empty: needs firmware 0.1.99+",0
-T_MsgPanel:     db "Choose SD2 again in the drive menu",0
+; Сообщения итога: строки по центру (#0E), ярко-белым (7,7), между ними #0D
+T_InfoPanel:
+        db #0E,7,7,"SD2 has changed. Choose the drive",#0D
+        db #0E,7,7,"again in the drive menu.",0
+T_InfoKept:
+        db #0E,7,7,"SD2 is the second SD card again.",#0D
+        db #0E,7,7,"The ESP did not answer: it takes the",#0D
+        db #0E,7,7,"Tang card back at the next WC start.",0
+T_ErrWc:
+        db #0E,7,7,"VDAC4 VFS needs Wild Commander",#0D
+        db #0E,7,7,"Improved v1.11i.",0
+T_ErrRes:
+        db #0E,7,7,"VFSRES.WMF is not loaded.",#0D
+        db #0E,7,7,"Add it to [PLUGINS] in /WC/wc.ini",#0D
+        db #0E,7,7,"and restart Wild Commander.",0
+T_ErrEsp:
+        db #0E,7,7,"The ESP firmware has no VDAC4 VFS.",#0D
+        db #0E,7,7,"Update the ESP: vdac4-0.1.99 or newer.",0
+T_ErrEmpty:
+        db #0E,7,7,"The VFS volume has no sources.",#0D
+        db #0E,7,7,"Update the ESP: vdac4-0.1.99 or newer.",0
+T_ErrOld:
+        db #0E,7,7,"SD Tang needs ESP firmware",#0D
+        db #0E,7,7,"vdac4-0.1.100 or newer.",0
+T_ErrNoCard:
+        db #0E,7,7,"No Tang microSD card.",#0D
+        db #0E,7,7,"Insert it into the Tang Nano",#0D
+        db #0E,7,7,"(Tang core TS-Config 1.30 or newer).",0
 T_SigText:      db "VDAC4VFS"
         INCLUDE "wc111i_data.inc"
 
@@ -774,7 +1037,14 @@ T_JpTramp:      db #C3
 T_IX:           dw 0
 T_Own:          db 0
 T_On:           db 0                    ; переходник стоит; T_SetState — STATE_* (не 0 — включено)
-T_Mode:         db 0                    ; выбор окна T_Choose
+T_Mode:         db 0                    ; режим, выбранный в T_Select (STATE_*, 0 — второй SD)
+T_Cur:          db 0                    ; режим, что стоял при запуске
+T_Sel:          db 0                    ; строка выбора 0…2
+T_NowRow:       db 0                    ; строка того, что стоит сейчас (метка «◄ now»)
+T_InBar:        db 0                    ; T_SelBuild: 0 — строка под полосой
+T_Err:          db 0                    ; итог — ошибка
+T_Kept:         db 0                    ; ESP не ответила на возврат карты Tang
+T_Text:         ds 640                  ; текст окна итога (T_Show)
 T_ModeReq:      db 0                    ; payload MODE
 T_ResPage:      db 0
 T_SaveC000:     db 0
@@ -807,6 +1077,7 @@ R_START:                                ; копия — в странице #02
         ld a,(ix+#1D)                   ; устройство панели
         cp DEV_SD2
         ret nz
+.dev:   ld (ix+#1D),DEV_SD2             ; DEV_SD2 — снова SD2, DEV_SD1 — на 1: (ставит T_Remount в копии)
         ld (ix+#1C),0                   ; драйвер не выбран: DRACT позовёт DOS_SWP
         call WC_DRACT
         jp WC_ORIGA                     ; DEVINI, HDD, корень, список
@@ -827,6 +1098,7 @@ R_BACK:
 T_CONT:                                 ; только в странице плагина
         ret
 R_LEN           equ T_CONT-R_START
+R_DEV_ARG       equ R_START.dev+3       ; байт n в LD (IX+#1D),n: устройство панели после перелёта
         ASSERT WC_FREE02+R_LEN <= WC_FREE02_END
         ENT
 pageEnd:

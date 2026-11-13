@@ -107,6 +107,16 @@ PLUGIN:
         ld a,1
         call WC_INT_PL                   ; WC не перерисовывает своё под окном
         call WC_GEDPL
+        ; 0.22: включён VDAC4 VFS (на SD2 — карта Tang или том VFS через ESP) — не запускаемся, как
+        ; FTP и SMB: окно с причиной, к ESP ни одной команды. Карту Tang держит WC — ESP не прочтёт с
+        ; неё ни список ядер, ни ядро, а сектора SD2 WC берёт у той же ESP.
+        call Ui_VfsRefuse
+        jr nc,.no_vfs
+        call WC_GEDPL
+        xor a                            ; на картах ничего не менялось: панели не перечитывать
+        pop ix
+        ret
+.no_vfs:
         ld hl,UiCoresTitle
         ld de,UiTitle
         ld b,44

@@ -49,6 +49,9 @@ WC_GEDPL:
 WC_ESC:
         ld a,FN_ESC
         jp WC_API
+WC_ANYK:                                 ; NZ — нажата любая клавиша (0.22, окно отказа)
+        ld a,FN_ANYK
+        jp WC_API
 WC_KEY_UP:
         ld a,FN_UP
         jp WC_API
@@ -92,6 +95,27 @@ mainEnd:
         DISP #C000
 page1Start:
         INCLUDE "crc16_tab.inc"
+        ; 0.22: окно отказа при включённом VDAC4 VFS (Ui_VfsRefuse копирует его в SdData)
+VfsRefuseWin:
+        db #81                         ; тень и рамка стиля 1
+        db 0
+        db #FF,#FF                     ; X,Y: центр текущего режима
+        db 40,9                        ; ширина и высота: 7 строк текста
+        db #2F                         ; окно ошибки: ярко-белые символы по красному
+        db 0
+        dw 0
+        db 0,0
+        dw UiHeader
+        dw 0
+        dw 0
+VfsRefuseText:                         ; #0E — строка по центру окна
+        db #0E,"Cores cannot start: VDAC4 VFS is on.",#0D
+        db #0E,"SD2 is the Tang microSD or the VFS",#0D
+        db #0E,"volume, both served by the ESP.",#0D,#0D
+        db #0E,"Turn it off: F10 - VDAC4 VFS,",#0D
+        db #0E,"then start VDAC4 Cores again.",#0D
+        db #0E,"Any key - return to WC",0
+VfsRefuseEnd:
 page1End:
         ASSERT page1End <= RAW_BUF, "page 1 tables overlap the DMA portion buffer"
         ENT

@@ -273,3 +273,53 @@ UiCoresTitle: db "FPGA cores from the Tang SD, /CORES",0
 NesEvoTitle: db "NES cartridge from the Evo SD",0
 AdfEvoTitle: db "Amiga disk from the Evo SD",0
 MdEvoTitle:  db "Mega Drive ROM from the Evo SD",0
+
+; 0.22: отказ запуска при включённом VDAC4 VFS — как у FTP 0.16 и SMB (их ui.asm). Проверка та же:
+; VDAC4VFS.WMF ставит в WC v1.11i «JP #4FE8» на место «LD HL,DR2» ветки SD2 (#501C) и переходник к
+; резиденту по #4FE8 (LD A,I …); код WC при работе плагина — в окне #4000. Окно и текст лежат в
+; странице 1 (в странице кода нет места) и перед показом копируются в SdData (буфер сектора для
+; ZX Next, при старте свободен): PRWOW и TXTPR ставят в окно #C000 свою страницу.
+; Выход: CF=0 — VFS выключен, окна не было; CF=1 — окно показано и закрыто клавишей.
+VFS4_SD2_JP     equ #501C
+VFS4_TRAMP      equ #4FE8
+Ui_VfsRefuse:
+        ld a,(VFS4_SD2_JP)
+        cp #C3                           ; JP
+        jr nz,.off
+        ld hl,(VFS4_SD2_JP+1)
+        ld de,VFS4_TRAMP
+        or a
+        sbc hl,de
+        jr nz,.off
+        ld hl,(VFS4_TRAMP)
+        ld de,#57ED                      ; LD A,I
+        sbc hl,de                        ; CF=0: прошлое вычитание дало ноль
+        jr nz,.off
+        call Page1_Map
+        ld hl,VfsRefuseWin
+        ld de,SdData
+        ld bc,VfsRefuseEnd-VfsRefuseWin
+        ldir
+        ld ix,SdData
+        call WC_PRWOW
+        ld ix,SdData
+        ld hl,SdData+VfsRefuseText-VfsRefuseWin
+        ld de,#0101
+        call WC_TXTPR
+        call WC_WAITUP                   ; клавиша запуска плагина ещё может быть нажата
+.wait:
+        ei
+        halt
+        call WC_ESC
+        jr nz,.done
+        call WC_ANYK                     ; любая клавиша (KBSCN с обычной таблицей её не видит)
+        jr z,.wait
+.done:
+        call WC_WAITUP                   ; отпущена — WC её не примет за свою команду
+        ld ix,SdData
+        call WC_RRESB                    ; фон под окном — назад
+        scf
+        ret
+.off:
+        or a
+        ret
