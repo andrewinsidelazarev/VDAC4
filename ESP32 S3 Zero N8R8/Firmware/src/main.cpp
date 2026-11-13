@@ -96,8 +96,12 @@ constexpr uint32_t kSlowCommandMs = 400;
 // Кристалл ESP горячее kWifiHotTenths — Wi-Fi в энергосбережении при любой работе
 // (радио без него — заметная часть нагрева); снова как обычно — ниже
 // kWifiCoolTenths: запас, чтобы не дёргать режим на границе. Десятые доли °C.
-constexpr int16_t kWifiHotTenths = 750;
-constexpr int16_t kWifiCoolTenths = 700;
+// (0.1.136, 12.11.2026) Порог 85 °C вместо 75, по слову пользователя: в Еве кристалл при работе
+// держится на 73–76 °C, и Wi-Fi засыпал посреди каждого копирования по SMB — радио принимало
+// только после маяков точки, и запись на карту Evo и на карту Tang упиралась в один и тот же
+// потолок (журналы копий 0.1.133–0.1.135: «NET chip 75.1 C: wifi power save», «sleep 1»).
+constexpr int16_t kWifiHotTenths = 850;
+constexpr int16_t kWifiCoolTenths = 800;
 constexpr size_t kWifiSignalBarWidth = 16;
 
 uint8_t wifiSignalPercent(int32_t rssi) {
@@ -691,7 +695,12 @@ void Application::updateWifiPowerSave(bool fileServerRunning, bool appAwake, uin
     if (static_cast<int32_t>(vfs - last) > 0) {
       last = vfs;
     }
-    awake = static_cast<uint32_t>(now - last) < kWifiAwakeIdleMs;
+    // (0.1.139) Разность — со знаком: отметку обмена ставит другая задача (мост, сервер), и она бывает
+    // позже now, взятого раньше. Без знака «1 мс в будущем» читалось как простой в ~49 суток: Wi-Fi
+    // засыпал на миг посреди копии (14 раз за копию на карту Tang 13.11.2026, у каждого раза — две
+    // записи журнала во flash, а они останавливают кэш обоих ядер).
+    const int32_t idle = static_cast<int32_t>(now - last);
+    awake = idle < 0 || static_cast<uint32_t>(idle) < kWifiAwakeIdleMs;
   }
 #if ZIFI_HAS_AUDIO
   const int16_t tenths = moduleApp_.temperatureTenths();
@@ -1076,8 +1085,9 @@ void Application::processSmbStart() {
   writeLe16(exchange_->response + 1, port);
   exchange_->response[3] = netbios ? 1 : 0;
 #if ZIFI_HAS_SPI_LINK
-  // Плагин SMB перезапускает ESP и шлёт SMB_START раньше, чем поднимется связь с Tang (не
-  // раньше 10 с после старта): подождать её, иначе строка UNC2 окна покажет, что шары TANG
+  // SMB_START может прийти раньше, чем поднимется связь с Tang (сразу после включения платы; плагин
+  // SMB до 0.5.18 к тому же сам перезапускал ESP, с 0.5.18 — только APP_STOP). Связь с Tang — не
+  // раньше 10 с после старта ESP: подождать её, иначе строка UNC2 окна покажет, что шары TANG
   // нет. Плагин тем временем ждёт ответа, а на PING отвечает ядро 1.
   for (uint32_t waited = 0; tang::starting() && waited < 15000; waited += 100) {
     vTaskDelay(pdMS_TO_TICKS(100));

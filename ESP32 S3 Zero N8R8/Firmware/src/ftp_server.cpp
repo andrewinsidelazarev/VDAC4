@@ -1084,29 +1084,64 @@ void FtpServer::retrieve(Session& session, const char* argument) {
   uint32_t sent = 0;
   bool failed = false;
   char failure[sizeof(lastVfsError_)] = "none";
+  // (0.1.141) Следующее окно читается, пока ядро 0 отправляет прежнее. Прежде ядро 1 читало окно
+  // (Z80 и карта), а следующее просило, только когда ядро 0 отправило в TCP всё прочитанное: при
+  // скачивании 10 МБ Z80 21,6 с из 38,5 просто ждала отправки (FTP 0.17, 13.11.2026). Теперь заявка
+  // на следующее окно уходит мосту, как только в кольце есть на него место, а ядро 0 тем временем
+  // отправляет то, что в кольце уже лежит (кольцо — один писатель, ядро 1, и один читатель, ядро 0).
+  const size_t window = minimum(VfsBridge::kMaxPumpPerRequest, bridge_.ringCapacity());
+  uint32_t asked = 0;                   // байтов файла, которые мост уже положил в кольцо
+  bool reading = false;                 // заявка kRead — у моста
+  uint32_t readStarted = 0;
   while (sent < statResult.size) {
-    // Пока исходящее кольцо пусто, ядро 1 читает очередной блок VFS.
-    // Затем ядро 0 выгружает накопленное в TCP независимо от следующего чтения.
-    if (bridge_.vfsToNetworkAvailable() == 0) {
-      const uint32_t remaining = statResult.size - sent;
-      const uint32_t wanted = static_cast<uint32_t>(minimum(
-          static_cast<size_t>(remaining), VfsBridge::kMaxPumpPerRequest));
-      if (!requestVfs(VfsOperation::kRead, nullptr, wanted, result,
-                      kVfsNormalTimeoutMs)) {
-        snprintf(failure, sizeof(failure), "%s", lastVfsError_);
+    if (!reading && asked < statResult.size && bridge_.vfsToNetworkFree() >= window) {
+      // Неполное окно — только последнее: середина файла у плагина — целыми секторами
+      const uint32_t wanted = static_cast<uint32_t>(
+          minimum(static_cast<size_t>(statResult.size - asked), window));
+      if (!bridge_.submit(VfsOperation::kRead, nullptr, wanted)) {
+        snprintf(failure, sizeof(failure), "bridge-busy");
         failed = true;
         break;
       }
-      if (result.transferred == 0 || result.atEnd) {
-        snprintf(failure, sizeof(failure), "early-eof");
+      reading = true;
+      readStarted = millis();
+    }
+    if (reading) {
+      if (bridge_.takeResult(result)) {
+        reading = false;
+        if (!result.success) {
+          snprintf(failure, sizeof(failure), "%s", result.error);
+          failed = true;
+          break;
+        }
+        if (result.transferred == 0 || result.atEnd) {
+          snprintf(failure, sizeof(failure), "early-eof");
+          failed = true;
+          break;
+        }
+        asked += result.transferred;
+        continue;                       // сразу — заявка на следующее окно
+      }
+      if (static_cast<uint32_t>(millis() - readStarted) >= kVfsNormalTimeoutMs) {
+        snprintf(failure, sizeof(failure), "bridge-timeout-%u",
+                 static_cast<unsigned>(VfsOperation::kRead));
         failed = true;
         break;
       }
     }
 
     const size_t ready = bridge_.vfsToNetworkAvailable();
-    const size_t wanted = minimum(ready, sizeof(ioBuffer_));
-    const size_t received = bridge_.readForNetwork(ioBuffer_, wanted);
+    if (ready == 0) {
+      if (!reading) {                   // всё прочитано, а отправлено меньше размера
+        snprintf(failure, sizeof(failure), "early-eof");
+        failed = true;
+        break;
+      }
+      serviceSessions(&session);
+      bridge_.waitForResult(1);         // окно ещё у Z80: до 1 мс, готовый ответ будит сразу
+      continue;
+    }
+    const size_t received = bridge_.readForNetwork(ioBuffer_, minimum(ready, sizeof(ioBuffer_)));
     if (received == 0 ||
         !sendAll(session.dataClient, ioBuffer_, received, kDataIdleTimeoutMs)) {
       snprintf(failure, sizeof(failure), "data-send");
@@ -1115,6 +1150,11 @@ void FtpServer::retrieve(Session& session, const char* argument) {
     }
     sent += static_cast<uint32_t>(received);
     serviceSessions(&session);
+  }
+  if (reading) {
+    // Обрыв посреди окна: заявку моста дождаться — CLOSE ниже следующая, а мост держит одну
+    VfsResult rest;
+    awaitVfs(VfsOperation::kRead, rest, kVfsNormalTimeoutMs);
   }
 
   closeData(session);

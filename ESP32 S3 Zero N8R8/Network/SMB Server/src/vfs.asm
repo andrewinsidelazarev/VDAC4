@@ -74,7 +74,22 @@ VFS_OK          equ 0
 VFS_FAIL        equ 1
 VFS_DIR_BATCH   equ %00000001          ; OPENDIR: READDIR умеет пачку
 VFS_DIR_MORE    equ 2                   ; итог пачки: каталог продолжается
+        IFDEF ZIFI_SPI_DMA
+VFS_CAP_WINDOWS equ %11111111          ; биты 0/1/2: окна записи/чтения, EXTEND; 3 — окно чтения raw media;
+                                        ; 4 — окно записи блоками очереди секторов (DMA); 5 — окно записи
+                                        ; порциями сырого DMA наружу; 6 — смещение в самом окне (без SEEK);
+                                        ; 7 — окно дописывания в конец до 16 КиБ (с #C000, только APPEND)
+        ELSE
 VFS_CAP_WINDOWS equ %00000111          ; биты 0/1/2: окна записи/чтения, EXTEND
+        ENDIF
+; Окно чтения быстрым путём плееров (ESP 0.1.131): порциями raw media до 8 КиБ, без XOR и CRC.
+VFS_READ_MEDIA  equ #5F
+VFS_MEDIA_PART  equ #2000
+VFS_MEDIA_CTRL  equ 9                   ; [команда][длина LE16][признаки][номер][смещение LE16][окно LE16]
+VFS_WINDOW_DMA  equ 4                   ; признак окна записи: данные — блоками очереди секторов ESP
+VFS_WINDOW_RAW  equ 8                   ; данные — порциями сырого DMA наружу (ESP 0.1.134)
+VFS_WINDOW_OFFSET equ #10               ; за заголовком — смещение в файле LE32 (вместо SEEK)
+VFS_WINDOW_APPEND equ #20               ; окно в конец файла до 16 КиБ: данные с #C000, только APPEND
 VFS_WIRE_SIZE   equ 256                 ; один подтверждаемый пакет ESP -> Z80
 VFS_BLOCK_SIZE  equ #0200               ; независимый исходный блок: до 512 байт
 VFS_APPEND_SIZE equ #4000               ; один физический commit APPEND: до 16 КиБ
@@ -551,6 +566,9 @@ Vfs_Open:
         ld (VfsMode),a
         xor a
         ld (VfsFilexCaps),a
+        IFDEF ZIFI_SPI_DMA
+        ld (VfsSizeKnown),a             ; размер файла узнаёт FENTRY режима 3
+        ENDIF
         ; Путь идёт со второго байта.
         ld hl,ProtoBuf+1
         call Vfs_TakePath
@@ -618,6 +636,10 @@ Vfs_Open:
         ld hl,0
         ld (VfsRandomOffset),hl
         ld (VfsRandomOffset+2),hl
+        IFDEF ZIFI_SPI_DMA
+        ld a,1
+        ld (VfsSizeKnown),a             ; FileSize — от FENTRY, дальше ведёт плагин
+        ENDIF
         jp Vfs_OpenReply
 
 .for_append:
@@ -950,11 +972,35 @@ Vfs_FatCompress:
 Vfs_ReadWindow:
         ld a,VFS_READ_WINDOW
         ld (VfsCmd),a
+        xor a
+        ld (VfsReadMedia),a
         ld hl,(ProtoRxLen)
         ld de,3
         or a
         sbc hl,de
+        jr z,.request_ok
+        dec hl
+        ld a,h
+        or l
+        jr z,.media
+        IFDEF ZIFI_SPI_DMA
+        ld de,4
+        sbc hl,de                       ; CF=0 после OR L
         jp nz,Vfs_ReadWindowFail
+        ld a,(VfsMode)
+        cp 3
+        jr nz,.media
+        ld hl,(ProtoBuf+4)              ; ESP 0.1.134: смещение окна в файле — вместо SEEK
+        ld (VfsRandomOffset),hl
+        ld hl,(ProtoBuf+6)
+        ld (VfsRandomOffset+2),hl
+        ELSE
+        jp Vfs_ReadWindowFail
+        ENDIF
+.media:
+        ld a,(ProtoBuf+3)               ; ESP 0.1.131: окно — быстрым путём (raw media)
+        ld (VfsReadMedia),a
+.request_ok:
         ld a,(ProtoBuf)
         ld hl,VfsReadSeq
         cp (hl)
@@ -1081,6 +1127,15 @@ Vfs_ReadWindow:
         ld hl,#C000
 Vfs_ReadWindowBufferReady:
         ld (VfsReadPtr),hl
+        IFDEF ZIFI_SPI_DMA
+        ld a,(VfsCmd)
+        cp VFS_READ_WINDOW
+        jr nz,.not_media                ; окно FAT — прежним путём
+        ld a,(VfsReadMedia)
+        or a
+        jp nz,Vfs_ReadMedia
+.not_media:
+        ENDIF
         ; На плате VDAC4 прошивка CRC16 окна не сверяет (см. окно записи).
         IFNDEF ZIFI_SPI_DMA
         ld bc,(VfsReadCount)
@@ -1207,6 +1262,135 @@ Vfs_ReadWindowFail:
         ld c,VFS_FAIL
         jp Vfs_Reply1
 
+        IFDEF ZIFI_SPI_DMA
+; Окно чтения быстрым путём плееров (по слову пользователя 12.11.2026; ESP 0.1.131): порциями до
+; 8 КиБ сырым DMA «ОЗУ → SPI» прямо со страницы окна, без XOR и CRC, как звук PLAYER
+; (fast_media.asm): на порцию — один обмен «можно?» и один DMA. Прежде — блоки по 512 байт, на
+; каждый два обмена и XOR на Z80. Управление порции — VFS_MEDIA_CTRL байт в запросе.
+; Выход: CF=1 — запрос обслужен (как у кадрового пути).
+Vfs_ReadMedia:
+        ld a,(SpiTxLen)
+        or a
+        call nz,ZiFi_Flush              ; накопленное обмена — раньше порции
+        ld hl,0
+        ld (VfsReadOffset),hl
+.part:
+        ld hl,(VfsReadCount)
+        ld de,(VfsReadOffset)
+        or a
+        sbc hl,de                       ; HL — сколько осталось
+        ld de,VFS_MEDIA_PART
+        or a
+        sbc hl,de
+        jr nc,.full
+        add hl,de                       ; остаток короче порции
+        jr .sized
+.full:
+        ld hl,VFS_MEDIA_PART
+.sized:
+        ld (VfsReadPart),hl
+        ld b,0
+        ld hl,(VfsReadOffset)
+        ld a,h
+        or l
+        jr nz,.not_first
+        ld b,VFS_WINDOW_START
+.not_first:
+        ld de,(VfsReadPart)
+        add hl,de
+        ld (VfsReadNewOffset),hl
+        ld de,(VfsReadCount)
+        or a
+        sbc hl,de
+        jr nz,.control
+        ld a,b
+        or VFS_WINDOW_END
+        ld b,a
+.control:
+        ld hl,SpiTxBuf
+        ld (hl),VFS_READ_MEDIA
+        inc hl
+        ld de,(VfsReadPart)
+        ld (hl),e
+        inc hl
+        ld (hl),d
+        inc hl
+        ld (hl),b                       ; признаки
+        inc hl
+        ld a,(VfsResponseSeq)
+        ld (hl),a
+        inc hl
+        ld de,(VfsReadOffset)
+        ld (hl),e
+        inc hl
+        ld (hl),d
+        inc hl
+        ld de,(VfsReadCount)
+        ld (hl),e
+        inc hl
+        ld (hl),d
+        ld hl,(VfsReadPtr)
+        ld de,(VfsReadOffset)
+        add hl,de
+        ld (SpiBulkBuf),hl              ; данные — со страницы окна
+        ld hl,(VfsReadPart)
+        dec hl
+        ld a,h
+        srl a
+        inc a
+        ld (VfsMediaSectors),a          ; блоков DMA по 512 (хвост ESP отбросит)
+        ld a,100                        ; ждать места в очереди ESP — до ~2 с
+        ld (VfsMediaWait),a
+.ask:
+        ld a,VFS_MEDIA_CTRL
+        ld (SpiTxLen),a
+        ld hl,SpiRsp+3
+        ld (SpiDest),hl
+        xor a
+        ld (SpiRoom),a
+        ld a,#10                        ; запрос raw media, не обычный блок
+        call SpiLink_Turn
+        ret c
+        ld a,(SpiRsp)
+        and LINK_S_PUT_READY
+        jr nz,.ready
+        ld hl,VfsMediaWait
+        dec (hl)
+        jr z,.refused
+        ei
+        halt                            ; ESP разбирает прежнюю порцию
+        jr .ask
+.ready:
+        ld bc,TS_DMASADDRL
+        ld a,SPI_CMD_WRDMA
+        call SpiLink_BulkOpen
+        ld a,(VfsMediaSectors)
+        dec a
+        ld bc,TS_DMANUM
+        out (c),a
+        ld a,TS_DMA_RAM_SPI
+        call SpiLink_BulkRun
+        ld a,SPI_CMD_WR_DONE
+        call SpiLink_BulkDone
+        ld a,LINK_F_PUT_DONE
+        call SpiLink_Send
+        ret c
+        ld a,(SpiRsp)
+        and LINK_S_PUT_OK
+        jr z,.refused
+        ld hl,(VfsReadNewOffset)
+        ld (VfsReadOffset),hl
+        ld de,(VfsReadCount)
+        or a
+        sbc hl,de
+        jp nz,.part
+        ld hl,VfsReadSeq
+        inc (hl)
+.refused:                               ; ESP порцию не взяла: окно не дошло, ESP его повторит
+        scf
+        ret
+        ENDIF
+
 ; На время LOAD512 code-page отображается в #C000, а page1/data — в #8000.
 ; Трамплин использует только WC_API и переменные через alias +#4000.
 Vfs_ReadWindowLoad:
@@ -1316,16 +1500,39 @@ Vfs_WriteWindow:
         ret
 .length:
         ld hl,(ProtoRxLen)
-        ld de,VFS_WINDOW_HEAD+1
+        ld de,VFS_WINDOW_HEAD
         or a
         sbc hl,de
         ld a,VFS_BS_LENGTH
         jp c,Vfs_WriteWindowFail
         ld a,(ProtoBuf)
         ld (VfsWindowFlags),a
+        IFDEF ZIFI_SPI_DMA
+        and %11000000
+        ELSE
         and %11111100
+        ENDIF
         ld a,VFS_BS_LENGTH
         jp nz,Vfs_WriteWindowFail
+        IFDEF ZIFI_SPI_DMA
+        ld a,(VfsWindowFlags)
+        and VFS_WINDOW_OFFSET
+        jr z,.no_offset
+        ld a,(VfsWindowFlags)           ; смещение — только у окна без данных в кадре
+        and VFS_WINDOW_DMA|VFS_WINDOW_RAW
+        ld a,VFS_BS_LENGTH
+        jp z,Vfs_WriteWindowFail
+        ld hl,(ProtoRxLen)
+        ld de,VFS_WINDOW_HEAD+4
+        or a
+        sbc hl,de
+        jp nz,Vfs_WriteWindowFail
+        ld hl,(ProtoBuf+VFS_WINDOW_HEAD)
+        ld (VfsRandomOffset),hl
+        ld hl,(ProtoBuf+VFS_WINDOW_HEAD+2)
+        ld (VfsRandomOffset+2),hl
+.no_offset:
+        ENDIF
 
         ld a,(VfsWindowFlags)
         and VFS_WINDOW_START
@@ -1348,9 +1555,15 @@ Vfs_WriteWindow:
         ld a,(VfsMode)
         cp 3
         jr z,.filex_length
+.length_16k:
         call Vfs_Length16K
         jr .length_checked
 .filex_length:
+        IFDEF ZIFI_SPI_DMA
+        ld a,(VfsWindowFlags)
+        and VFS_WINDOW_APPEND
+        jr nz,.length_16k               ; дописывание в конец: окно до 16 КиБ (APPEND)
+        ENDIF
         call Vfs_LengthFilex
 .length_checked:
         ld a,VFS_BS_LENGTH
@@ -1418,6 +1631,13 @@ Vfs_WriteWindow:
         ld de,VFS_WINDOW_HEAD
         or a
         sbc hl,de
+        IFDEF ZIFI_SPI_DMA
+        ld a,(VfsWindowFlags)
+        and VFS_WINDOW_DMA|VFS_WINDOW_RAW
+        jr z,.part_set
+        ld hl,(VfsWindowTotal)          ; окно целиком — блоками DMA (.copy)
+.part_set:
+        ENDIF
         ld (VfsWindowPart),hl
         ld de,(VfsWindowReceived)
         add hl,de
@@ -1464,13 +1684,28 @@ Vfs_WriteWindow:
 .copy_filex:
         ld hl,(VfsWindowReceived)
         ld de,VFS_FILEX_DATA_C
+        IFDEF ZIFI_SPI_DMA
+        ld a,(VfsWindowFlags)
+        and VFS_WINDOW_APPEND
+        jr z,.copy_address
+        ld de,#C000                     ; окно до 16 КиБ: блок FILEX ему не нужен
+        ENDIF
 .copy_address:
         add hl,de
         ex de,hl
         ld hl,ProtoBuf+VFS_WINDOW_HEAD
         ld bc,(VfsWindowPart)
         IFDEF ZIFI_SPI_DMA
+        ld a,(VfsWindowFlags)
+        and VFS_WINDOW_DMA|VFS_WINDOW_RAW
+        jr z,.frame_copy
+        call Vfs_PullSectors            ; окно — блоками DMA прямо сюда
+        ld a,VFS_BS_LENGTH
+        jp c,Vfs_WriteWindowFail
+        jr .copied
+.frame_copy:
         call SpiLink_Copy               ; DMA «ОЗУ → ОЗУ»; кэш — перед записью WC
+.copied:
         ELSE
         ldir
         ENDIF
@@ -1527,7 +1762,16 @@ Vfs_WriteWindow:
         ld a,VFS_BS_APPEND
         jp Vfs_WriteWindowFail
 .store_filex:
+        IFDEF ZIFI_SPI_DMA
+        call Vfs_RandomAppend           ; ровно в конец — APPEND ядра; CF=1 — через FILEX
+        jr nc,.filex_done
+        ld a,(VfsWindowFlags)
+        and VFS_WINDOW_APPEND
+        ld a,VFS_BS_OFFSET              ; окно до 16 КиБ — только в конец файла
+        jp nz,Vfs_WriteWindowFail
+        ENDIF
         call Vfs_FilexWritePage
+.filex_done:
         or a
         jp nz,Vfs_WriteWindowFail
         ld hl,(VfsFilexCount+2)
@@ -1542,6 +1786,9 @@ Vfs_WriteWindow:
         ld a,VFS_BS_APPEND
         jp nz,Vfs_WriteWindowFail
         call Vfs_AddRandomCount
+        IFDEF ZIFI_SPI_DMA
+        call Vfs_GrowSize
+        ENDIF
         xor a
         ld (VfsWindowActive),a
         ld hl,VfsExpectedSeq
@@ -1550,12 +1797,203 @@ Vfs_WriteWindow:
         xor a
         jp Vfs_WriteWindowReply
 
+        IFDEF ZIFI_SPI_DMA
+; Окно записи блоками очереди секторов ESP (0.1.131; как секторы VDAC4 VFS): обмен «сектор?»
+; (#20), блок DMA SPI -> (DE) прямо в страницу окна, обратная посылка на сверку, итог — в ответе на
+; следующий обмен, где ESP обычно уже выставила следующий блок. Байты окна процессор не трогает;
+; кэш вытесняется один раз — перед записью WC (Vfs_FilexWritePage, Vfs_WriteFlush).
+; Вход: DE — куда (окно #C000), BC — байт окна. Выход: CF=1 — не вышло.
+Vfs_PullSectors:
+        ld (VfsPullDst),de
+        ld hl,511
+        add hl,bc
+        ld a,h
+        srl a
+        ld (VfsPullLeft),a              ; блоков
+        ; DMA ходит словами по 512 байт: адрес чётный, и последний блок (хвост добит нулями ESP)
+        ; целиком в окне — за #FFFF лежала бы чужая страница. ESP шлёт так только окна FILEX
+        ; до 31 сектора (#C020 + #3E00); иначе — отказ, не порча памяти.
+        add a,a
+        add a,d
+        jr nc,.fits
+        or e
+        jr nz,.fail                     ; конец за #10000
+.fits:
+        bit 0,e
+        jr nz,.fail
+        ld a,(VfsWindowFlags)
+        and VFS_WINDOW_RAW
+        jp nz,.raw
+        xor a
+        ld (VfsPullState),a             ; 0 — спросить, 1 — читать, 2 — ждать итог
+.wait:
+        ld hl,0                         ; до 65536 обменов (секунды) на блок
+        ld (VfsPullWait),hl
+.step:
+        ld a,(VfsPullState)
+        dec a
+        jr z,.read
+        ld a,#20                        ; LINK_F_SECTOR
+        call SpiLink_Send
+        ret c
+        ld a,(SpiRsp)
+        ld c,a
+        ld a,(VfsPullState)
+        or a
+        jr nz,.verdict
+        bit 1,c                         ; блок выставлен
+        jr nz,.offer
+        ld a,c
+        and LINK_S_STALE|LINK_S_ECHO_BAD
+        jr nz,.fail
+        ld hl,(VfsPullWait)
+        dec hl
+        ld (VfsPullWait),hl
+        ld a,h
+        or l
+        jr nz,.step
+.fail:
+        scf
+        ret
+.offer:
+        bit 2,c
+        jr z,.fresh
+        call .get                       ; чужой старый блок: прочитать и выбросить
+        jr .step
+.fresh:
+        ld a,1
+        ld (VfsPullState),a
+.read:
+        call .get
+        call SpiLink_BulkEcho
+        ld a,2
+        ld (VfsPullState),a
+        jr .step
+.verdict:
+        bit 3,c                         ; копия неверна
+        jr z,.good
+        bit 1,c
+        jr z,.fail                      ; трижды — серия оборвана
+        ld a,1
+        ld (VfsPullState),a             ; тот же блок снова
+        jr .step
+.good:
+        ld a,c
+        and LINK_S_BULK|LINK_S_STALE
+        cp LINK_S_BULK
+        ld a,1
+        jr z,.next
+        xor a
+.next:
+        ld (VfsPullState),a
+        ld hl,(VfsPullDst)
+        inc h
+        inc h
+        ld (VfsPullDst),hl
+        ld hl,VfsPullLeft
+        dec (hl)
+        jr nz,.wait
+        ld hl,SpiMore
+        res 1,(hl)                      ; выставленного блока кадров нет: серия была секторной
+        or a
+        ret
+; Как SpiLink_BulkRead, но без вытеснения кэша на каждом блоке; .get_n — A секторов подряд.
+.get:
+        ld a,1
+.get_n:
+        ld (VfsRawSectors),a
+        ld hl,(VfsPullDst)
+        ld (SpiBulkBuf),hl
+        ld bc,TS_DMADADDRL
+        ld a,SPI_CMD_RDDMA
+        call SpiLink_BulkOpen
+        ld a,(VfsRawSectors)
+        dec a
+        ld bc,TS_DMANUM
+        out (c),a
+        in a,(ZIFI_SPI_DATA)            ; пошёл первый байт данных: DMA берёт уже принятое
+        ld a,TS_DMA_SPI_RAM
+        call SpiLink_BulkRun
+        ld a,SPI_CMD_RD_DONE
+        jp SpiLink_BulkDone
+
+; Окно порциями сырого DMA наружу (ESP 0.1.134; по слову пользователя — «как в плеерах», без
+; обратной посылки): обмен «порция?» (#40), порция до 8 КиБ — одним DMA на несколько секторов
+; прямо в окно; следующий обмен подтверждает прочтение прежней. Прежде на каждые 512 байт —
+; обмен, DMA и обратная посылка. BC — байт окна.
+.raw:
+        ld (VfsRawLeft),bc
+.raw_part:
+        ld hl,(VfsRawLeft)
+        ld a,h
+        or l
+        jr z,.raw_done
+        ld hl,0
+        ld (VfsPullWait),hl             ; до 65536 обменов на порцию
+.raw_ask:
+        ld a,#40                        ; LINK_F_RAWOUT
+        call SpiLink_Send
+        ret c
+        ld a,(SpiRsp)
+        ld c,a
+        bit 1,c                         ; порция выставлена
+        jr nz,.raw_offer
+        and LINK_S_STALE|LINK_S_ECHO_BAD
+        jp nz,.fail
+        ld hl,(VfsPullWait)
+        dec hl
+        ld (VfsPullWait),hl
+        ld a,h
+        or l
+        jr nz,.raw_ask
+        jp .fail
+.raw_offer:
+        bit 2,c
+        jr z,.raw_fresh
+        call .get                       ; чужой старый блок: прочитать и выбросить
+        jr .raw_ask
+.raw_fresh:
+        ld hl,(VfsRawLeft)
+        ld de,#2000
+        or a
+        sbc hl,de
+        jr c,.raw_tail
+        ld (VfsRawLeft),hl
+        ld a,16                         ; полная порция — 16 секторов
+        jr .raw_read
+.raw_tail:
+        add hl,de                       ; остаток короче порции
+        dec hl
+        ld a,h
+        srl a
+        inc a                           ; ceil(остаток / 512)
+        ld hl,0
+        ld (VfsRawLeft),hl
+.raw_read:
+        call .get_n
+        ld hl,(VfsPullDst)
+        ld a,(VfsRawSectors)
+        add a,a
+        add a,h
+        ld h,a                          ; +512 на сектор
+        ld (VfsPullDst),hl
+        jr .raw_part
+.raw_done:
+        ld hl,SpiMore
+        res 1,(hl)                      ; выставленного блока кадров нет
+        or a
+        ret
+        ENDIF
+
 Vfs_WriteWindowFail:
         push af
         ld a,1
         ld (VfsWriteFailed),a
         xor a
         ld (VfsWindowActive),a
+        IFDEF ZIFI_SPI_DMA
+        ld (VfsSizeKnown),a             ; после отказа размер не известен наверняка
+        ENDIF
         pop af
 
 Vfs_WriteWindowReply:
@@ -2202,6 +2640,73 @@ Vfs_FilexPageCall_Resume:
         or a
         ret
 
+        IFDEF ZIFI_SPI_DMA
+; Окно позиционной записи ровно в конец файла (0.5.19, 12.11.2026) — прямо APPEND ядра WC (API
+; 76), как это делает и сам FILEX WRITE_AT при дописывании (внутренний #4027), но без его
+; проверок на каждом окне: сверки каталога, прохода всей цепочки FAT (кэш цепочки FILEX сверяет
+; и размер, а он при дописывании меняется каждый раз) и поиска свободного места. APPEND пишет в
+; свой конец файла, поэтому только при смещении, равном размеру, который плагин ведёт сам:
+; FENTRY при OPEN режима 3, рост после каждого окна, SET_EOF; после любого отказа — не известен.
+; Выход: CF=1 — не в конце, писать FILEX; CF=0 — дописано, A — итог (0 — успех).
+Vfs_RandomAppend:
+        ld a,(VfsSizeKnown)
+        or a
+        scf
+        ret z
+        ld hl,(VfsRandomOffset)
+        ld de,(FileSize)
+        or a
+        sbc hl,de
+        scf
+        ret nz
+        ld hl,(VfsRandomOffset+2)
+        ld de,(FileSize+2)
+        or a
+        sbc hl,de
+        scf
+        ret nz
+        ld hl,VFS_FILEX_DATA            ; окно в page1 с #20: под #8000 — #8020
+        ld a,(VfsWindowFlags)
+        and VFS_WINDOW_APPEND
+        jr z,.source
+        ld hl,#8000                     ; окно до 16 КиБ — с начала страницы
+.source:
+        ld (VfsAppendSrc),hl
+        ld hl,(VfsWindowTotal)
+        ld (VfsWriteCount),hl
+        call Vfs_WriteFlush             ; кэш, page1 -> #8000, API 76; Z — записано
+        ld hl,#8000
+        ld (VfsAppendSrc),hl
+        ld a,VFS_BS_APPEND
+        ret nz                          ; CF=0 после OR A в Vfs_WriteFlush
+        ld hl,(VfsWindowTotal)
+        ld (VfsFilexCount),hl
+        ld hl,0
+        ld (VfsFilexCount+2),hl
+        xor a
+        ret
+
+; FileSize = max(FileSize, VfsRandomOffset) — после окна записи.
+Vfs_GrowSize:
+        ld hl,(FileSize+2)
+        ld de,(VfsRandomOffset+2)
+        or a
+        sbc hl,de
+        jr c,.grow
+        ret nz
+        ld hl,(FileSize)
+        ld de,(VfsRandomOffset)
+        or a
+        sbc hl,de
+        ret nc
+.grow:
+        ld hl,(VfsRandomOffset)
+        ld (FileSize),hl
+        ld hl,(VfsRandomOffset+2)
+        ld (FileSize+2),hl
+        ret
+        ENDIF
+
 Vfs_AddRandomCount:
         ld hl,(VfsRandomOffset)
         ld de,(VfsFilexCount)
@@ -2241,7 +2746,11 @@ Vfs_WriteFlush_C:
         ex af,af'
         ld a,FN_MNG8_PL
         call WC_API                       ; страница page1/data -> #8000
+        IFDEF ZIFI_SPI_DMA
+        ld hl,(VfsAppendSrc+#4000)        ; #8000; окно FILEX — #8020 (Vfs_RandomAppend)
+        ELSE
         ld hl,#8000
+        ENDIF
         ld bc,(VfsWriteCount+#4000)       ; переменная в alias страницы page0
         ld a,FN_APPEND
         call WC_API                       ; wrapper #8xxx сейчас недоступен
@@ -2426,10 +2935,20 @@ Vfs_SetEof:
         cp FILEX_STATUS_COMMITTED_CLEANUP
         jr z,.answer
         ld c,a
+        IFDEF ZIFI_SPI_DMA
+        xor a
+        ld (VfsSizeKnown),a
+        ENDIF
         ld a,VFS_SET_EOF
         jp Vfs_Reply1
 .answer:
         ld (VfsBuf),a                   ; #25 остаётся видимым ESP
+        IFDEF ZIFI_SPI_DMA
+        ld hl,VfsFilexBlock+FILEX_P_RESULT_COUNT
+        ld de,FileSize                  ; новый размер — для APPEND в конец
+        ld bc,4
+        ldir
+        ENDIF
         ld hl,VfsFilexBlock+FILEX_P_RESULT_COUNT
         ld de,VfsBuf+1
         ld bc,4
@@ -2939,6 +3458,18 @@ VfsReadNewOffset:
 VfsReadPart:    dw 0
 VfsReadPtr:     dw 0
 VfsReadCrc:     dw 0
+VfsReadMedia:   db 0                    ; окно — быстрым путём (4-й байт READ_WINDOW)
+VfsPullDst:     dw 0                    ; окно записи DMA: куда следующий блок
+VfsAppendSrc:   dw #8000                ; откуда APPEND берёт данные (Vfs_WriteFlush_C)
+VfsSizeKnown:   db 0                    ; FileSize режима 3 точен: можно APPEND в конец
+VfsPullWait:    dw 0
+VfsPullLeft:    db 0
+VfsPullState:   db 0
+VfsRawLeft:     dw 0                    ; окно сырыми порциями: сколько байт ещё не прочитано
+VfsRawSectors:  db 0
+VfsMediaSectors:
+                db 0
+VfsMediaWait:   db 0
 VfsOutStart:    dw 0
 VfsLzSrcPtr:    dw 0
 VfsLzSrcLeft:   dw 0

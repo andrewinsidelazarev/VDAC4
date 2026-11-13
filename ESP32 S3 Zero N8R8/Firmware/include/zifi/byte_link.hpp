@@ -47,6 +47,12 @@ class ByteLink {
   virtual bool pushSector(const uint8_t*, uint32_t, uint32_t) { return false; }
   // Серия кончилась отказом источника: Z80 узнает, забрав уже положенное.
   virtual void failSectors(uint32_t) {}
+
+  // Окно наружу сырым DMA (0.1.134, SpiLinkCore::kFlagRawOut): буфер канала, куда положить окно
+  // (nullptr — канал этого не умеет), занят ли он ещё прежним окном и «окно выложено».
+  virtual uint8_t* rawOutBuffer(size_t& capacity) { capacity = 0; return nullptr; }
+  virtual bool rawOutBusy() const { return false; }
+  virtual void offerRawOut(size_t) {}
 };
 
 }  // namespace zifi

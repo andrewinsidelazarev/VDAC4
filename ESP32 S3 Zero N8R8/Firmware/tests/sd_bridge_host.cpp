@@ -53,6 +53,9 @@ struct Card {
   uint8_t wbuf[514] = {};
   bool cs = false;
   std::vector<uint32_t> readAddrs, writeAddrs;
+  int multiWrites = 0;         // команд CMD25
+  int multiBlocks = 0;         // блоков, принятых сериями
+  int failMultiAt = -1;        // столько блоков серии принять, следующий — отказ
   int badCrc = 0;
   bool streaming = false;      // CMD18: блоки подряд, пока не придёт CMD12
   uint32_t sblk = 0;
@@ -158,12 +161,46 @@ struct Card {
         wstate = 1;
         wblk = sdhc ? arg : arg / 512;
         break;
+      case 25:                       // серия: блоки за маркером 0xFC, конец — 0xFD
+        writeAddrs.push_back(arg);
+        ++multiWrites;
+        push(0x00);
+        wstate = 3;
+        wblk = sdhc ? arg : arg / 512;
+        break;
       default: push(0x04 | (idle ? 1 : 0)); break;
     }
   }
   void got(uint8_t b) {
     if (wstate == 1) {
       if (b == 0xFE) { wstate = 2; wn = 0; }
+      return;
+    }
+    if (wstate == 3) {               // серия: ждём маркер блока либо «стоп»
+      if (b == 0xFC) { wstate = 4; wn = 0; }
+      if (b == 0xFD) {
+        wstate = 0;
+        push(0xFF);                  // байт паузы, затем занята
+        for (int k = 0; k < busy; ++k) push(0x00);
+      }
+      return;
+    }
+    if (wstate == 4) {
+      wbuf[wn++] = b;
+      if (wn == 514) {
+        wstate = 3;
+        const uint16_t crc = uint16_t((wbuf[512] << 8) | wbuf[513]);
+        if (crc != zifi::sdCrc16(wbuf, 512) || rejectWrites > 0 || multiBlocks == failMultiAt) {
+          if (rejectWrites > 0) --rejectWrites;
+          failMultiAt = -1;
+          push(0xEB);
+        } else {
+          memcpy(block(wblk++).data(), wbuf, 512);
+          ++multiBlocks;
+          push(0xE5);
+          for (int k = 0; k < busy; ++k) push(0x00);
+        }
+      }
       return;
     }
     if (wstate == 2) {
@@ -214,6 +251,11 @@ struct Bridge {
   uint32_t blocks = 0;
   bool crcBad = false;
   std::vector<uint8_t> streamed;   // байты потока STREAM — в медиа-FIFO
+  // 0.1.139: операция «идёт» от записи CMD до первого чтения SD_STAT и тогда выполняется — по TX,
+  // каким он стал к этому чтению. PTR и CMD, пока она идёт, мост не принимает (как fb_sdspi), TX —
+  // принимает: кадр, записанный поверх передаваемого, испортил бы блок.
+  bool pending = false;
+  uint32_t pendingCmd = 0;
 
   uint8_t xchg(uint8_t b) {
     card->cs = csOn;
@@ -288,7 +330,10 @@ bool ioRead(void*, uint32_t a, uint32_t* w, size_t n) {
     if (a >= rx && a < rx + 0x800) w[i] = bridge.exists ? bridge.rx[(a - rx) / 4 % 512] : 0;
     else if (a == base) w[i] = bridge.exists ? (bridge.clk10k << 16) | (bridge.csOn ? 0x100 : 0) | bridge.div : 0;
     else if (a == base + 4) w[i] = bridge.exists ? (bridge.blkLen << 16) | bridge.ptr : 0;
-    else if (a == base + 8) w[i] = bridge.stat();
+    else if (a == base + 8) {
+      if (bridge.pending) { bridge.pending = false; bridge.run(bridge.pendingCmd); }
+      w[i] = bridge.stat();
+    }
     else w[i] = bridge.video && a == 0x108 ? 0x5D01FFFF : 0;   // ядро видео: там часы звука, не мост
   }
   return true;
@@ -303,8 +348,12 @@ bool ioWrite(void*, uint32_t a, const uint32_t* w, size_t n) {
     if (!bridge.exists) continue;
     if (a >= 0x2000 && a < 0x2800) bridge.tx[((a - 0x2000) / 4) & (bridge.video ? 15 : 511)] = w[i];
     else if (a == base) { bridge.div = w[i] & 0xFF; bridge.csOn = (w[i] >> 8) & 1; bridge.card->cs = bridge.csOn; }
-    else if (a == base + 4) { bridge.ptr = w[i] & 0x1FF; bridge.blkLen = (w[i] >> 16) & 0x7FF; }
-    else if (a == base + 8) bridge.run(w[i]);
+    else if (a == base + 4) {
+      if (!bridge.pending) { bridge.ptr = w[i] & 0x1FF; bridge.blkLen = (w[i] >> 16) & 0x7FF; }
+    }
+    else if (a == base + 8) {
+      if (!bridge.pending) { bridge.pending = true; bridge.pendingCmd = w[i]; }
+    }
     else if (bridge.video && a == 0x11C) bridge.blocks = w[i] & 0xFFF;
   }
   return true;
@@ -332,6 +381,24 @@ int main() {
     const uint8_t c0[5] = {0x40, 0, 0, 0, 0}, c8[5] = {0x48, 0, 0, 1, 0xAA};
     CHECK(zifi::sdCrc7(c0, 5) == 0x95, "CRC7 CMD0 %02X", zifi::sdCrc7(c0, 5));
     CHECK(zifi::sdCrc7(c8, 5) == 0x87, "CRC7 CMD8 %02X", zifi::sdCrc7(c8, 5));
+  }
+
+  // CRC16 блока SD: 512 байтов 0xFF — 0x7FA1 (пример спецификации SD); таблица (0.1.139) = побитный
+  {
+    static uint8_t ff[512];
+    memset(ff, 0xFF, sizeof ff);
+    CHECK(zifi::sdCrc16(ff, 512) == 0x7FA1, "CRC16 512 x 0xFF: %04X", zifi::sdCrc16(ff, 512));
+    static uint8_t d[4096];
+    pattern(d, sizeof d, 3);
+    const size_t sizes[] = {0, 1, 2, 511, 512, 4096};
+    for (size_t n : sizes) {
+      uint16_t ref = 0;
+      for (size_t i = 0; i < n; ++i) {
+        ref ^= static_cast<uint16_t>(d[i] << 8);
+        for (int b = 0; b < 8; ++b) ref = (ref & 0x8000) ? uint16_t((ref << 1) ^ 0x1021) : uint16_t(ref << 1);
+      }
+      CHECK(zifi::sdCrc16(d, n) == ref, "CRC16 %u байтов: %04X, ждали %04X", unsigned(n), zifi::sdCrc16(d, n), ref);
+    }
   }
 
   // 1. SDHC: инициализация, объём, быстрый SCK, чтение и запись, адреса блоками
@@ -362,7 +429,51 @@ int main() {
     const uint32_t opsR = bridge.linkOps - ops0 - opsW;
     printf("SDHC 64 МБ: init за %u обменов LINK; блок: запись — %u обменов, чтение — %u; SCK на блок чтения ~%llu тактов\n",
            ops0, opsW / 8, opsR / 8, static_cast<unsigned long long>((bridge.sckCycles - sck0) / 16));
-    CHECK(card.writeAddrs.back() == 2007, "SDHC: адрес записи %u", card.writeAddrs.back());
+    CHECK(card.writeAddrs.back() == 2000, "SDHC: адрес серии %u", card.writeAddrs.back());
+    CHECK(card.multiWrites == 1 && card.multiBlocks == 8, "8 блоков — одна серия CMD25 (%d серий, %d блоков)",
+          card.multiWrites, card.multiBlocks);
+    // серия с отказом посреди: остаток — по одному блоку, данные целы
+    static uint8_t big[20 * 512];
+    pattern(big, sizeof big, 9);
+    card.multiBlocks = 0;
+    card.multiWrites = 0;
+    CHECK(sd.write(3000, big, 20), "серия 20 блоков");
+    static uint8_t bigBack[20 * 512];
+    CHECK(sd.read(3000, bigBack, 20) && memcmp(big, bigBack, sizeof big) == 0, "серия 20 блоков не читается");
+    CHECK(card.multiWrites == 1 && card.multiBlocks == 20, "20 блоков — одна серия (%d, %d)", card.multiWrites,
+          card.multiBlocks);
+    pattern(big, sizeof big, 11);
+    card.multiBlocks = 0;
+    card.multiWrites = 0;
+    card.failMultiAt = 5;            // шестой блок серии карта не примет
+    CHECK(sd.write(4000, big, 20), "серия с отказом посреди");
+    CHECK(sd.read(4000, bigBack, 20) && memcmp(big, bigBack, sizeof big) == 0, "после отказа серии данные не те");
+    CHECK(card.multiBlocks == 5, "серия до отказа: %d блоков", card.multiBlocks);
+    // 0.1.138: запись подряд продолжает открытую серию; не подряд, чтение и flush её закрывают
+    pattern(big, sizeof big, 13);
+    card.multiBlocks = 0;
+    card.multiWrites = 0;
+    CHECK(sd.write(5000, big, 8) && sd.write(5008, big + 8 * 512, 8) && sd.write(5016, big + 16 * 512, 1),
+          "запись подряд тремя вызовами");
+    CHECK(card.multiWrites == 1 && card.multiBlocks == 17, "подряд — одна серия (%d серий, %d блоков)",
+          card.multiWrites, card.multiBlocks);
+    CHECK(sd.write(6000, big, 2), "запись не подряд");
+    CHECK(card.multiWrites == 2, "не подряд — новая серия (%d)", card.multiWrites);
+    CHECK(sd.flush(), "flush");
+    CHECK(sd.read(5000, bigBack, 17) && memcmp(big, bigBack, 17 * 512) == 0, "серия тремя вызовами не читается");
+    CHECK(sd.read(6000, bigBack, 2) && memcmp(big, bigBack, 2 * 512) == 0, "вторая серия не читается");
+    CHECK(sd.write(7000, big, 4), "серия перед чтением");
+    CHECK(sd.read(7000, bigBack, 4) && memcmp(big, bigBack, 4 * 512) == 0, "чтение сразу за открытой серией");
+    CHECK(!sd.writing(), "чтение не закрыло серию");
+    // ESP перезапустился посреди серии: новый init() закрывает её маркером «стоп», карта отвечает
+    CHECK(sd.write(8000, big, 8) && sd.writing(), "серия перед перезапуском");
+    {
+      SdBridgeCard again(io);
+      const char* re = again.init();
+      CHECK(re == nullptr, "init посреди открытой серии: %s", re ? re : "");
+      CHECK(again.read(8000, bigBack, 8) && memcmp(big, bigBack, 8 * 512) == 0, "серия до перезапуска не читается");
+    }
+    CHECK(sd.init() == nullptr, "init после перезапуска");
     sd.release();
     CHECK(!bridge.csOn, "release: CS остался активным");
   }

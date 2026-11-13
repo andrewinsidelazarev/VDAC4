@@ -137,6 +137,15 @@ class SpiLinkCore {
   // прийти уже следующий сектор. Новый сеанс отменяет серию: очередь секторов пустеет, служба,
   // ждущая места, бросает серию (сеанс сменился).
   static constexpr uint8_t kFlagSector = 0x20;
+  // (0.1.134) Окно записи SMB наружу сырым DMA (ESP -> Z80), «быстрый путь как в плеерах»:
+  // запрос с этим флагом и без данных берёт следующую порцию до kMediaMax байт окна, которое
+  // ESP выложила в свой буфер (ByteLink::offerRawOut). Порцию выставляет DMA ведомого одним
+  // куском, Z80 читает её своим DMA на несколько секторов, без обратной посылки; следующий такой
+  // запрос подтверждает прочтение. Обслуживает его SpiLink мимо ядра. Статус ответа:
+  //   kStatusBulk — порция выставлена; kStatusBulk | kStatusBulkStale — выставлен чужой старый
+  //   блок: прочитать 512 байт и выбросить; kStatusBulkStale либо kStatusEchoBad без
+  //   kStatusBulk — отказ (DMA нет, порция ушла с ошибкой DMA); ничего — порции пока нет.
+  static constexpr uint8_t kFlagRawOut = 0x40;
   // Секторов наперёд: служба читает карту, пока Z80 забирает прежние.
   static constexpr size_t kSectorSlots = 4;
 
@@ -244,6 +253,9 @@ class SpiLinkCore {
   uint32_t sectorWakes() const;
 
   static uint8_t checksum(const uint8_t* data, size_t length);
+  // Обмен прошёл мимо ядра (kFlagRawOut): номер последнего запроса ядра больше не «прошлый», и
+  // через 256 таких обменов следующий запрос не должен сойти за повтор.
+  void forgetLastTurn() { haveLast_ = false; }
 
  private:
   SpscByteRing fromZ80_;

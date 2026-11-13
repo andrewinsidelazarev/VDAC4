@@ -96,6 +96,26 @@ void Z80Transport::flush() {
   link_->flush();
 }
 
+bool Z80Transport::waitForEither(uint8_t wanted, uint8_t alsoWanted, uint32_t timeoutMs,
+                                 PacketView& packet, UnexpectedHandler unexpected,
+                                 void* unexpectedContext) {
+  const uint32_t started = millis();
+  while (static_cast<uint32_t>(millis() - started) < timeoutMs) {
+    if (poll(packet)) {
+      if (packet.command == wanted || packet.command == alsoWanted) {
+        return true;
+      }
+      if (unexpected != nullptr) {
+        unexpected(unexpectedContext, packet);
+      }
+    } else {
+      delay(1);
+    }
+    yield();
+  }
+  return false;
+}
+
 bool Z80Transport::waitFor(uint8_t wanted, uint32_t timeoutMs, PacketView& packet,
                             IdleHook idleHook, void* idleContext,
                             UnexpectedHandler unexpected,

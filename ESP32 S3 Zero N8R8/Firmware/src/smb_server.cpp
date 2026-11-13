@@ -136,6 +136,9 @@ constexpr uint32_t kDirectoryContinuationGraceMs = 750;
 // Число слотов равно окну SMB credits. В памяти одновременно находится не
 // более восьми 64-КиБ запросов, поэтому очередь ограничена 512 КиБ PSRAM.
 constexpr size_t kAsyncIoQueueDepth = SMB2_SERVER_CREDIT_TARGET;
+// Сколько запрос записи за концом файла может пропускать вперёд запросы, продолжающие конец
+// (findReadyAsyncWrite, 0.1.133).
+constexpr uint32_t kGapHoldMs = 15000;
 // Физически обслуживаем только один READ или WRITE. Быстрые запросы удерживают credit
 // до финала; запрос старше 30 секунд получает STATUS_PENDING, но сервер перед этим снижает
 // credit target соединения до одного. PENDING выдаётся только активному физическому I/O:
@@ -820,6 +823,11 @@ struct SmbServer::Impl {
     // хранит объединение уже переданных диапазонов и потому не откатывается.
     TransferProgressMode progressMode = TransferProgressMode::kNone;
     uint32_t progressBytes = 0;
+    // Запросов READ/WRITE к файлу (0.1.132): журнал во flash держит 256 записей, и строка на
+    // каждый запрос (64 КБ) за минуты копирования затирала всё — отмену, ошибки, замер окон
+    // (12.11.2026). В журнал — первый запрос файла и итог в строке CLOSE.
+    uint32_t writeRequests = 0;
+    uint32_t readRequests = 0;
     size_t progressRangeCount = 0;
     size_t progressRangeCapacity = 0;
     TransferRange* progressRanges = nullptr;
@@ -1292,6 +1300,7 @@ struct SmbServer::Impl {
   int activeAsyncWrite;
   size_t asyncReadCount;
   size_t asyncWriteCount;
+  uint32_t interimLogged;          // STATUS_PENDING с прошлого CLOSE: в журнал — первый
   QueuedRead* queuedReadHead;
   QueuedRead* queuedReadTail;
   size_t queuedReadCount;
@@ -2562,6 +2571,7 @@ void SmbServer::Impl::resetAsyncIo() {
   activeAsyncClose = -1;
   asyncReadCount = 0;
   asyncWriteCount = 0;
+  interimLogged = 0;
   asyncDirectoryCount = 0;
   asyncCreateCount = 0;
   asyncCloseCount = 0;
@@ -3066,7 +3076,39 @@ int SmbServer::Impl::findReadyAsyncWrite(uint64_t sequence) const {
       oldestIndex = static_cast<int>(index);
     }
   }
-  return oldestIndex;
+  if (oldestIndex < 0) {
+    return oldestIndex;
+  }
+  // (0.1.133, 12.11.2026) Без промежутков. Запрос за физическим концом файла FILEX выполняет так:
+  // промежуток забивает нулями (APPEND кусками по 4 КБ, каждый с фиксацией FAT и каталога), а
+  // позже те же места переписывает по сектору, — Windows пишет области не по порядку, и копия
+  // Проводника писала многое дважды. Поэтому, если в очереди того же файла уже стоит запрос,
+  // продолжающий физический конец (или внутри файла), — сначала он. Ждать ему нечего: запрос
+  // выбирается только из уже принятых, и простоя нет; а обгонять запрос за концом можно не
+  // дольше kGapHoldMs от его прихода (проба 06.09: обгон без предела держал запрос минутами, и
+  // Windows рвала соединение).
+  const AsyncWrite& oldest = asyncWrites[oldestIndex];
+  const uint32_t physicalEnd = handles[oldest.slot].physicalSize;
+  if (oldest.offset + oldest.flushed <= physicalEnd ||
+      static_cast<uint32_t>(millis() - oldest.requestStartedMs) >= kGapHoldMs) {
+    return oldestIndex;
+  }
+  int fillIndex = -1;
+  uint64_t fillSequence = UINT64_MAX;
+  for (size_t index = 0; index < kAsyncIoQueueDepth; ++index) {
+    const AsyncWrite& other = asyncWrites[index];
+    if (!other.used || other.inFlight || other.cancelRequested ||
+        other.slot != oldest.slot || other.generation != oldest.generation ||
+        other.ownerId != oldest.ownerId ||
+        other.offset + other.flushed > physicalEnd) {
+      continue;
+    }
+    if (other.sequence < fillSequence) {
+      fillSequence = other.sequence;
+      fillIndex = static_cast<int>(index);
+    }
+  }
+  return fillIndex >= 0 ? fillIndex : oldestIndex;
 }
 
 bool SmbServer::Impl::hasAsyncWritesForHandle(int slot,
@@ -6023,9 +6065,11 @@ bool SmbServer::Impl::queueIoInterimPending(smb2_context* context,
     return false;
   }
   pendingSent = true;
-  diagnosticLogEvent("SMB interim-pending cmd=%u mid=%llu",
-                     static_cast<unsigned>(command),
-                     static_cast<unsigned long long>(messageId));
+  if (interimLogged++ == 0) {
+    diagnosticLogEvent("SMB interim-pending cmd=%u mid=%llu",
+                       static_cast<unsigned>(command),
+                       static_cast<unsigned long long>(messageId));
+  }
   return true;
 }
 
@@ -6341,10 +6385,12 @@ void SmbServer::Impl::pollAsyncRead() {
       const uint32_t left = logicalSize > handle->position
                                 ? logicalSize - handle->position
                                 : 0;
-      diagnosticLogEvent("SMB read-ok bytes=%lu left=%lu path=%s",
-                         static_cast<unsigned long>(completedLength),
-                         static_cast<unsigned long>(left),
-                         handle->path);
+      if (handle->readRequests <= 1) {    // первый READ файла; итог — в строке CLOSE
+        diagnosticLogEvent("SMB read-ok bytes=%lu left=%lu path=%s",
+                           static_cast<unsigned long>(completedLength),
+                           static_cast<unsigned long>(left),
+                           handle->path);
+      }
       sendOperation("READ", handle->path);
       current = {};
       if (asyncReadCount != 0) {
@@ -6630,11 +6676,19 @@ void SmbServer::Impl::pollAsyncWrite() {
   const uint32_t remaining = next.length - next.flushed;
   // SMB пишет только позиционно (FILEX WRITE_AT): кусок — окно, кратное сектору,
   // ровно один вызов FILEX (прежние 16384 мост резал на 16352 и 32 байта).
+  const uint32_t nextOffset = next.offset + next.flushed;
+  // (0.1.135) Кусок ровно в физический конец файла — окном до 16 КиБ, если источник умеет (карта
+  // Evo с плагином SMB 0.5.21: APPEND): запрос Windows в 64 КиБ — 4 вызова вместо 5 (четыре по 15872
+  // и хвост 2048, а цена вызова почти не зависит от длины).
+  const size_t appendWindow = nextOffset == handles[next.slot].physicalSize
+                                  ? bridge.appendWindowFor(handles[next.slot].path)
+                                  : 0;
   const uint32_t window = static_cast<uint32_t>(minimum(
-      bridge.ringCapacity(), VfsClient::kFilexSectorWindowSize));
+      bridge.ringCapacity(), appendWindow > VfsClient::kFilexSectorWindowSize
+                                 ? appendWindow
+                                 : VfsClient::kFilexSectorWindowSize));
   const uint32_t part = static_cast<uint32_t>(minimum(
       static_cast<size_t>(remaining), static_cast<size_t>(window)));
-  const uint32_t nextOffset = next.offset + next.flushed;
   if (bridge.requestPending() || bridge.networkToVfsAvailable() != 0 ||
       part == 0 || bridge.networkToVfsFree() < part) {
     return;
@@ -8834,9 +8888,11 @@ int SmbServer::Impl::closeHandler(smb2_server* serverValue,
   if (handle == nullptr) {
     return replyStatus(smb2, SMB2_CLOSE, SMB2_STATUS_FILE_CLOSED);
   }
-  diagnosticLogEvent("SMB close slot=%d size=%lu path=%s", slot,
+  diagnosticLogEvent("SMB close slot=%d size=%lu writes=%lu reads=%lu path=%s", slot,
                      static_cast<unsigned long>(self->visibleSize(*handle)),
-                     handle->path);
+                     static_cast<unsigned long>(handle->writeRequests),
+                     static_cast<unsigned long>(handle->readRequests), handle->path);
+  self->interimLogged = 0;
 
   const bool physicalQueueBusy =
       self->activeAsyncRead >= 0 || self->activeAsyncWrite >= 0 ||
@@ -9082,11 +9138,14 @@ int SmbServer::Impl::readHandler(smb2_server* serverValue,
   }
   const uint32_t offset = static_cast<uint32_t>(request->offset);
   const uint32_t logicalSize = self->visibleSize(*handle);
-  diagnosticLogEvent("SMB read-enter off=%lu len=%lu size=%lu path=%s",
-                     static_cast<unsigned long>(offset),
-                     static_cast<unsigned long>(request->length),
-                     static_cast<unsigned long>(logicalSize),
-                     handle->path);
+  const bool firstRead = handle->readRequests++ == 0;   // в журнал — первый READ файла
+  if (firstRead) {
+    diagnosticLogEvent("SMB read-enter off=%lu len=%lu size=%lu path=%s",
+                       static_cast<unsigned long>(offset),
+                       static_cast<unsigned long>(request->length),
+                       static_cast<unsigned long>(logicalSize),
+                       handle->path);
+  }
   if (offset >= logicalSize && request->length != 0) {
     if (self->activeSlot == slot && self->activeMode == ActiveMode::kRead) {
       self->closeActive(true);
@@ -9121,9 +9180,11 @@ int SmbServer::Impl::readHandler(smb2_server* serverValue,
     reply->data = cacheData;  // После отправки буфер освободит libsmb2.
     reply->data_length = wanted;
     reply->data_remaining = 0;
-    diagnosticLogEvent("SMB read-cached bytes=%lu off=%lu path=%s",
-                       static_cast<unsigned long>(wanted),
-                       static_cast<unsigned long>(offset), handle->path);
+    if (firstRead) {
+      diagnosticLogEvent("SMB read-cached bytes=%lu off=%lu path=%s",
+                         static_cast<unsigned long>(wanted),
+                         static_cast<unsigned long>(offset), handle->path);
+    }
     if (!self->noteTransferProgress(*handle, TransferProgressMode::kRead,
                                     offset, wanted)) {
       diagnosticLogEvent("SMB progress-range-oom mode=READ path=%s",
@@ -9205,12 +9266,15 @@ int SmbServer::Impl::writeHandler(smb2_server* serverValue,
   }
   if (!handle->pipe) {
     // Что пишет клиент — для разбора сохранения из редактора (12.10.2026:
-    // правка Help.txt «не сохранялась», а журнал не показывал ни записи).
-    diagnosticLogEvent("SMB write-enter off=%llu len=%lu size=%lu path=%s",
-                       static_cast<unsigned long long>(request->offset),
-                       static_cast<unsigned long>(request->length),
-                       static_cast<unsigned long>(self->visibleSize(*handle)),
-                       handle->path);
+    // правка Help.txt «не сохранялась», а журнал не показывал ни записи). Только первый WRITE
+    // файла: число запросов — в строке CLOSE (журнал 256 записей, 0.1.132).
+    if (handle->writeRequests++ == 0) {
+      diagnosticLogEvent("SMB write-enter off=%llu len=%lu size=%lu path=%s",
+                         static_cast<unsigned long long>(request->offset),
+                         static_cast<unsigned long>(request->length),
+                         static_cast<unsigned long>(self->visibleSize(*handle)),
+                         handle->path);
+    }
   }
   if (handle->pipe) {
     if (request->length == 0 || request->buf == nullptr) {

@@ -17,8 +17,9 @@ namespace zifi {
 // вызывающий (setLayout) по ядру на LINK.
 //
 // Блок — 512 байтов. Чтение — CMD17 на блок, CRC16 сверяется (не сошлось — ещё две попытки),
-// запись — CMD24 с CRC16, ответ данных и ожидание конца записи. SDSC адресуется байтами, SDHC и
-// SDXC — блоками.
+// запись — CMD24 с CRC16, ответ данных и ожидание конца записи; несколько блоков — серией CMD25
+// (0.1.137), при отказе посреди серии остаток — по одному блоку; кадр следующего блока серии
+// готовится, пока мост передаёт текущий (0.1.139). SDSC адресуется байтами, SDHC и SDXC — блоками.
 struct SdBridgeIo {
   void* ctx;
   bool (*read)(void* ctx, uint32_t address, uint32_t* words, size_t count);         // до 16 слов
@@ -74,8 +75,14 @@ class SdBridgeCard {
   // сошёлся (данные уже в FIFO: повтора нет). false — STREAM нет, карта не ответила или поток
   // оборвался (сколько блоков ушло — не известно: поток начинать заново).
   bool stream(uint32_t lba, uint32_t blocks, bool* crcError);
-  // CS неактивен (между сеансами карта не держит шину)
+  // CS неактивен (между сеансами карта не держит шину); открытую серию записи — закрыть
   void release();
+  // Закрыть открытую серию записи CMD25 (0.1.138): маркер «стоп» и конец «занята». Серия остаётся
+  // открытой между вызовами write(), пока запись идёт подряд; её закрывает и любая другая
+  // операция с картой. FatFs зовёт это по CTRL_SYNC (закрытие файла). false — карта не дописала.
+  bool flush();
+  // Серия записи CMD25 открыта (карта ждёт следующий блок или «стоп»)
+  bool writing() const { return seriesOpen_; }
 
   // Счётчики: повторов чтения по CRC, ошибок
   uint32_t crcRetries() const { return crcRetries_; }
@@ -83,13 +90,27 @@ class SdBridgeCard {
 
  private:
   static constexpr uint32_t kXfer = 0, kFill = 1, kWait = 2, kReadOp = 3, kBusy = 4, kStream = 5;
+  // Кадр блока серии — 516 байтов (129 слов); второй кадр — с этого слова TX (0.1.139)
+  static constexpr uint32_t kFrameWords = 129;
+  static constexpr uint32_t kTwinWord = 256;
+  // Кадр блока серии (0xFF, маркер 0xFC, 512 байтов, CRC16) — в TX моста со слова word
+  bool putFrame(const uint8_t* block, uint32_t word);
+  // Блоки в серию CMD25 (открыть, если не открыта; 0.1.137/0.1.138). done — сколько блоков карта
+  // приняла; false — серия оборвана (и уже закрыта).
+  bool writeMulti(uint32_t lba, const uint8_t* data, uint32_t count, uint32_t& done);
+  bool seriesOpen_ = false;             // CMD25 открыта: следующий блок серии — seriesNext_
+  uint32_t seriesNext_ = 0;
   uint32_t lastYieldMs_ = 0;            // когда операция моста последний раз отдавала процессор
 
   bool setCtrl(uint32_t div, bool cs);
   bool setPtr(uint32_t word, uint32_t blockBytes);
-  // операция; *stat — SD_STAT после неё
+  // операция; *stat — SD_STAT после неё. opStart — только запустить, opWait — дождаться конца
+  // (между ними можно писать в TX то, что мост сейчас не передаёт).
   bool op(uint32_t kind, uint32_t count, uint32_t* stat);
-  bool txPut(const uint8_t* bytes, uint32_t count);
+  bool opStart(uint32_t kind, uint32_t count);
+  bool opWait(uint32_t* stat);
+  // байты — в TX со слова word
+  bool txPut(const uint8_t* bytes, uint32_t count, uint32_t word = 0);
   bool rxGet(uint8_t* bytes, uint32_t count);
   // команда: R1 (0xFF — ответа нет)
   uint8_t command(uint8_t index, uint32_t arg, uint8_t crc);

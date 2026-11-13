@@ -14,6 +14,7 @@ OPEN=3 как запись и удалил бы его. Без Visual Studio Bui
 """
 import datetime
 import ftplib
+import io
 import os
 import pathlib
 import shutil
@@ -169,6 +170,25 @@ class HostFtpDatesTest(unittest.TestCase):
 
         self.assertEqual(ftp.sendcmd('MDTM GAME.TAP'), '213 20240315113020')
         self.assertIn('modify=20240315113020; /GAME.TAP', ftp.sendcmd('MLST GAME.TAP'))
+
+    def test_retr_and_stor_carry_files_of_many_windows(self) -> None:
+        # 0.1.141: RETR читает следующее окно, пока отправляет прежнее. Файлы — от пустого до
+        # нескольких окон по 16 КиБ с неполным хвостом; загрузка и скачивание — байт в байт.
+        import random
+        sizes = [0, 1, 1000, 16384, 16385, 100_000, 300_001]
+        for size in sizes:
+            (self.root / f'R{size}.BIN').write_bytes(random.Random(size).randbytes(size))
+        ftp = self.start()
+        for size in sizes:
+            got = bytearray()
+            ftp.retrbinary(f'RETR R{size}.BIN', got.extend)
+            self.assertEqual(bytes(got), (self.root / f'R{size}.BIN').read_bytes(), f'RETR {size}')
+        data = random.Random(7).randbytes(200_003)
+        ftp.storbinary('STOR UP.BIN', io.BytesIO(data))
+        self.assertEqual((self.root / 'UP.BIN').read_bytes(), data, 'STOR')
+        got = bytearray()
+        ftp.retrbinary('RETR UP.BIN', got.extend)
+        self.assertEqual(bytes(got), data, 'RETR после STOR')
 
     def test_mfmt_writes_modification_time_into_file(self) -> None:
         ftp = self.start()

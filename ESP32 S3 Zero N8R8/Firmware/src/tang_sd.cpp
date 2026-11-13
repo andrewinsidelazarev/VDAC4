@@ -103,7 +103,13 @@ DRESULT diskWrite(BYTE, const BYTE* buff, uint32_t sector, unsigned count) {
 
 DRESULT diskIoctl(BYTE, BYTE cmd, void* buff) {
   switch (cmd) {
-    case CTRL_SYNC: return RES_OK;      // запись блока кончается, когда карта её закончила
+    case CTRL_SYNC: {                   // закрытие файла: открытую серию записи CMD25 — закрыть
+      if (!sameCore()) {
+        return RES_NOTRDY;
+      }
+      tang::LinkGuard guard;
+      return g_card.flush() ? RES_OK : RES_ERROR;
+    }
     case GET_SECTOR_COUNT: *static_cast<LBA_t*>(buff) = g_card.sectors(); return RES_OK;
     case GET_SECTOR_SIZE: *static_cast<WORD*>(buff) = SdBridgeCard::kBlock; return RES_OK;
     case GET_BLOCK_SIZE: *static_cast<DWORD*>(buff) = 1; return RES_OK;
@@ -117,6 +123,17 @@ void release() {
   if (sameCore()) {
     tang::LinkGuard guard;
     g_card.release();
+  }
+}
+
+// Вложенность Session у задачи, что держит замок (меняет только она, под замком)
+int g_sessionDepth = 0;
+
+// Открытую серию записи CMD25 — закрыть (внешний Session не шары TANG)
+void closeSeries() {
+  if (g_card.writing() && sameCore()) {
+    tang::LinkGuard guard;
+    g_card.flush();
   }
 }
 
@@ -140,14 +157,18 @@ SemaphoreHandle_t sessionLock() {
 
 }  // namespace
 
-Session::Session(uint32_t waitMs) {
+Session::Session(uint32_t waitMs, bool keepWrite) {
   SemaphoreHandle_t lock = sessionLock();
   ok_ = lock != nullptr &&
         xSemaphoreTakeRecursive(lock, waitMs == kForever ? portMAX_DELAY : pdMS_TO_TICKS(waitMs)) == pdTRUE;
+  if (ok_ && g_sessionDepth++ == 0 && !keepWrite) {
+    closeSeries();
+  }
 }
 
 Session::~Session() {
   if (ok_) {
+    --g_sessionDepth;
     xSemaphoreGiveRecursive(sessionLock());
   }
 }

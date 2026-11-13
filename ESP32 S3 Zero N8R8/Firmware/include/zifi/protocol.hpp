@@ -13,6 +13,8 @@ constexpr uint8_t kMediaSync = 0xA6;
 // Сколько байт управления запроса raw media приложение может поставить перед данными (номер
 // операции, смещение — что ему нужно): прошивка кладёт их в начало тела кадра.
 constexpr size_t kAppMediaPrefixMax = 8;
+// Управление порции окна чтения SMB (kVfsReadMedia) перед данными.
+constexpr size_t kVfsReadMediaPrefix = 6;
 constexpr size_t kMaxMediaPayload = 8192 + kAppMediaPrefixMax; // MOD_PUT adds a file offset
 constexpr size_t kMaxPayload = 1024;
 constexpr uint32_t kFrameTimeoutMs = 500;
@@ -23,7 +25,9 @@ constexpr size_t kMaxEventPayload = 63;
 // Команды работающего приложения ELF, которым можно слать порции DMA без суммы (raw media):
 // first..last задаёт само приложение (zm_core_t::link_media, ABI 1.13), first > last — ни одной;
 // при выгрузке приложения — снова ни одной. Без явного разрешения такие порции принимаются
-// только звуком и модулями: команды записи файлов данных без проверки не получают.
+// только звуком и модулями: команды записи файлов данных без проверки не получают. Исключение —
+// чтение SMB с карты Evo (kVfsReadMedia, 0.1.131): «быстрый путь как в плеерах», по слову
+// пользователя 12.11.2026 — без суммы, ради скорости.
 // Встроены в заголовок: их зовут и канал SPI, и разбор кадров, и приложение — без лишних связей
 // между единицами сборки (тесты собирают их порознь).
 inline std::atomic<uint16_t> appMediaRangeValue{0x0100};   // first << 8 | last; 1..0 — ни одной
@@ -172,6 +176,10 @@ enum Command : uint8_t {
   kVfsSetEof = 0x5C,
   kVfsMoveRename = 0x5D,
   kVfsSetMetadata = 0x5E,
+  // (0.1.131) Порция окна чтения SMB быстрым путём плееров: raw media DMA до 8 КиБ без суммы —
+  // [признаки][номер][смещение LE16][длина окна LE16] и данные. Только если плагин объявил это
+  // в OPEN (бит 3) и ESP попросила (4-й байт READ_WINDOW).
+  kVfsReadMedia = 0x5F,
 
   kEventFtpClient = 0x60,
   kEventFtpCommand = 0x61,

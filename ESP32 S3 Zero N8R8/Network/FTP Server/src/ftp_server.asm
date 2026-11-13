@@ -22,6 +22,19 @@ PLUGIN:
         call WC_INT_PL                   ; WC не должен перерисовывать часы под окном
         call Vfs_Crc16Init               ; таблицы CRC — до первого файлового обмена
         call WC_GEDPL
+        IFDEF ZIFI_SPI
+        ; VDAC4 VFS включён (на SD2 — карта Tang или том VFS через ESP): FTP не запускаем, как и
+        ; SMB (12.11.2026). Сектора SD2 WC берёт у той же ESP, пока она ждёт ответа на файловый
+        ; запрос FTP, — обмен встал бы. Окно сервера не открываем: только окно с причиной.
+        call Vfs4_Active
+        jr nc,.no_vfs
+        call Ui_VfsRefuse                ; окно с причиной, закрывается любой клавишей
+        call WC_GEDPL
+        xor a                            ; на картах ничего не менялось: панели не перечитывать
+        pop ix
+        ret
+.no_vfs:
+        ENDIF
         call Ui_Open
 
         ld hl,UiStageConfig
@@ -124,6 +137,40 @@ LINK_TRY        equ 12000
 LINK_PROBE      equ 10                   ; проб между пингами живости
 LINK_SILENCE    equ 15                   ; столько пингов без READY = ESP мёртв
 
+        IFDEF ZIFI_SPI
+; VDAC4 VFS включён — та же проверка, что у SMB (smb_server.asm): VDAC4VFS.WMF ставит в WC
+; v1.11i «JP #4FE8» на место «LD HL,DR2» ветки SD2 (#501C) и переходник к резиденту по #4FE8
+; (LD A,I; DI; PUSH AF …). Код WC при работе плагина — в окне #4000. Выход: CF=1 — включён.
+VFS4_SD2_JP     equ #501C
+VFS4_TRAMP      equ #4FE8
+Vfs4_Active:
+        ld hl,VFS4_SD2_JP
+        ld a,(hl)
+        cp #C3                           ; JP
+        jr nz,.off
+        inc hl
+        ld a,(hl)
+        cp low VFS4_TRAMP
+        jr nz,.off
+        inc hl
+        ld a,(hl)
+        cp high VFS4_TRAMP
+        jr nz,.off
+        ld hl,VFS4_TRAMP
+        ld a,(hl)
+        cp #ED                           ; LD A,I
+        jr nz,.off
+        inc hl
+        ld a,(hl)
+        cp #57
+        jr nz,.off
+        scf
+        ret
+.off:
+        or a
+        ret
+        ENDIF
+
 ; Поднять весь тракт. Выход: CF=1 и LinkError с причиной.
 Link_Start:
         xor a
@@ -135,6 +182,18 @@ Link_Start:
         scf
         ret
 .zifi_ok:
+        IFDEF ZIFI_SPI
+        ; Плата VDAC4: ESP не перезапускается (по слову пользователя 12.11.2026 —
+        ; память PSRAM чистят команды API). Прежнее приложение ESP (PLAYER,
+        ; TSafari…) выгружается и отдаёт память по APP_STOP; буферы сервера
+        ; прошивка берёт при его запуске. Перезапуск стоил секунд загрузки ESP и
+        ; подъёма Wi-Fi. Ответ не обязателен: готовность — циклом PING ниже.
+        ld a,CMD_APP_STOP
+        call Proto_SendEmpty
+        ld a,RESP_APP_STOP
+        ld de,LINK_TRY
+        call Proto_WaitCmd
+        ELSE
         ; ESP перезапускается ПЕРЕД работой. RESET ZX её не трогает, поэтому без
         ; этого плагин каждый раз садился на кучу, оставшуюся от прошлого сеанса:
         ; свободной памяти много, но она раздроблена, и постоянные буферы уже не
@@ -146,6 +205,7 @@ Link_Start:
         ; готовность всё равно устанавливается циклом PING ниже.
         ld a,CMD_SYS_RESET
         call Proto_SendEmpty
+        ENDIF
         ; Готовность ESP: PING повторяем, пока не ответит READY. ESP сам в линию
         ; ничего не пишет, поэтому мусора тут не бывает и ловить нечего.
         ; Попыток столько же, сколько в update.sna после его SYS_RESET: там эта

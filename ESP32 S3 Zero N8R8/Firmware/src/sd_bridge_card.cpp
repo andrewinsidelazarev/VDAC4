@@ -22,13 +22,26 @@ uint32_t ceilDiv(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
 const SdBridgeLayout kSdLayoutStd = {0x100, 0x104, 0x108, 0, 0x2000, 0x2000, 512};
 const SdBridgeLayout kSdLayoutVideo = {0x110, 0x114, 0x118, 0x11C, 0x2000, 0x3000, 16};
 
+// (0.1.139) CRC16 по таблице: байт за шаг, а не бит. Побитный расчёт — ~100 мкс процессора на блок
+// записи и чтения, при копии на карту Tang ядро 1 ESP было занято до 79 %.
+struct Crc16Table {
+  uint16_t value[256];
+  constexpr Crc16Table() : value() {
+    for (int i = 0; i < 256; ++i) {
+      uint16_t crc = static_cast<uint16_t>(i << 8);
+      for (int b = 0; b < 8; ++b) {
+        crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021) : static_cast<uint16_t>(crc << 1);
+      }
+      value[i] = crc;
+    }
+  }
+};
+constexpr Crc16Table kCrc16Table;
+
 uint16_t sdCrc16(const uint8_t* data, size_t size) {
   uint16_t crc = 0;
   for (size_t i = 0; i < size; ++i) {
-    crc ^= static_cast<uint16_t>(data[i]) << 8;
-    for (int b = 0; b < 8; ++b) {
-      crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021) : static_cast<uint16_t>(crc << 1);
-    }
+    crc = static_cast<uint16_t>((crc << 8) ^ kCrc16Table.value[((crc >> 8) ^ data[i]) & 0xFF]);
   }
   return crc;
 }
@@ -65,10 +78,15 @@ bool SdBridgeCard::setPtr(uint32_t word, uint32_t blockBytes) {
 }
 
 bool SdBridgeCard::op(uint32_t kind, uint32_t count, uint32_t* stat) {
+  return opStart(kind, count) && opWait(stat);
+}
+
+bool SdBridgeCard::opStart(uint32_t kind, uint32_t count) {
   const uint32_t v = ((kind & 7) << 20) | (count & 0xFFFFF);
-  if (!io_.write(io_.ctx, layout_->cmd, &v, 1)) {
-    return false;
-  }
+  return io_.write(io_.ctx, layout_->cmd, &v, 1);
+}
+
+bool SdBridgeCard::opWait(uint32_t* stat) {
   // Команда доходит до моста раньше, чем следующее чтение LINK выдаёт слово (24 такта SCK)
   const uint32_t start = io_.nowMs(io_.ctx);
   if (io_.yield != nullptr && start - lastYieldMs_ >= kYieldEveryMs) {
@@ -95,20 +113,25 @@ bool SdBridgeCard::op(uint32_t kind, uint32_t count, uint32_t* stat) {
   }
 }
 
-bool SdBridgeCard::txPut(const uint8_t* bytes, uint32_t count) {
+bool SdBridgeCard::txPut(const uint8_t* bytes, uint32_t count, uint32_t word) {
   uint32_t words[kChunk];
   const uint32_t total = ceilDiv(count, 4);
   for (uint32_t w = 0; w < total; w += kChunk) {
     const uint32_t n = total - w < kChunk ? total - w : kChunk;
     for (uint32_t i = 0; i < n; ++i) {
+      const uint32_t at = 4 * (w + i);
+      if (at + 4 <= count) {            // целое слово — без проверки каждого байта
+        words[i] = (static_cast<uint32_t>(bytes[at]) << 24) | (static_cast<uint32_t>(bytes[at + 1]) << 16) |
+                   (static_cast<uint32_t>(bytes[at + 2]) << 8) | bytes[at + 3];
+        continue;
+      }
       uint32_t v = 0;
       for (uint32_t k = 0; k < 4; ++k) {
-        const uint32_t at = 4 * (w + i) + k;
-        v = (v << 8) | (at < count ? bytes[at] : 0xFF);
+        v = (v << 8) | (at + k < count ? bytes[at + k] : 0xFF);
       }
       words[i] = v;
     }
-    if (!io_.write(io_.ctx, layout_->txWindow + 4 * w, words, n)) {
+    if (!io_.write(io_.ctx, layout_->txWindow + 4 * (word + w), words, n)) {
       return false;
     }
   }
@@ -160,6 +183,7 @@ uint8_t SdBridgeCard::appCommand(uint8_t index, uint32_t arg) {
 }
 
 const char* SdBridgeCard::init() {
+  seriesOpen_ = false;                  // карта начинает заново (CMD0): прежней серии нет
   ready_ = false;
   sdhc_ = false;
   sectors_ = 0;
@@ -188,6 +212,15 @@ const char* SdBridgeCard::init() {
     return "LINK write failed";
   }
   if (!setCtrl(divSlow, true)) {
+    return "LINK write failed";
+  }
+  // (0.1.138) Серия записи CMD25 могла остаться открытой: ESP перезапустился посреди копии на карту.
+  // Карта тогда ждёт блок или «стоп» и CMD0 не слышит. Маркер «стоп» и конец «занята» (до ~0,5 с на
+  // 400 кГц) её закрывают; карте вне серии 0xFD — не команда, она его пропускает.
+  static const uint8_t stop[2] = {0xFF, 0xFD};
+  uint32_t busy = 0;
+  if (!setPtr(0, kBlock + 2) || !txPut(stop, 2) || !op(kXfer, 2, &stat) || !op(kFill, 1, &stat) ||
+      !op(kBusy, 25000, &busy)) {
     return "LINK write failed";
   }
   uint8_t r1 = 0xFF;
@@ -335,6 +368,7 @@ bool SdBridgeCard::read(uint32_t lba, uint8_t* data, uint32_t count) {
   if (!ready_) {
     return false;
   }
+  flush();                              // открытая серия записи — сначала закрыть
   for (uint32_t i = 0; i < count; ++i) {
     if (!readBlock(lba + i, data + i * kBlock)) {
       return false;
@@ -347,12 +381,101 @@ bool SdBridgeCard::write(uint32_t lba, const uint8_t* data, uint32_t count) {
   if (!ready_ || layout_->txWords < ceilDiv(kBlock + 4, 4)) {
     return false;                       // ядро видео: TX — только команды
   }
-  for (uint32_t i = 0; i < count; ++i) {
+  // (0.1.137) Несколько блоков — одной серией CMD25: одиночная CMD24 на каждый блок ждала полный цикл
+  // программирования карты, и запись на карту Tang шла ~4,6 мс на блок (~111 КБ/с, 12.11.2026).
+  // (0.1.138) Серия не закрывается в конце вызова: следующая запись подряд её продолжает. Каждая
+  // запись FatFs (до 16 КиБ) открывала свою серию и закрывала её «стопом», а после «стопа» карта
+  // дописывает серию целиком и долго занята — копия на карту Tang всё равно шла ~148 КБ/с при
+  // свободном процессоре ESP. Отказ посреди серии — остаток прежним путём, по блоку с повтором.
+  if (seriesOpen_ && lba != seriesNext_) {
+    flush();                            // не подряд: прежнюю серию — закрыть
+  }
+  uint32_t done = 0;
+  if ((count > 1 || seriesOpen_) && writeMulti(lba, data, count, done)) {
+    return true;
+  }
+  for (uint32_t i = done; i < count; ++i) {
     if (!writeBlock(lba + i, data + i * kBlock)) {
       return false;
     }
   }
   return true;
+}
+
+bool SdBridgeCard::writeMulti(uint32_t lba, const uint8_t* data, uint32_t count, uint32_t& done) {
+  done = 0;
+  if (!seriesOpen_) {
+    if (command(25, sdhc_ ? lba : lba * kBlock, 0) != 0x00) {
+      return false;
+    }
+    seriesOpen_ = true;
+    seriesNext_ = lba;
+  }
+  // (0.1.139) Кадр следующего блока (CRC16, упаковка, запись в TX) готовится, пока мост передаёт
+  // текущий (516 байтов — ~0,22 мс на 18,6 МГц): кадры по очереди в двух половинах TX, со слова 0 и
+  // kTwinWord. Запись окна TX мост принимает и во время операции (fb_sdspi: порт записи BSRAM
+  // отдельный), PTR и CMD — нет: их — только после opWait. TX меньше двух кадров — по очереди.
+  const bool twin = layout_->txWords >= kTwinWord + kFrameWords;
+  bool ok = putFrame(data, 0);
+  while (ok && done < count) {
+    const uint32_t word = twin && (done & 1) != 0 ? kTwinWord : 0;
+    uint32_t stat = 0;
+    if (!setPtr(word, kBlock + 2) || !opStart(kXfer, kBlock + 4)) {
+      ok = false;
+      break;
+    }
+    const bool ahead = twin && done + 1 < count;
+    const bool next = !ahead || putFrame(data + (done + 1) * kBlock, word ^ kTwinWord);
+    // конец передачи ждать и при сбое кадра следующего: мост занят, PTR и CMD он сейчас не примет
+    if (!opWait(&stat) || !next || !op(kWait, 8, &stat) || (stat & 2) != 0) {
+      ok = false;
+      break;
+    }
+    const uint8_t response = static_cast<uint8_t>(stat >> 8) & 0x1F;
+    uint32_t busy = 0;
+    if (!op(kBusy, kBusyBytes, &busy) || (busy & 2) != 0 || response != 0x05) {
+      ok = false;                       // блок не принят: он и дальше — заново, по одному
+      break;
+    }
+    ++done;
+    if (!twin && done < count && !putFrame(data + done * kBlock, 0)) {
+      ok = false;
+      break;
+    }
+  }
+  seriesNext_ = lba + done;
+  if (!ok) {
+    flush();                            // оборванную серию — закрыть: остаток пойдёт по блоку
+  }
+  return ok;
+}
+
+bool SdBridgeCard::putFrame(const uint8_t* block, uint32_t word) {
+  static uint8_t frame[kBlock + 4];
+  frame[0] = 0xFF;                      // пауза перед маркером
+  frame[1] = 0xFC;                      // маркер блока серии
+  memcpy(frame + 2, block, kBlock);
+  const uint16_t crc = sdCrc16(block, kBlock);
+  frame[kBlock + 2] = static_cast<uint8_t>(crc >> 8);
+  frame[kBlock + 3] = static_cast<uint8_t>(crc);
+  return txPut(frame, kBlock + 4, word);
+}
+
+bool SdBridgeCard::flush() {
+  if (!seriesOpen_) {
+    return true;
+  }
+  seriesOpen_ = false;
+  // Конец серии: маркер «стоп», байт паузы, затем карта занята, пока не допишет
+  static const uint8_t stop[2] = {0xFF, 0xFD};
+  uint32_t stat = 0;
+  uint32_t busy = 0;
+  const bool stopped = setPtr(0, kBlock + 2) && txPut(stop, 2) && op(kXfer, 2, &stat) &&
+                       op(kFill, 1, &stat) && op(kBusy, kBusyBytes, &busy) && (busy & 2) == 0;
+  if (!stopped) {
+    ++errors_;
+  }
+  return stopped;
 }
 
 bool SdBridgeCard::stopTransmission() {
@@ -368,6 +491,7 @@ bool SdBridgeCard::stopTransmission() {
 }
 
 bool SdBridgeCard::stream(uint32_t lba, uint32_t blocks, bool* crcError) {
+  flush();
   *crcError = false;
   if (!ready_ || layout_->strm == 0 || blocks == 0 || blocks > 0xFFF) {
     return false;
@@ -407,6 +531,7 @@ bool SdBridgeCard::stream(uint32_t lba, uint32_t blocks, bool* crcError) {
 }
 
 void SdBridgeCard::release() {
+  flush();
   uint32_t stat = 0;
   setCtrl(div_, false);
   op(kFill, 1, &stat);

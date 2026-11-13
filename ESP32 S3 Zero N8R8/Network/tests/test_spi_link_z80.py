@@ -49,6 +49,7 @@ PROBE_SYM = ROOT / "tools" / "dma_probe_vdac4.sym"
 
 CARRY, ZERO = 0x01, 0x40
 CMD_SYS_INFO, CMD_WIFI_INI, CMD_PING, CMD_NET_NTP = 0x02, 0x03, 0x04, 0x22
+CMD_SYS_RESET, CMD_APP_STOP, RESP_APP_STOP = 0x0F, 0x6D, 0xED
 CMD_UPDATE_START, CMD_UPDATE_STOP = 0x08, 0x09
 RESP_SYS_INFO, RESP_WIFI_INI, RESP_NET_NTP, RESP_READY, RESP_ACK = 0x82, 0x83, 0xA2, 0xF0, 0xFE
 RESP_UPDATE_START, RESP_UPDATE_STOP, RESP_ERROR = 0x88, 0x89, 0xEE
@@ -807,7 +808,7 @@ def spi_variant(case: type, plugins: tuple = ()) -> type:
 class SpiFtpExitRefreshTest(spi_variant(base.FtpExitRefreshTest)):
     def test_header_version(self) -> None:
         data = FTP_WMF.read_bytes()
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 FTP Server v0.15")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 FTP Server v0.17")
         self.assertEqual(data[197], 3, "плагин меню F10")
 
 
@@ -849,8 +850,10 @@ class SmbLayoutTest(unittest.TestCase):
         self.assertLessEqual(buffer + BULK_SIZE, 0xC000)
 
 
-VFS_WRITE_WINDOW, VFS_READ_WINDOW = 0x57, 0x58
-WINDOW_START, WINDOW_END = 0x01, 0x02
+VFS_WRITE_WINDOW, VFS_READ_WINDOW, VFS_READ_MEDIA = 0x57, 0x58, 0x5F
+WINDOW_START, WINDOW_END, WINDOW_DMA = 0x01, 0x02, 0x04
+WINDOW_RAW, WINDOW_OFFSET, WINDOW_APPEND = 0x08, 0x10, 0x20
+FILEX_WRITE_AT = 2
 FN_MNGC_PL, FN_LOAD512, FN_APPEND, FN_MNG8_PL = 0x00, 0x30, 0x4C, 0x4F
 WC_PAGE3 = 0x6003
 WINDOW = 0x4000                         # окно 16 КиБ: page1 плагина
@@ -945,7 +948,7 @@ class WindowTest(unittest.TestCase):
             print("\nтактов Z80 на байт: " + ", ".join(
                 f"{name} {value:.1f}" for name, value in sorted(cls.ticks.items())))
 
-    def read_file(self, h: WindowHarness, data: bytes) -> tuple[bytes, int]:
+    def read_file(self, h: WindowHarness, data: bytes, media: bool = False) -> tuple[bytes, int]:
         h.file, h.file_pos = data, 0
         h.set_word("FileRemaining", len(data), 4)
         h.memory[h.symbol("VfsMode")] = 0
@@ -953,7 +956,7 @@ class WindowTest(unittest.TestCase):
         got, ticks, offset = bytearray(), 0, 0
         while offset < len(data):
             count = min(WINDOW, len(data) - offset)
-            h.set_request(bytes([seq]) + count.to_bytes(2, "little"))
+            h.set_request(bytes([seq]) + count.to_bytes(2, "little") + (b"\1" if media else b""))
             h.tx.clear()
             before = h.ticks
             h.call("Vfs_ReadWindow")
@@ -961,7 +964,13 @@ class WindowTest(unittest.TestCase):
             h.link.pump()
             part_offset = 0
             for command, payload in h.frames():
-                self.assertEqual(command, VFS_READ_WINDOW)
+                if media:
+                    # быстрый путь (ESP 0.1.131): [признаки][номер][смещение][окно] и данные
+                    self.assertEqual(command, VFS_READ_MEDIA)
+                    payload = b"\0" + payload[:6] + b"\0\0" + payload[6:]
+                    self.assertLessEqual(len(payload) - 9, 8192, "порция — не больше 8 КиБ")
+                else:
+                    self.assertEqual(command, VFS_READ_WINDOW)
                 self.assertEqual(payload[0], 0, "статус")
                 flags = payload[1]
                 part = payload[9:]
@@ -1020,6 +1029,25 @@ class WindowTest(unittest.TestCase):
                 self.assertEqual(h.link.core.put_bad, 0)
                 self.ticks[f"чтение {name}"] = ticks / len(data)
 
+    def test_read_windows_fast_media_path(self) -> None:
+        """Плагин SMB 0.5.18 и FTP 0.17 + ESP 0.1.131: окно чтения порциями raw media до 8 КиБ без
+        XOR — как звук плеера; прежний путь (запрос из 3 байт) остаётся для старой прошивки."""
+        for wmf, sym, name in self.PLUGINS:
+            with self.subTest(plugin=name):
+                self.check_media_read(wmf, sym, name)
+
+    def check_media_read(self, wmf: pathlib.Path, sym: pathlib.Path, label: str) -> None:
+        # очередь от Z80 — 16 КиБ, как у прошивки (kInputRingBytes): порция 8 КиБ в неё входит
+        h = WindowHarness(wmf, sym, LinkCore(16384, 4096))
+        h.call("ZiFi_Init")
+        data = random.Random(32).randbytes(self.SIZE)
+        got, ticks = self.read_file(h, data, media=True)
+        self.assertEqual(got, data)
+        self.assertEqual(h.link.core.put_bad, 0)
+        self.ticks[f"чтение {label} быстрым путём"] = ticks / len(data)
+        # Vfs_OpenReply объявляет быстрый путь битом 3
+        self.assertEqual(h.memory[h.symbol("VfsReadMedia")], 1)
+
     def test_write_windows_land_in_the_file(self) -> None:
         for wmf, sym, name in self.PLUGINS:
             for pad in (False, True):
@@ -1030,6 +1058,291 @@ class WindowTest(unittest.TestCase):
                     ticks = self.write_file(h, data, pad)
                     self.assertEqual(h.link.core.bulk_bad, 0)
                     self.ticks[f"запись {name}{' (кадры чётные)' if pad else ''}"] = ticks / len(data)
+
+
+    def test_write_windows_dma_blocks(self) -> None:
+        """Плагин SMB 0.5.18 и FTP 0.17 + ESP 0.1.131: окно записи — заголовок без данных и блоки
+        очереди секторов, которые плагин забирает DMA прямо в страницу окна (обратная посылка —
+        сверка); хвост последнего блока ESP добивает нулями. Байты окна Z80 не трогает."""
+        for wmf, sym, name in self.PLUGINS:
+            with self.subTest(plugin=name):
+                self.check_dma_write(wmf, sym, name)
+
+    def check_dma_write(self, wmf: pathlib.Path, sym: pathlib.Path, label: str) -> None:
+        h = WindowHarness(wmf, sym)
+        h.call("ZiFi_Init")
+        data = random.Random(33).randbytes(self.SIZE)
+        for name in ("VfsWriteFailed", "VfsExpectedSeq", "VfsWindowActive"):
+            h.memory[h.symbol(name)] = 0
+        h.memory[h.symbol("VfsMode")] = 1
+        h.set_word("VfsWriteCount", 0)
+        core = h.link.core
+        pending: list[bytes] = []
+        session = [0]
+        run_app = h._run_app
+
+        def service() -> None:          # writeFileWindow ESP: кладёт блоки, пока есть место
+            while pending and core.push_sector(pending[0], session[0]):
+                pending.pop(0)
+            run_app()
+
+        h._run_app = service
+        ticks, offset, seq = 0, 0, 0
+        while offset < len(data):
+            total = min(WINDOW, len(data) - offset)
+            window = data[offset:offset + total]
+            h.rx += padded(frame(VFS_WRITE_WINDOW, bytes([WINDOW_START | WINDOW_END | WINDOW_DMA, seq]) +
+                                 bytes(2) + total.to_bytes(2, "little") + bytes(2)))
+            h.link.pump()
+            session[0] = core.sector_session        # сеанс — после заголовка, как у прошивки
+            pending[:] = [window[i:i + 512].ljust(512, b"\0") for i in range(0, total, 512)]
+            h.tx.clear()
+            before = h.ticks
+            h.call("Vfs_Serve")
+            ticks += h.ticks - before
+            h.link.pump()
+            self.assertEqual(pending, [], "все блоки окна забраны")
+            self.assertEqual(h.frames(), [(VFS_WRITE_WINDOW, bytes([0, seq]) +
+                                           total.to_bytes(2, "little"))], "окно принято")
+            seq += 1
+            offset += total
+        h.call("Vfs_WriteFlush")            # остаток неполного окна, как при закрытии
+        self.assertEqual(bytes(h.appended), data)
+        self.assertEqual(core.sector_bad, 0)
+        self.assertEqual(core.sector_blocks, sum((n + 511) // 512 for n in (WINDOW, WINDOW, 700)))
+        self.ticks[f"запись {label} блоками DMA"] = ticks / len(data)
+
+        # Последний блок ушёл бы за #FFFF (в чужую страницу): отказ окна, а не порча памяти.
+        h.memory[h.symbol("VfsWindowActive")] = 0
+        h.memory[h.symbol("VfsExpectedSeq")] = seq
+        h.set_word("VfsWriteCount", 0x3F00)
+        h.rx += padded(frame(VFS_WRITE_WINDOW, bytes([WINDOW_START | WINDOW_END | WINDOW_DMA, seq]) +
+                             bytes(2) + (0x100).to_bytes(2, "little") + bytes(2)))
+        h.link.pump()
+        h.tx.clear()
+        before = h.ticks
+        h.call("Vfs_Serve")
+        self.assertLess(h.ticks - before, 200000, "отказ сразу, без ожидания блоков")
+        h.link.pump()
+        replies = h.frames()
+        self.assertEqual(len(replies), 1)
+        self.assertNotEqual(replies[0][1][0], 0, "окно отвергнуто")
+
+
+    def test_write_windows_raw_parts(self) -> None:
+        """Плагин SMB 0.5.20 и FTP 0.17 + ESP 0.1.134: окно записи — порциями сырого DMA наружу до
+        8 КиБ, без обратной посылки: на порцию один обмен и одно DMA на несколько секторов."""
+        for wmf, sym, name in self.PLUGINS:
+            with self.subTest(plugin=name):
+                self.check_raw_write(wmf, sym, name)
+
+    def check_raw_write(self, wmf: pathlib.Path, sym: pathlib.Path, label: str) -> None:
+        h = WindowHarness(wmf, sym)
+        h.call("ZiFi_Init")
+        data = random.Random(35).randbytes(self.SIZE)
+        for name in ("VfsWriteFailed", "VfsExpectedSeq", "VfsWindowActive"):
+            h.memory[h.symbol(name)] = 0
+        h.memory[h.symbol("VfsMode")] = 1
+        h.set_word("VfsWriteCount", 0)
+        ticks, offset, seq, parts = 0, 0, 0, 0
+        while offset < len(data):
+            total = min(WINDOW, len(data) - offset)
+            window = data[offset:offset + total]
+            h.link.offer_raw(window)
+            h.rx += padded(frame(VFS_WRITE_WINDOW, bytes([WINDOW_START | WINDOW_END | WINDOW_RAW, seq]) +
+                                 bytes(2) + total.to_bytes(2, "little") + bytes(2)))
+            h.link.pump()
+            h.tx.clear()
+            before = h.ticks
+            h.call("Vfs_Serve")
+            ticks += h.ticks - before
+            h.link.pump()
+            self.assertEqual(h.frames(), [(VFS_WRITE_WINDOW, bytes([0, seq]) +
+                                           total.to_bytes(2, "little"))], "окно принято")
+            parts += (total + 8191) // 8192
+            seq += 1
+            offset += total
+        h.call("Vfs_WriteFlush")
+        self.assertEqual(bytes(h.appended), data)
+        self.assertEqual(h.link.raw_parts, parts, "порция — не больше 8 КиБ, без повторов")
+        self.assertEqual(h.link.core.sector_blocks, 0, "очередь секторов не нужна")
+        self.ticks[f"запись {label} сырыми порциями"] = ticks / len(data)
+
+    def test_window_offset_replaces_seek(self) -> None:
+        """Плагин SMB 0.5.20 + ESP 0.1.134: смещение в файле — в самом окне (READ_WINDOW 8 байт,
+        WRITE_WINDOW с признаком OFFSET), SEEK перед окном не нужен."""
+        h = FilexWindowHarness(SMB_WMF, SMB_SYM, LinkCore(16384, 4096))
+        h.call("ZiFi_Init")
+        rng = random.Random(36)
+        # чтение режима 3: смещение из запроса
+        h.file = rng.randbytes(40000)
+        h.memory[h.symbol("VfsMode")] = 3
+        h.set_word("VfsRandomOffset", 0x55555, 4)
+        seq = h.memory[h.symbol("VfsReadSeq")]
+        h.set_request(bytes([seq]) + (8192).to_bytes(2, "little") + bytes([1]) +
+                      (12345).to_bytes(4, "little"))
+        h.tx.clear()
+        h.call("Vfs_ReadWindow")
+        h.link.pump()
+        got = b"".join(payload[6:] for command, payload in h.frames() if command == VFS_READ_MEDIA)
+        self.assertEqual(got, h.file[12345:12345 + 8192])
+        # позицию окна чтения плагин не двигает: каждое окно приносит свою
+        self.assertEqual(h.word32("VfsRandomOffset"), 12345)
+        # запись режима 3: сырое окно со смещением в заголовке — в конец файла через APPEND
+        for name in ("VfsWriteFailed", "VfsExpectedSeq", "VfsWindowActive"):
+            h.memory[h.symbol(name)] = 0
+        h.memory[h.symbol("VfsSizeKnown")] = 1
+        h.set_word("FileSize", 0x3000, 4)
+        h.set_word("VfsRandomOffset", 0x77777, 4)
+        window = rng.randbytes(15872)
+        h.link.offer_raw(window)
+        h.rx += padded(frame(VFS_WRITE_WINDOW,
+                             bytes([WINDOW_START | WINDOW_END | WINDOW_RAW | WINDOW_OFFSET, 0]) +
+                             bytes(2) + len(window).to_bytes(2, "little") + bytes(2) +
+                             (0x3000).to_bytes(4, "little")))
+        h.link.pump()
+        h.tx.clear()
+        h.call("Vfs_Serve")
+        h.link.pump()
+        self.assertEqual(h.frames(), [(VFS_WRITE_WINDOW, bytes([0, 0]) +
+                                       len(window).to_bytes(2, "little"))])
+        self.assertEqual(bytes(h.appended), window)
+        self.assertEqual(h.word32("VfsRandomOffset"), 0x3000 + len(window))
+        self.assertEqual(h.word32("FileSize"), 0x3000 + len(window))
+
+    def test_append_window_16k(self) -> None:
+        """Плагин SMB 0.5.21 + ESP 0.1.135: окно дописывания до 16 КиБ (признак APPEND) — с начала
+        страницы и только APPEND; не в конец файла — отказ без записи."""
+        h = FilexWindowHarness(SMB_WMF, SMB_SYM)
+        h.call("ZiFi_Init")
+        rng = random.Random(37)
+        for name in ("VfsWriteFailed", "VfsExpectedSeq", "VfsWindowActive"):
+            h.memory[h.symbol(name)] = 0
+        h.memory[h.symbol("VfsMode")] = 3
+        h.memory[h.symbol("VfsSizeKnown")] = 1
+        h.set_word("FileSize", 0x2000, 4)
+
+        def send(offset: int, data: bytes, seq: int) -> list:
+            h.link.offer_raw(data)
+            flags = WINDOW_START | WINDOW_END | WINDOW_RAW | WINDOW_OFFSET | WINDOW_APPEND
+            h.rx += padded(frame(VFS_WRITE_WINDOW, bytes([flags, seq]) + bytes(2) +
+                                 len(data).to_bytes(2, "little") + bytes(2) +
+                                 offset.to_bytes(4, "little")))
+            h.link.pump()
+            h.tx.clear()
+            h.call("Vfs_Serve")
+            h.link.pump()
+            return h.frames()
+
+        window = rng.randbytes(16384)
+        self.assertEqual(send(0x2000, window, 0),
+                         [(VFS_WRITE_WINDOW, bytes([0, 0]) + (16384).to_bytes(2, "little"))])
+        self.assertEqual(bytes(h.appended), window)
+        self.assertEqual(h.word32("FileSize"), 0x2000 + 16384)
+        self.assertEqual(h.filex_writes, [], "FILEX не звали")
+
+        replies = send(0x1000, rng.randbytes(16384), 1)        # не в конец — отказ
+        self.assertEqual(len(replies), 1)
+        self.assertNotEqual(replies[0][1][0], 0)
+        self.assertEqual(bytes(h.appended), window, "ничего не записано")
+
+    def test_random_window_at_eof_goes_through_append(self) -> None:
+        """Плагин SMB 0.5.19: окно позиционной записи (режим 3) ровно в конец файла — прямо APPEND
+        ядра WC (API 76), без FILEX WRITE_AT и его проверок; не в конце — по-прежнему FILEX.
+        Размер файла плагин ведёт сам: FENTRY при OPEN, рост после окна."""
+        h = FilexWindowHarness(SMB_WMF, SMB_SYM)
+        h.call("ZiFi_Init")
+        core = h.link.core
+        pending: list[bytes] = []
+        session = [0]
+        run_app = h._run_app
+
+        def service() -> None:
+            while pending and core.push_sector(pending[0], session[0]):
+                pending.pop(0)
+            run_app()
+
+        h._run_app = service
+        for name in ("VfsWriteFailed", "VfsExpectedSeq", "VfsWindowActive"):
+            h.memory[h.symbol(name)] = 0
+        h.memory[h.symbol("VfsMode")] = 3
+        h.memory[h.symbol("VfsSizeKnown")] = 1
+        size = 0x1000
+        h.set_word("FileSize", size, 4)
+        rng = random.Random(34)
+        seq = 0
+
+        def window(offset: int, data: bytes) -> None:
+            nonlocal seq
+            h.set_word("VfsRandomOffset", offset, 4)
+            h.rx += padded(frame(VFS_WRITE_WINDOW, bytes([WINDOW_START | WINDOW_END | WINDOW_DMA, seq]) +
+                                 bytes(2) + len(data).to_bytes(2, "little") + bytes(2)))
+            h.link.pump()
+            session[0] = core.sector_session
+            pending[:] = [data[i:i + 512].ljust(512, b"\0") for i in range(0, len(data), 512)]
+            h.tx.clear()
+            h.call("Vfs_Serve")
+            h.link.pump()
+            self.assertEqual(h.frames(), [(VFS_WRITE_WINDOW, bytes([0, seq]) +
+                                           len(data).to_bytes(2, "little"))], "окно принято")
+            seq += 1
+
+        first = rng.randbytes(15872)
+        window(size, first)                             # ровно в конец — APPEND
+        self.assertEqual(bytes(h.appended), first)
+        self.assertNotIn(FILEX_WRITE_AT, h.filex_ops)
+        size += len(first)
+        self.assertEqual(h.word32("FileSize"), size, "размер вырос")
+
+        inside = rng.randbytes(1024)
+        window(0x800, inside)                           # внутри файла — FILEX
+        self.assertEqual(h.filex_writes, [(0x800, inside)])
+        self.assertEqual(bytes(h.appended), first, "APPEND не трогали")
+        self.assertEqual(h.word32("FileSize"), size, "внутри файла размер прежний")
+
+        tail = rng.randbytes(700)
+        window(size, tail)                              # снова в конец — APPEND
+        self.assertEqual(bytes(h.appended), first + tail)
+        self.assertEqual(h.word32("FileSize"), size + len(tail))
+        self.assertEqual(len(h.filex_writes), 1)
+        self.assertEqual(h.memory[h.symbol("VfsSizeKnown")], 1)
+
+
+class FilexWindowHarness(WindowHarness):
+    """WindowHarness с FILEX WRITE_AT: запись по смещению запоминается."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.filex_writes: list[tuple[int, bytes]] = []
+
+    def filex(self, m) -> None:
+        block = m.hl
+        if self.memory[block + 2] == 1:                 # READ_AT: из self.file
+            offset = int.from_bytes(self.memory[block + 4:block + 8], "little")
+            buffer = self.word(block + 8)
+            chunk = self.file[offset:offset + self.word(block + 10)]
+            self.memory[buffer:buffer + len(chunk)] = chunk
+            self.memory[block + 24:block + 28] = len(chunk).to_bytes(4, "little")
+            self.memory[block + 28] = 0 if chunk else 1
+            m.a = self.memory[block + 28]
+            self.flags(zero=m.a == 0)
+            return
+        if self.memory[block + 2] != FILEX_WRITE_AT:
+            super().filex(m)
+            return
+        self.filex_ops.append(FILEX_WRITE_AT)
+        offset = int.from_bytes(self.memory[block + 4:block + 8], "little")
+        buffer = self.word(block + 8)
+        length = self.word(block + 10)
+        self.filex_writes.append((offset, bytes(self.memory[buffer:buffer + length])))
+        self.memory[block + 24:block + 28] = length.to_bytes(4, "little")
+        self.memory[block + 28] = 0
+        m.a = 0
+        self.flags(zero=True)
+
+    def word32(self, name: str) -> int:
+        address = self.symbol(name)
+        return int.from_bytes(self.memory[address:address + 4], "little")
 
 
 class EspApp:
@@ -1055,6 +1368,10 @@ class EspApp:
             return frame(RESP_ACK) + frame(RESP_WIFI_INI, bytes([1, 192, 168, 1, 77]))
         if command == CMD_NET_NTP:
             return frame(RESP_ACK) + frame(RESP_NET_NTP, self.ntp)
+        if command == CMD_APP_STOP:
+            return frame(RESP_APP_STOP, b"")     # ответ сразу, без ACK
+        if command == CMD_SYS_RESET:
+            return b""                          # ESP в перезапуске: ответа нет
         return frame(0xEE, b"unsupported")
 
 
@@ -1679,7 +1996,8 @@ class NtpPluginTest(unittest.TestCase):
         app = EspApp(ntp=b"20261001203045")
         h.app = app
         h.run(base.CODE, a=6)
-        self.assertEqual(app.commands, [CMD_PING, CMD_WIFI_INI, CMD_NET_NTP])
+        # NTP перезапускает ESP: старт WC — это старт системы (слово пользователя 12.11.2026)
+        self.assertEqual(app.commands, [CMD_SYS_RESET, CMD_PING, CMD_WIFI_INI, CMD_NET_NTP])
         self.assertEqual(app.ini, h.INI, "zifi.ini ушёл в ESP целиком")
         time = h.symbol("NtpTime")
         self.assertEqual(bytes(h.memory[time:time + 6]),
@@ -1695,6 +2013,47 @@ class NtpPluginTest(unittest.TestCase):
         h.link.die()
         h.run(base.CODE, a=6)
         self.assertEqual(h.calls, [], "без ESP плагин выходит, не трогая ни карту, ни часы")
+
+
+class VfsRefuseHarness(SpiHarness):
+    """Плагин с клавиатурой WC: WAITUP сразу, ANYK — клавиша нажата."""
+
+    FN_ANYK, FN_WAITUP = 0x2D, 0x2E
+
+    def handle_api(self) -> None:
+        m = self.machine
+        if m.a in (self.FN_ANYK, self.FN_WAITUP):
+            self.calls.append(m.a)
+            self.flags(zero=m.a == self.FN_WAITUP)
+            self.ret()
+            return
+        super().handle_api()
+
+
+class VfsRefuseTest(unittest.TestCase):
+    """FTP 0.16 и SMB: при включённом VDAC4 VFS — окно с причиной, к ESP ни одной команды
+    (сектора SD2 WC берёт у той же ESP, пока она ждала бы ответа файлового сервера)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        need(FTP_WMF, FTP_SYM, SMB_WMF, SMB_SYM)
+
+    def test_vfs_on_refuses_start(self) -> None:
+        for wmf, sym, name in ((FTP_WMF, FTP_SYM, b"FTP"), (SMB_WMF, SMB_SYM, b"SMB")):
+            with self.subTest(plugin=name):
+                h = VfsRefuseHarness(wmf, sym)
+                h.app = app = EspApp()
+                # VDAC4VFS.WMF в WC v1.11i: «JP #4FE8» вместо «LD HL,DR2» и переходник LD A,I
+                h.memory[0x501C:0x501F] = bytes([0xC3, 0xE8, 0x4F])
+                h.memory[0x4FE8:0x4FEA] = bytes([0xED, 0x57])
+                h.run(h.symbol("PLUGIN"))
+                self.assertEqual(app.commands, [], "ESP не трогали")
+                self.assertEqual(h.machine.a, 0, "панели не перечитывать")
+                window = h.prwow_windows[-1]
+                self.assertEqual((window[4], window[5], window[6]), (40, 9, 0x2F), "окно ошибки")
+                text = bytes(h.memory[h.symbol("UiVfsText"):h.symbol("UiVfsText") + 40])
+                self.assertIn(name + b" cannot start: VDAC4 VFS is on.", text)
+                self.assertIn(VfsRefuseHarness.FN_ANYK, h.calls, "ждёт клавишу")
 
 
 def current_byte_variant(case: type) -> type:

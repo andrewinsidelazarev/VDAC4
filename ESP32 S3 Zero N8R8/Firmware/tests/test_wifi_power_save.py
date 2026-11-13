@@ -55,7 +55,11 @@ class WifiPowerSaveTest(unittest.TestCase):
         self.assertIn("vfsBridge_.pendingSinceMs()", policy,
                       "файловые запросы к Z80 — тоже обмен")
         self.assertIn("< kWifiAwakeIdleMs", policy)
-        self.assertIn("bool awake = appAwake;", policy, "приложению — без срока")
+        # отметка обмена другой задачи бывает позже now: «в будущем» — не простой (0.1.139)
+        self.assertIn("const int32_t idle = static_cast<int32_t>(now - last);", policy)
+        self.assertIn("awake = idle < 0 ||", policy)
+        # приложению — без срока; клиенту консоли и порта 8268 — тоже (0.1.108)
+        self.assertIn("bool awake = appAwake || serviceClient;", policy, "приложению — без срока")
         self.assertIn("if (!awake && fileServerRunning)", policy)
 
     def test_network_loop_applies_the_policy(self) -> None:
@@ -71,15 +75,17 @@ class WifiPowerSaveTest(unittest.TestCase):
                       self.wcu_header)
 
     def test_hot_chip_forces_power_save(self) -> None:
-        # Кристалл горячее 75 °C — Wi-Fi спит при любой работе, назад — ниже 70 °C.
-        self.assertIn("constexpr int16_t kWifiHotTenths = 750;", self.main)
-        self.assertIn("constexpr int16_t kWifiCoolTenths = 700;", self.main)
+        # Кристалл горячее 85 °C — Wi-Fi спит при любой работе, назад — ниже 80 °C (0.1.136;
+        # прежде 75/70: в Еве кристалл рабочий 73–76 °C, и Wi-Fi засыпал посреди копии по SMB).
+        self.assertIn("constexpr int16_t kWifiHotTenths = 850;", self.main)
+        self.assertIn("constexpr int16_t kWifiCoolTenths = 800;", self.main)
         policy = function_body(self.main, "void Application::updateWifiPowerSave(")
         self.assertIn("moduleApp_.temperatureTenths()", policy)
         self.assertIn("!wifiHot_ && tenths > kWifiHotTenths", policy)
         self.assertIn("wifiHot_ && tenths < kWifiCoolTenths", policy)
-        hot = policy.index("if (wifiHot_) {")
-        self.assertLess(policy.index("bool awake = appAwake;"), hot)
+        # перегрев усыпляет радио при любой работе, кроме клиента служб (0.1.108)
+        hot = policy.index("if (wifiHot_ && !serviceClient) {")
+        self.assertLess(policy.index("bool awake = appAwake || serviceClient;"), hot)
         self.assertLess(hot, policy.index("WiFi.setSleep(!awake);"), "перегрев — последнее слово")
         self.assertIn("int16_t ModuleApp::temperatureTenths() const { return g_temperature; }",
                       self.modules)

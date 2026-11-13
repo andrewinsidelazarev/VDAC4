@@ -20,7 +20,7 @@ constexpr uint32_t kVfsWaitMs = 2000;
 class SdVolume : public FatVolumePort {
  public:
   const char* acquire() override {
-    session_ = new (storage_) Session(kVfsWaitMs);
+    session_ = new (storage_) Session(kVfsWaitMs, true);   // серию записи CMD25 не закрывать
     if (!session_->ok()) {
       drop();
       return kBusy;
@@ -61,7 +61,7 @@ bool shareReady() {
   if (!tang::ready() || heldByWc()) {
     return false;
   }
-  Session session(kQuickMs);
+  Session session(kQuickMs, true);
   return session.ok() && mount() == nullptr;
 }
 

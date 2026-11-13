@@ -308,6 +308,12 @@ class Harness:
         """Разобрать отправленное ESP: [5A][CMD][LEN_L][LEN_H][DATA][XOR]."""
         frames, data, index = [], bytes(self.tx), 0
         while index < len(data):
+            if data[index] == 0xA6:        # raw media (прошивка кладёт так порцию DMA): без суммы
+                command = data[index + 1]
+                length = data[index + 2] | data[index + 3] << 8
+                frames.append((command, data[index + 4:index + 4 + length]))
+                index += 4 + length
+                continue
             assert data[index] == 0x5A, "кадр должен начинаться с SYNC"
             command = data[index + 1]
             length = data[index + 2] | data[index + 3] << 8
@@ -407,7 +413,7 @@ class FtpExitRefreshTest(unittest.TestCase):
 
     def test_header_version(self) -> None:
         data = WMF.read_bytes()
-        self.assertEqual(data[165:197].rstrip(b" "), b"ZiFi FTP Server v0.15")
+        self.assertEqual(data[165:197].rstrip(b" "), b"ZiFi FTP Server v0.17")
         self.assertEqual(data[197], 3, "плагин меню F10")
 
     def test_write_requests_mark_disk_changed(self) -> None:
@@ -596,7 +602,8 @@ class FtpDatesTest(unittest.TestCase):
         h.run(h.symbol("Vfs_Open"))
         self.assertNotIn(FN_DELETE, h.calls, "режим 3 файл не трогает")
         self.assertNotIn(FN_MKFILE, h.calls)
-        self.assertEqual(h.frames(), [(VFS_OPEN, bytes([0, 3, 0xFF]))])
+        # байт возможностей окон — свой у сборки (FTP 0.17 для VDAC4: и быстрые пути SMB)
+        self.assertEqual(h.frames(), [(VFS_OPEN, bytes([0, h.symbol("VFS_CAP_WINDOWS"), 0xFF]))])
 
         h.tx.clear()
         request = (bytes([16, 0, 0, 0x04, 0]) + bytes(6) + le16(self.TIME) +

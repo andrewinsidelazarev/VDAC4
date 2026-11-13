@@ -86,6 +86,9 @@ class VfsBackend {
                               size_t& received) = 0;
   virtual bool writeFileWindow(size_t length, WindowSource source,
                                void* sourceContext) = 0;
+  // (0.1.135) Наибольшее окно дописывания в конец файла режима 3 (WRITE_AT ровно в физический
+  // конец); 0 — такого окна у источника нет, окна — прежние (кратные сектору окна FILEX).
+  virtual size_t appendWindowMax() const { return 0; }
   virtual bool extendFile(uint32_t length) = 0;
   virtual bool setFileSize(uint32_t size, uint32_t& actualSize) = 0;
   virtual bool closeFile(bool commit = true) = 0;

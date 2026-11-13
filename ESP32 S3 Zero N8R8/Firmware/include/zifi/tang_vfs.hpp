@@ -28,7 +28,8 @@ class FatVolumePort {
 class TangVfs : public VfsBackend {
  public:
   static constexpr uint32_t kSerial = 0x54414E47;   // «TANG»: у FatFs нет серийного номера тома
-  static constexpr size_t kBufferSize = 4096;
+  // 16 КиБ (0.1.137, было 4): FatFs отдаёт карте серии CMD25 до 32 блоков; буфер — в PSRAM.
+  static constexpr size_t kBufferSize = 16384;
 
   explicit TangVfs(FatVolumePort& port);
   ~TangVfs() override;

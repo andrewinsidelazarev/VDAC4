@@ -334,7 +334,9 @@ void VfsBridge::processRead() {
 void VfsBridge::processWrite() {
   VfsBackend& file = *active_;
   const size_t maxWindow = file.openMode() == 3
-                               ? VfsClient::kFilexTransferWindowSize
+                               ? (file.appendWindowMax() > VfsClient::kFilexTransferWindowSize
+                                      ? file.appendWindowMax()
+                                      : VfsClient::kFilexTransferWindowSize)
                                : VfsClient::kTransferWindowSize;
   const size_t pumpLimit = exchange_->request.operation == VfsOperation::kWriteAt
                                ? maxWindow

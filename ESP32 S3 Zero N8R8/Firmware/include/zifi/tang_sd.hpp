@@ -23,11 +23,15 @@ constexpr const char* kMountPoint = "/tangsd";
 // сменить ядро под открытым томом или переключить страницу ящика посреди чужой команды. Замок
 // рекурсивный (функции core_store зовут друг друга). Команды Z80 ждут его не дольше kQuickMs:
 // задача обмена отвечает сразу, а загрузка ядра держит замок десятки секунд.
+//
+// Серия записи CMD25 (0.1.138) остаётся открытой между записями шары TANG подряд. Внешний Session
+// (не вложенный в другой) её сначала закрывает: смена ядра, кэш ядер, ELF, карта у WC не должны
+// застать карту посреди серии. keepWrite — сеанс самой шары TANG (TangVfs): серию не трогает.
 constexpr uint32_t kQuickMs = 300;
 constexpr uint32_t kForever = 0xFFFFFFFFU;
 class Session {
  public:
-  explicit Session(uint32_t waitMs = kForever);
+  explicit Session(uint32_t waitMs = kForever, bool keepWrite = false);
   ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;

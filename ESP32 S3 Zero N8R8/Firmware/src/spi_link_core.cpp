@@ -174,9 +174,11 @@ bool SpiLinkCore::handleRequest(const uint8_t* request, uint8_t* response,
     // команда приложения, которую оно разрешило (setAppMediaRange): своё управление — перед данными
     const bool app = !resource && command != kAudioData && appMediaCommand(command) &&
                      length >= 3 && length <= 3 + kAppMediaPrefixMax;
-    const bool valid = resource || app || (command == kAudioData && length == 3);
+    // окно чтения SMB (0.1.131): своё управление — kVfsReadMediaPrefix байт перед данными
+    const bool vfs = command == kVfsReadMedia && length == 3 + kVfsReadMediaPrefix;
+    const bool valid = resource || app || vfs || (command == kAudioData && length == 3);
     const size_t size = valid ? readLe16(request + kHeaderSize + 1) : 0;
-    const size_t prefix = resource ? 4 : app ? length - 3 : 0;
+    const size_t prefix = resource ? 4 : app ? length - 3 : vfs ? kVfsReadMediaPrefix : 0;
     if (put.available && size != 0 && size <= kMediaMax &&
         ((size + 511u) & ~size_t(511u)) <= put.capacity &&
         fromZ80_.freeSpace() >= size + prefix + 4) {

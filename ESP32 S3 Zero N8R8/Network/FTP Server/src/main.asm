@@ -40,6 +40,14 @@ WC_GEDPL:
 WC_ESC:
         ld a,FN_ESC
         jp WC_API
+        IFDEF ZIFI_SPI
+WC_ANYK:                                 ; NZ — нажата любая клавиша
+        ld a,FN_ANYK
+        jp WC_API
+WC_WAITUP:                               ; ждать отпускания всех клавиш
+        ld a,FN_WAITUP
+        jp WC_API
+        ENDIF
 WC_LOAD512:
         ld a,FN_LOAD512
         jp WC_API

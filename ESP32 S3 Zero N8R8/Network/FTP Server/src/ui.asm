@@ -157,6 +157,55 @@ Ui_BuildIp:
         inc de
         jr .octet
 
+        IFDEF ZIFI_SPI
+; Отказ запуска: включён VDAC4 VFS (как у SMB). Своё окно — только причина и что сделать; полей
+; сервера нет, ESP не трогали. Закрывается любой клавишей (фон восстанавливает RRESB).
+Ui_VfsRefuse:
+        ld ix,VfsWindow
+        ld (ix+2),#FF                    ; центр текущего режима, как Ui_Open
+        ld (ix+3),#FF
+        ld (ix+8),0
+        ld (ix+9),0
+        call WC_PRWOW
+        ld ix,VfsWindow
+        ld hl,UiVfsText
+        ld de,#0101
+        call WC_TXTPR
+        call WC_WAITUP                   ; клавиша запуска плагина ещё может быть нажата
+.wait:
+        ei
+        halt
+        call WC_ESC
+        jr nz,.done
+        call WC_ANYK                     ; любая клавиша (KBSCN с обычной таблицей её не видит)
+        jr z,.wait
+.done:
+        call WC_WAITUP                   ; отпущена — WC её не примет за свою команду
+        ld ix,VfsWindow
+        jp WC_RRESB
+
+VfsWindow:
+        db #81                         ; тень и рамка стиля 1
+        db 0
+        db #FF,#FF                     ; X,Y: центр, см. Ui_VfsRefuse
+        db 40,9                        ; ширина и высота: 7 строк текста
+        db #2F                         ; окно ошибки: ярко-белые символы по красному
+        db 0
+        dw 0
+        db 0,0
+        dw UiHeader
+        dw 0
+        dw 0
+
+UiVfsText:                             ; #0E — строка по центру окна
+        db #0E,"FTP cannot start: VDAC4 VFS is on.",#0D
+        db #0E,"SD2 is the Tang microSD or the VFS",#0D
+        db #0E,"volume, both served by the ESP.",#0D,#0D
+        db #0E,"Turn it off: F10 - VDAC4 VFS,",#0D
+        db #0E,"then start FTP again.",#0D
+        db #0E,"Any key - return to WC",0
+        ENDIF
+
 ; Дескриптор окна формата Wild Commander. Текст не привязан к дескриптору:
 ; содержимое печатается отдельно через TXTPR, а RRESB восстанавливает фон.
 FtpWindow:

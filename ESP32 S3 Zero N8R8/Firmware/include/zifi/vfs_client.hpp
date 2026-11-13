@@ -44,6 +44,7 @@ class VfsClient : public VfsBackend {
   bool readFileWindow(size_t wanted, WindowSink sink, void* sinkContext,
                       size_t& received) override;
   bool writeFile(const uint8_t* data, size_t length);
+  size_t appendWindowMax() const override;
   bool writeFileWindow(size_t length, WindowSource source,
                        void* sourceContext) override;
   bool extendFile(uint32_t length) override;
@@ -85,8 +86,24 @@ class VfsClient : public VfsBackend {
   static constexpr uint8_t kCapabilityWriteWindow = 0x01;
   static constexpr uint8_t kCapabilityReadWindow = 0x02;
   static constexpr uint8_t kCapabilityExtend = 0x04;
+  // Плагин отдаёт окно чтения быстрым путём (raw media, kVfsReadMedia; плагин SMB 0.5.18+).
+  static constexpr uint8_t kCapabilityMediaRead = 0x08;
+  // Плагин забирает окно записи блоками очереди секторов канала (DMA; плагин SMB 0.5.18+).
+  static constexpr uint8_t kCapabilityDmaWrite = 0x10;
+  // (плагин SMB 0.5.20) Окно записи сырым DMA наружу (kWindowRaw, без обратной посылки) и
+  // абсолютное смещение в самом окне вместо SEEK перед каждым (kWindowOffset, READ_WINDOW 8 байт).
+  static constexpr uint8_t kCapabilityRawWrite = 0x20;
+  static constexpr uint8_t kCapabilityWindowOffset = 0x40;
+  // (плагин SMB 0.5.21) Окно дописывания в конец до 16 КиБ: данные с начала страницы, только
+  // APPEND (kWindowAppend) — запрос Windows в 64 КиБ — 4 вызова APPEND вместо 5.
+  static constexpr uint8_t kCapabilityAppend16k = 0x80;
   static constexpr uint8_t kWindowStart = 0x01;
   static constexpr uint8_t kWindowEnd = 0x02;
+  // Окно записи без данных в кадре: всё окно — блоками очереди секторов (kCapabilityDmaWrite).
+  static constexpr uint8_t kWindowDma = 0x04;
+  static constexpr uint8_t kWindowRaw = 0x08;      // окно — порциями сырого DMA наружу
+  static constexpr uint8_t kWindowOffset = 0x10;   // за заголовком — смещение в файле LE32
+  static constexpr uint8_t kWindowAppend = 0x20;   // окно больше окна FILEX: в конец, APPEND
 
   bool request(uint8_t command, const uint8_t* data, uint16_t length,
                uint32_t timeoutMs, PacketView& response);
@@ -132,6 +149,14 @@ class VfsClient : public VfsBackend {
   bool randomOffsetValid_;
   bool writeActive_;
   bool writeFailed_;
+  // Замер файла (0.1.131): куда уходит время SMB на карте Evo — Z80 (FILEX/LOAD512 и карта SD: от
+  // запроса окна до первого кадра при чтении, от последнего кадра до итога при записи), передача
+  // окна по SPI, прочие запросы (SEEK…) и паузы между окнами (сеть, сервер SMB). Одна строка в
+  // журнал при закрытии файла — во время передачи flash не трогается.
+  // Сами счётчики — в vfs_client.cpp (статически): объект приложения на пределе памяти ядра 1.
+  void statsWindow(bool write, uint32_t t0, uint32_t tMid, uint32_t tEnd, size_t bytes, bool fast);
+  bool sendSeek(uint32_t offset);   // SEEK запросом (окно без своего смещения)
+  void statsReport();
   FatAllocationCache fatCache_;
   // Последние прочитанные сведения о томе: геометрия читается один раз, а
   // свободное место поддерживается точным через noteFileResized.

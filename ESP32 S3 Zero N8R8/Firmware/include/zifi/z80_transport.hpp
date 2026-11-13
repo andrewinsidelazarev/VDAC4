@@ -27,6 +27,9 @@ class Z80Transport {
 
   // Ждёт ответ Z80 на VFS-команду. Необязательная фоновая функция оставлена
   // для служебных вызовов; в двухъядерном STOR сеть работает независимо.
+  // То же, но годится любая из двух команд (окно чтения SMB: порции raw media и кадры итога).
+  bool waitForEither(uint8_t wanted, uint8_t alsoWanted, uint32_t timeoutMs, PacketView& packet,
+                     UnexpectedHandler unexpected, void* unexpectedContext);
   bool waitFor(uint8_t wanted, uint32_t timeoutMs, PacketView& packet,
                IdleHook idleHook = nullptr, void* idleContext = nullptr,
                UnexpectedHandler unexpected = nullptr,

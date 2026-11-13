@@ -84,6 +84,11 @@ class VfsBridge {
   // запросов, с ядра 1 или до запуска задач.
   void attachLocal(const char* root, VfsBackend* backend);
   bool isLocalPath(const char* path) const;
+  // Наибольшее окно дописывания в конец файла path (0.1.135): у карты Evo с плагином SMB 0.5.21 —
+  // 16 КиБ, у остальных 0 (окна FILEX).
+  size_t appendWindowFor(const char* path) const {
+    return isLocalPath(path) ? 0 : vfs_.appendWindowMax();
+  }
 
   // Интерфейс ядра 0. Допускается ровно один управляющий VFS-запрос.
   bool submit(VfsOperation operation, const char* path = nullptr,

@@ -96,6 +96,27 @@ bool IRAM_ATTR onEchoReady(void*, spi_slave_hd_event_t*, int* awoken) {
   return giveFromIsr(g_echoReady, awoken);
 }
 
+// --- окно наружу сырым DMA (0.1.134, SpiLinkCore::kFlagRawOut) ----------------------------------
+// Буфер — в PSRAM (драйвер ESP32-S3 водит DMA и оттуда: адрес и длина выровнены по 64, кэш он
+// сбрасывает сам), внутреннюю RAM окно не занимает. Состояние — здесь, а не в SpiLink: канал
+// один, а у Application нет запаса памяти ядра 1.
+constexpr size_t kRawWindowMax = 16384;
+constexpr size_t kRawAlign = 64;
+constexpr size_t kRawCapacity = kRawWindowMax + 512 + kRawAlign;
+uint8_t* g_rawBuffer = nullptr;
+std::atomic<uint32_t> g_rawGeneration{0};   // растёт с каждым выложенным окном
+std::atomic<uint32_t> g_rawLength{0};
+std::atomic<bool> g_rawTx{false};           // порция выставлена, Z80 её ещё не дочитала
+// Дальше — только задача обмена.
+uint32_t g_rawSeen = 0;
+uint32_t g_rawOffset = 0;
+uint32_t g_rawPart = 0;
+bool g_rawOut = false;
+bool g_rawTxError = false;
+bool g_rawHaveLast = false;
+uint8_t g_rawLastTid = 0;
+uint8_t g_rawLast[SpiLinkCore::kHeaderSize + 1];
+
 // Поставить транзакцию DMA в очередь драйвера и дождаться её загрузки в
 // контроллер. Описатель драйвер держит у себя до завершения транзакции.
 bool loadDma(spi_slave_chan_t channel, spi_slave_hd_data_t& transaction,
@@ -109,6 +130,80 @@ bool loadDma(spi_slave_chan_t channel, spi_slave_hd_data_t& transaction,
     return false;
   }
   xSemaphoreTake(ready, pdMS_TO_TICKS(kBulkLoadMs));
+  return true;
+}
+
+// Запрос порции окна наружу (kFlagRawOut, без данных). Обслуживается мимо ядра: ответ —
+// [маркер][номер][статус][0][0][сумма]; повтор того же номера получает тот же ответ без новой
+// загрузки DMA. false — запрос не такой: его разбирает ядро.
+bool handleRawAsk(SpiLinkCore& core, const uint8_t* request, uint8_t* response,
+                  size_t& length, bool& sendPending, spi_slave_hd_data_t& transaction,
+                  bool dmaReady) {
+  constexpr size_t kHead = SpiLinkCore::kHeaderSize;
+  if (request[0] != SpiLinkCore::kRequestMarker ||
+      (request[2] & SpiLinkCore::kFlagRawOut) == 0 ||
+      (request[2] & SpiLinkCore::kFlagNewSession) != 0 || request[3] != 0 ||
+      SpiLinkCore::checksum(request, kHead) != request[kHead]) {
+    g_rawHaveLast = false;
+    return false;
+  }
+  const uint8_t tid = request[1];
+  if (g_rawHaveLast && tid == g_rawLastTid) {
+    memcpy(response, g_rawLast, kHead + 1);
+  } else {
+    uint8_t status = 0;
+    const uint32_t generation = g_rawGeneration.load(std::memory_order_acquire);
+    if (generation != g_rawSeen) {
+      g_rawSeen = generation;
+      g_rawOffset = 0;
+      g_rawOut = false;
+      g_rawTxError = false;
+    }
+    const uint32_t total = g_rawLength.load(std::memory_order_relaxed);
+    if (g_rawOut) {
+      if (sendPending) {
+        status = SpiLinkCore::kStatusBulk;            // Z80 порцию ещё не дочитала
+      } else if (g_rawTxError) {
+        status = SpiLinkCore::kStatusEchoBad;         // порция ушла с ошибкой DMA: окно не дошло
+      } else {
+        g_rawOffset += g_rawPart;
+        g_rawOut = false;
+      }
+    }
+    if (status == 0 && !g_rawOut && total != 0 && g_rawOffset < total) {
+      if (!dmaReady || g_rawBuffer == nullptr) {
+        status = SpiLinkCore::kStatusBulkStale;
+      } else if (sendPending) {
+        // выставлен чужой блок (кадры, сектор): Z80 прочитает его и выбросит
+        status = SpiLinkCore::kStatusBulk | SpiLinkCore::kStatusBulkStale;
+      } else {
+        g_rawPart = total - g_rawOffset < SpiLinkCore::kMediaMax ? total - g_rawOffset
+                                                                  : SpiLinkCore::kMediaMax;
+        const size_t dmaLength = ((g_rawPart + 511u) & ~size_t(511u)) + kRawAlign;
+        g_rawTx.store(true, std::memory_order_release);
+        sendPending = loadDma(SPI_SLAVE_CHAN_TX, transaction, g_rawBuffer + g_rawOffset,
+                              dmaLength, g_bulkReady);
+        if (sendPending) {
+          g_rawOut = true;
+          status = SpiLinkCore::kStatusBulk;
+        } else {
+          g_rawTx.store(false, std::memory_order_release);
+          status = SpiLinkCore::kStatusBulkStale;
+        }
+      }
+    }
+    response[0] = SpiLinkCore::kResponseMarker;
+    response[1] = tid;
+    response[2] = status;
+    response[3] = 0;
+    response[4] = 0;
+    response[kHead] = SpiLinkCore::checksum(response, kHead);
+    memcpy(g_rawLast, response, kHead + 1);
+    g_rawLastTid = tid;
+    g_rawHaveLast = true;
+  }
+  length = kHead + 1;
+  core.forgetLastTurn();
   return true;
 }
 
@@ -537,9 +632,19 @@ void SpiLink::taskLoop() {
     spi_slave_hd_read_buffer(kHost, 0, request, sizeof(request));
     // Чтение блока Z80 завершает командой 08, обратную посылку — командой 07.
     spi_slave_hd_data_t* done = nullptr;
-    if (sendPending && spi_slave_hd_get_trans_res(kHost, SPI_SLAVE_CHAN_TX,
-                                                  &done, 0) == ESP_OK) {
-      sendPending = false;
+    if (sendPending) {
+      // ESP_ERR_INVALID_STATE — транзакция завершена с ошибкой DMA (из PSRAM — недогруз): тоже
+      // конец; порцию окна наружу она делает негодной (обратной посылки у неё нет).
+      const esp_err_t sent = spi_slave_hd_get_trans_res(kHost, SPI_SLAVE_CHAN_TX, &done, 0);
+      if (sent == ESP_OK || sent == ESP_ERR_INVALID_STATE) {
+        sendPending = false;
+        if (g_rawTx.load(std::memory_order_relaxed)) {
+          if (sent != ESP_OK) {
+            g_rawTxError = true;
+          }
+          g_rawTx.store(false, std::memory_order_release);
+        }
+      }
     }
     if (echoPending && spi_slave_hd_get_trans_res(kHost, SPI_SLAVE_CHAN_RX,
                                                   &done, 0) == ESP_OK) {
@@ -582,6 +687,16 @@ void SpiLink::taskLoop() {
     }
     size_t length = 0;
     taskStep_.store(kStepHandle, std::memory_order_relaxed);
+    if (handleRawAsk(core_, request, response, length, sendPending, sendTransaction,
+                     bulkBuffer_ != nullptr && dmaAction_ == 0)) {
+      bulkBusy_.store(sendPending || echoPending, std::memory_order_relaxed);
+      taskStep_.store(kStepWriteResponse, std::memory_order_relaxed);
+      spi_slave_hd_write_buffer(kHost, 4, response + 4, length - 4);
+      spi_slave_hd_write_buffer(kHost, 0, response, 4);
+      lastActivityMs_.store(millis(), std::memory_order_relaxed);
+      publishState();
+      continue;
+    }
     if (!core_.handleRequest(request, response, length, bulk, bulkBuffer_,
                              put)) {
       // Начало записи остаётся для журнала наладки: по нему видно, что именно
@@ -665,6 +780,24 @@ void SpiLink::taskLoop() {
     lastActivityMs_.store(millis(), std::memory_order_relaxed);
     publishState();
   }
+}
+
+uint8_t* SpiLink::rawOutBuffer(size_t& capacity) {
+  if (g_rawBuffer == nullptr && ready_ && bulkBuffer_ != nullptr) {
+    g_rawBuffer = static_cast<uint8_t*>(heap_caps_aligned_alloc(
+        kRawAlign, kRawCapacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
+  capacity = g_rawBuffer != nullptr ? kRawWindowMax : 0;
+  return g_rawBuffer;
+}
+
+bool SpiLink::rawOutBusy() const {
+  return g_rawTx.load(std::memory_order_acquire);
+}
+
+void SpiLink::offerRawOut(size_t length) {
+  g_rawLength.store(static_cast<uint32_t>(length), std::memory_order_relaxed);
+  g_rawGeneration.fetch_add(1, std::memory_order_release);
 }
 
 size_t SpiLink::read(uint8_t* output, size_t capacity) {

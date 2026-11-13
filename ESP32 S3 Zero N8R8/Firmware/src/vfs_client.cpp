@@ -1,6 +1,7 @@
 #include "zifi/vfs_client.hpp"
 
 #include "zifi/board.hpp"
+#include "zifi/bringup_log.hpp"
 
 #include <Arduino.h>
 
@@ -101,8 +102,77 @@ void VfsClient::handleUnexpected(void* context, const PacketView& packet) {
   }
 }
 
+namespace {
+// Замер файла SMB (vfs_client.hpp, statsWindow): вне объекта — у Application нет запаса памяти ядра 1.
+struct WindowStats {
+  uint32_t windows, fast, bytes, loadMs, linkMs, otherMs, otherN, gapMs;
+  uint32_t firstLoad, lastLoad, maxLoad, started, lastEnd;
+  bool write;
+};
+WindowStats stats_{};
+// SEEK отложен (kCapabilityWindowOffset): позиция уйдёт в следующем окне режима 3. Вне объекта —
+// у Application нет запаса памяти ядра 1.
+bool g_seekPending = false;
+}  // namespace
+
+void VfsClient::statsWindow(bool write, uint32_t t0, uint32_t tMid, uint32_t tEnd, size_t bytes,
+                            bool fast) {
+  if (stats_.windows == 0) {
+    stats_.started = t0;
+  } else {
+    stats_.gapMs += t0 - stats_.lastEnd;
+  }
+  stats_.write = write;
+  const uint32_t load = write ? tEnd - tMid : tMid - t0;
+  const uint32_t link = write ? tMid - t0 : tEnd - tMid;
+  if (stats_.windows == 0) {
+    stats_.firstLoad = load;
+  }
+  stats_.lastLoad = load;
+  if (load > stats_.maxLoad) {
+    stats_.maxLoad = load;
+  }
+  stats_.loadMs += load;
+  stats_.linkMs += link;
+  stats_.bytes += static_cast<uint32_t>(bytes);
+  ++stats_.windows;
+  if (fast) {
+    ++stats_.fast;               // быстрым путём (raw media / DMA блоками)
+  }
+  stats_.lastEnd = tEnd;
+}
+
+void VfsClient::statsReport() {
+#if ZIFI_HAS_SPI_LINK            // журнал наладки есть только у платы VDAC4
+  if (stats_.windows != 0) {
+    const uint32_t total = stats_.lastEnd - stats_.started;
+    // Две строки: запись журнала — 156 знаков, одной строкой хвост терялся (12.11.2026).
+    const char* kind = stats_.write ? "write" : "read";
+    bringupLog("zifi-vfs",
+               "%s: %u win (%u fast), %u KB in %u ms (%u KB/s); Z80+SD %u ms (first %u, last %u, max %u)",
+               kind, static_cast<unsigned>(stats_.windows), static_cast<unsigned>(stats_.fast),
+               static_cast<unsigned>(stats_.bytes >> 10), static_cast<unsigned>(total),
+               static_cast<unsigned>(total ? static_cast<uint64_t>(stats_.bytes) * 1000u / 1024u / total : 0),
+               static_cast<unsigned>(stats_.loadMs), static_cast<unsigned>(stats_.firstLoad),
+               static_cast<unsigned>(stats_.lastLoad), static_cast<unsigned>(stats_.maxLoad));
+    bringupLog("zifi-vfs", "%s: SPI %u ms, other requests %u in %u ms, between windows %u ms", kind,
+               static_cast<unsigned>(stats_.linkMs), static_cast<unsigned>(stats_.otherN),
+               static_cast<unsigned>(stats_.otherMs), static_cast<unsigned>(stats_.gapMs));
+  }
+#endif
+  stats_ = WindowStats{};
+}
+
+size_t VfsClient::appendWindowMax() const {
+  return ZIFI_HAS_SPI_LINK && (capabilities_ & kCapabilityAppend16k) != 0 ? kTransferWindowSize : 0;
+}
+
 bool VfsClient::request(uint8_t command, const uint8_t* data, uint16_t length,
                         uint32_t timeoutMs, PacketView& response) {
+  const uint32_t requestStarted = millis();
+  if (stats_.windows != 0) {
+    ++stats_.otherN;             // SEEK и прочее посреди файла: время — ниже
+  }
   setError("none");
   if (!transport_.send(command, data, length)) {
     setError("link-send-%02x", command);
@@ -110,8 +180,12 @@ bool VfsClient::request(uint8_t command, const uint8_t* data, uint16_t length,
   }
   // Сеть продолжает исполняться независимо на ядре 0, поэтому функция
   // фонового обслуживания, необходимая однокорному варианту, здесь не нужна.
-  if (!transport_.waitFor(command, timeoutMs, response, nullptr, nullptr,
-                          handleUnexpected, this)) {
+  const bool answered = transport_.waitFor(command, timeoutMs, response, nullptr, nullptr,
+                                          handleUnexpected, this);
+  if (stats_.windows != 0) {
+    stats_.otherMs += millis() - requestStarted;
+  }
+  if (!answered) {
     setError("timeout-%02x", command);
     return false;
   }
@@ -318,6 +392,7 @@ bool VfsClient::openFileRandom(const char* path) {
 }
 
 bool VfsClient::openFileMode(const char* path, uint8_t mode) {
+  statsReport();                 // прежний файл не закрывали — его замер здесь
   if (path == nullptr) {
     setError("open-path-null");
     return false;
@@ -384,6 +459,21 @@ bool VfsClient::seekFile(uint32_t offset) {
     lastStatus_ = 0x15;
     return false;
   }
+  if (ZIFI_HAS_SPI_LINK && (capabilities_ & kCapabilityWindowOffset) != 0) {
+    // (0.1.134) Позиция уходит в самом окне (READ_WINDOW, WRITE_WINDOW): запрос SEEK — ~5 мс на
+    // каждое окно (замер 12.11.2026: 2148 запросов, 11,5 с на 27 МБ). «Позицию задаём всегда»
+    // остаётся: она в каждом окне, а не через счётчики двух сторон.
+    randomOffset_ = offset;
+    randomOffsetValid_ = true;
+    g_seekPending = true;
+    lastStatus_ = 0;
+    return true;
+  }
+  return sendSeek(offset);
+}
+
+bool VfsClient::sendSeek(uint32_t offset) {
+  g_seekPending = false;
   // Пропуск SEEK был возможен, только пока обе стороны одинаково понимали, кто
   // двигает позицию файла: ESP прибавляла прочитанное к своему счётчику, а
   // плагин — к своему, вызовом Vfs_AddRandomCount. Стоит одной половине
@@ -478,10 +568,26 @@ bool VfsClient::readFileWindow(size_t wanted, WindowSink sink,
   }
 
   setError("none");
-  uint8_t payload[3];
+  // Быстрый путь (0.1.131, по слову пользователя «как в плеерах»): плагин, объявивший это в OPEN,
+  // отдаёт окно порциями raw media до 8 КиБ (kVfsReadMedia) — один обмен и один DMA на порцию,
+  // без суммы. Прежде — блоки по 512 байт с XOR, на каждый по два обмена SPI. 4-й байт запроса —
+  // просьба о быстром пути: старый плагин требует ровно 3 и получает их.
+  const bool media = ZIFI_HAS_SPI_LINK && (capabilities_ & kCapabilityMediaRead) != 0;
+  // (0.1.134) Режим 3 с kCapabilityWindowOffset: [seq][wanted][media][смещение LE32] — без SEEK.
+  const bool withOffset = ZIFI_HAS_SPI_LINK && openMode_ == 3 &&
+                          (capabilities_ & kCapabilityWindowOffset) != 0;
+  uint8_t payload[8];
   payload[0] = readSequence_;
   writeLe16(payload + 1, static_cast<uint16_t>(wanted));
-  if (!transport_.send(kVfsReadWindow, payload, sizeof(payload))) {
+  payload[3] = media ? 1 : 0;
+  writeLe32(payload + 4, randomOffset_);
+  if (withOffset) {
+    g_seekPending = false;
+  }
+  const uint32_t windowStarted = millis();
+  uint32_t firstFrame = 0;
+  bool mediaSeen = false;
+  if (!transport_.send(kVfsReadWindow, payload, withOffset ? 8 : media ? 4 : 3)) {
     setError("read-window-send");
     return false;
   }
@@ -491,35 +597,44 @@ bool VfsClient::readFileWindow(size_t wanted, WindowSink sink,
   uint16_t crc = 0xFFFF;
   while (true) {
     PacketView response;
-    if (!transport_.waitFor(kVfsReadWindow, kFragmentTimeoutMs, response,
-                            nullptr, nullptr, handleUnexpected, this)) {
+    if (!transport_.waitForEither(kVfsReadWindow, kVfsReadMedia, kFragmentTimeoutMs, response,
+                                  handleUnexpected, this)) {
       setError("read-window-timeout");
       return false;
     }
-    if (response.length == 1 && response.data[0] == 1) {
+    if (firstFrame == 0) {
+      firstFrame = millis();     // до него Z80 читала окно с карты (FILEX/LOAD512)
+    }
+    // Порция быстрого пути: [признаки][номер][смещение][длина окна] и данные, итога в ней нет
+    // (отказ и конец файла приходят обычным кадром kVfsReadWindow).
+    const bool mediaPart = response.command == kVfsReadMedia;
+    mediaSeen = mediaSeen || mediaPart;
+    const size_t header = mediaPart ? kVfsReadMediaPrefix : kReadWindowHeader;
+    if (!mediaPart && response.length == 1 && response.data[0] == 1) {
       lastStatus_ = 1;
       return true;
     }
-    if (response.length < 1 || response.data[0] != 0) {
+    if (!mediaPart && (response.length < 1 || response.data[0] != 0)) {
       lastStatus_ = response.length ? response.data[0] : 0xFF;
       setError("read-window-status-%u",
                response.length ? response.data[0] : 255);
       return false;
     }
-    if (response.length <= kReadWindowHeader) {
+    if (response.length <= header) {
       setError("read-window-len");
       return false;
     }
+    const uint8_t* fields = mediaPart ? response.data : response.data + 1;
 
-    const uint8_t flags = response.data[1];
+    const uint8_t flags = fields[0];
     if ((flags & static_cast<uint8_t>(~(kWindowStart | kWindowEnd))) != 0 ||
-        response.data[2] != sequence) {
+        fields[1] != sequence) {
       setError("read-window-header");
       return false;
     }
-    const uint16_t offset = readLe16(response.data + 3);
-    const uint16_t frameTotal = readLe16(response.data + 5);
-    const size_t part = response.length - kReadWindowHeader;
+    const uint16_t offset = readLe16(fields + 2);
+    const uint16_t frameTotal = readLe16(fields + 4);
+    const size_t part = response.length - header;
     const bool isStart = (flags & kWindowStart) != 0;
     const bool isEnd = (flags & kWindowEnd) != 0;
     if (isStart != (received == 0) || offset != received || frameTotal == 0 ||
@@ -535,15 +650,15 @@ bool VfsClient::readFileWindow(size_t wanted, WindowSink sink,
       setError("read-window-end");
       return false;
     }
-    if (!sink(sinkContext, response.data + kReadWindowHeader, part)) {
+    if (!sink(sinkContext, response.data + header, part)) {
       setError("read-window-sink");
       return false;
     }
     crc = crc16CcittFalseUpdate(
-        crc, response.data + kReadWindowHeader, part);
+        crc, response.data + header, part);
     received = next;
     if (isEnd) {
-      const uint16_t expected = readLe16(response.data + 7);
+      const uint16_t expected = mediaPart ? crc : readLe16(response.data + 7);
       // На плате VDAC4 каждый блок канала SPI проверен (сумма обмена, XOR
       // блока DMA), и плагины с DMA CRC16 окна не считают — Z80 он стоил бы
       // 86 тактов на байт. Поле окна прежнее; его сверяют стенды ПК (канал
@@ -557,6 +672,7 @@ bool VfsClient::readFileWindow(size_t wanted, WindowSink sink,
       if (openMode_ == 3 && randomOffsetValid_) {
         randomOffset_ += static_cast<uint32_t>(received);
       }
+      statsWindow(false, windowStarted, firstFrame, millis(), received, mediaSeen);
       return true;
     }
   }
@@ -819,7 +935,12 @@ bool VfsClient::writeFileWindow(size_t length, WindowSource source,
   if (writeFailed_) {
     return false;
   }
-  const size_t windowLimit = randomWrite ? kFilexTransferWindowSize
+  // Окно режима 3 больше окна FILEX — только дописывание в конец (сервер SMB шлёт такое лишь
+  // в физический конец файла; плагин проверяет это по своему размеру файла и пишет APPEND).
+  const bool appendWindow = randomWrite && length > kFilexTransferWindowSize;
+  const size_t windowLimit = randomWrite ? (appendWindowMax() > kFilexTransferWindowSize
+                                                ? appendWindowMax()
+                                                : kFilexTransferWindowSize)
                                          : kTransferWindowSize;
   if (length == 0 || length > windowLimit || source == nullptr) {
     setError("write-window-range");
@@ -861,6 +982,114 @@ bool VfsClient::writeFileWindow(size_t length, WindowSource source,
   const uint8_t sequence = writeSequence_;
   uint16_t crc = 0xFFFF;
   size_t offset = 0;
+  const uint32_t windowStarted = millis();
+  // Быстрый путь записи (0.1.131, по слову пользователя «как в плеерах»): окно уходит не кадрами по
+  // 54 байта за обмен, а блоками по 512 очереди секторов канала — плагин забирает их своим DMA прямо
+  // в страницу окна, как резидент VDAC4 VFS секторы SD2; байты окна Z80 не трогает. Целость — та же
+  // обратная посылка каждого блока. Позиционная запись (SMB, FILEX): окно лежит с #C020 и хвост
+  // последнего блока (нули) остаётся в странице лишь до 31 сектора. (0.1.140) Последовательная (FTP
+  // 0.17) — тоже: окно ложится с #C000 + накопленное до блока APPEND 16 КиБ; что последний блок DMA
+  // не выйдет за #FFFF, проверяет плагин (отказ окна, не порча памяти).
+  ByteLink& link = transport_.link();
+  // (0.1.134) Сырое окно: целиком в буфер канала и порциями до 8 КиБ одним DMA каждая, без
+  // обратной посылки (как звук плееров; по слову пользователя — без суммы). Прежде — блоки по 512
+  // через очередь секторов, на каждый обмен и обратная посылка: 28 % времени записи (12.11.2026).
+  size_t rawCapacity = 0;
+  const size_t fastLimit = appendWindow   ? appendWindowMax()
+                           : randomWrite  ? kFilexSectorWindowSize
+                                          : kTransferWindowSize;
+  uint8_t* raw = ZIFI_HAS_SPI_LINK && length <= fastLimit &&
+                         (capabilities_ & kCapabilityRawWrite) != 0
+                     ? link.rawOutBuffer(rawCapacity)
+                     : nullptr;
+  const bool rawWindow = raw != nullptr && length <= rawCapacity;
+  const bool withOffset = randomWrite && (capabilities_ & kCapabilityWindowOffset) != 0;
+  if (rawWindow) {
+    // Прежнее окно у DMA: Z80 его бросила (её отказ уже пришёл) — дать задаче обмена его снять.
+    const uint32_t busySince = millis();
+    while (link.rawOutBusy()) {
+      if (millis() - busySince >= kFragmentTimeoutMs) {
+        setError("write-raw-busy");
+        writeFailed_ = true;
+        return false;
+      }
+      delay(1);
+    }
+    if (source(sourceContext, 0, raw, length) != length) {
+      setError("write-window-source");
+      writeFailed_ = true;
+      return false;
+    }
+    link.offerRawOut(length);
+    fragment_[0] = kWindowStart | kWindowEnd | kWindowRaw | (withOffset ? kWindowOffset : 0) |
+                   (appendWindow ? kWindowAppend : 0);
+    fragment_[1] = sequence;
+    writeLe16(fragment_ + 2, 0);
+    writeLe16(fragment_ + 4, static_cast<uint16_t>(length));
+    writeLe16(fragment_ + 6, 0);         // CRC плата VDAC4 не проверяет
+    writeLe32(fragment_ + 8, randomOffset_);
+    if (!transport_.send(kVfsWriteWindow, fragment_,
+                         static_cast<uint16_t>(kWriteWindowHeader + (withOffset ? 4 : 0)))) {
+      link.offerRawOut(0);
+      setError("write-window-send");
+      writeFailed_ = true;
+      return false;
+    }
+    if (withOffset) {
+      g_seekPending = false;
+    }
+    offset = length;
+  }
+  const bool dma = !rawWindow && ZIFI_HAS_SPI_LINK && length <= fastLimit &&
+                   (capabilities_ & kCapabilityDmaWrite) != 0 && link.sectorsAvailable();
+  if (appendWindow && !rawWindow && !dma) {
+    setError("write-window-range");      // кадрами окно больше окна FILEX не уходит
+    writeFailed_ = true;
+    return false;
+  }
+  if (!rawWindow && g_seekPending && !(dma && withOffset)) {
+    // окно пойдёт без своего смещения: сначала SEEK, как прежде
+    if (!sendSeek(randomOffset_)) {
+      writeFailed_ = true;
+      return false;
+    }
+  }
+  if (dma) {
+    constexpr size_t kBlock = 512;
+    constexpr uint32_t kBlockQuietMs = 3000;   // Z80 не берёт блоки — как у службы VDISK
+    fragment_[0] = kWindowStart | kWindowEnd | kWindowDma | (withOffset ? kWindowOffset : 0) |
+                   (appendWindow ? kWindowAppend : 0);
+    fragment_[1] = sequence;
+    writeLe16(fragment_ + 2, 0);
+    writeLe16(fragment_ + 4, static_cast<uint16_t>(length));
+    writeLe16(fragment_ + 6, 0);         // CRC плата VDAC4 не проверяет: сверка — по блокам
+    writeLe32(fragment_ + 8, randomOffset_);
+    g_seekPending = false;
+    if (!transport_.send(kVfsWriteWindow, fragment_,
+                         static_cast<uint16_t>(kWriteWindowHeader + (withOffset ? 4 : 0)))) {
+      setError("write-window-send");
+      writeFailed_ = true;
+      return false;
+    }
+    // Сеанс — после заголовка: запрос Z80 с данными (ответ, другая программа) отменил бы серию.
+    const uint32_t session = link.sectorSession();
+    for (; offset < length; offset += kBlock) {
+      const size_t count = length - offset < kBlock ? length - offset : kBlock;
+      if (source(sourceContext, offset, fragment_, count) != count) {
+        link.failSectors(session);       // Z80 бросит серию сразу, без тайм-аута
+        setError("write-window-source");
+        writeFailed_ = true;
+        return false;
+      }
+      memset(fragment_ + count, 0, kBlock - count);
+      if (!link.pushSector(fragment_, session, kBlockQuietMs)) {
+        setError(link.sectorSession() != session ? "write-dma-cancelled" : "write-dma-quiet");
+        writeFailed_ = true;
+        return false;
+      }
+    }
+    offset = length;
+  }
   while (offset < length) {
     const size_t remaining = length - offset;
     const size_t count = remaining < kWriteWindowData
@@ -897,6 +1126,7 @@ bool VfsClient::writeFileWindow(size_t length, WindowSource source,
 
   // Все промежуточные кадры идут без ответа. Z80 подтверждает только целое
   // окно после проверки CRC и, для полных 16 КиБ, после завершения APPEND.
+  const uint32_t framesQueued = millis();   // дальше — хвост по SPI и запись Z80 на карту
   PacketView response;
   if (!transport_.waitFor(kVfsWriteWindow, kCloseTimeoutMs, response,
                           nullptr, nullptr, handleUnexpected, this) ||
@@ -912,6 +1142,7 @@ bool VfsClient::writeFileWindow(size_t length, WindowSource source,
   if (randomWrite && randomOffsetValid_) {
     randomOffset_ += static_cast<uint32_t>(length);
   }
+  statsWindow(true, windowStarted, framesQueued, millis(), length, dma || rawWindow);
   return true;
 }
 
@@ -1198,6 +1429,7 @@ bool VfsClient::setMetadata(const VfsMetadata& metadata,
 }
 
 bool VfsClient::closeFile(bool commit) {
+  statsReport();
   const bool wasWrite = writeActive_;
   if (wasWrite && commit && writeFailed_) {
     char saved[sizeof(lastError_)];

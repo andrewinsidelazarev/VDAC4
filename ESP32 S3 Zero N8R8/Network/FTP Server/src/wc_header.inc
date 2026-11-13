@@ -26,9 +26,9 @@
 
 .plugin_name
         IFDEF ZIFI_SPI
-        db "VDAC4 FTP Server v0.15"       ; сборка для SPI платы VDAC4
+        db "VDAC4 FTP Server v0.17"       ; сборка для SPI платы VDAC4
         ELSE
-        db "ZiFi FTP Server v0.15"
+        db "ZiFi FTP Server v0.17"
         ENDIF
         ds 32-($-.plugin_name),' '
         db #03                        ; запуск из меню плагинов

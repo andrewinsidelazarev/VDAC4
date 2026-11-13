@@ -71,6 +71,9 @@ class SpiLink : public ByteLink {
   uint32_t sectorSession() const override { return core_.sectorSession(); }
   bool pushSector(const uint8_t* data, uint32_t session, uint32_t timeoutMs) override;
   void failSectors(uint32_t session) override { core_.failSectors(session); }
+  uint8_t* rawOutBuffer(size_t& capacity) override;
+  bool rawOutBusy() const override;
+  void offerRawOut(size_t length) override;
 
   bool ready() const { return ready_; }
   SpiLinkCore::Stats stats() const { return core_.stats(); }

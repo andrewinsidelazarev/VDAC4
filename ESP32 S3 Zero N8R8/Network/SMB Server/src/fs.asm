@@ -632,4 +632,8 @@ DirEntryBuffer:  ds PATH_SIZE+9         ; запись каталога от FIN
 
 NumberTemp:      ds 4                   ; рабочая память десятичного вывода
 NumberDigits:    db 0
+        ; Буфер не нужен ни одной сборке SMB (в FTP он свой); в VDAC4 его 512 байт ушли под окно
+        ; записи DMA (0.5.18) — страница #8000 заполнена.
+        IFNDEF ZIFI_SPI_DMA
 FileIoBuffer:    ds IO_SIZE             ; единственный секторный буфер плагина
+        ENDIF

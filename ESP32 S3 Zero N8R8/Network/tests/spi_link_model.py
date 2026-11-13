@@ -33,6 +33,8 @@ STATUS_PUT_READY, STATUS_PUT_OK, STATUS_PUT_BAD, STATUS_PUT_CAPABLE = 0x10, 0x20
 BULK_OFF, BULK_FREE, BULK_LOADED, BULK_ECHOED = 0, 1, 2, 3
 # Секторы SD2 для резидента VDAC4 VFS (0.1.128): флаг запроса и секторов наперёд в очереди.
 FLAG_SECTOR, SECTOR_SLOTS = 0x20, 4
+# Окно наружу сырым DMA (0.1.134, SpiLink::handleRawAsk): флаг запроса и наибольшая порция.
+FLAG_RAWOUT, RAW_PART = 0x40, 8192
 
 CMD_WRBUF, CMD_RDBUF = 0x01, 0x02
 # Передача блоков через DMA ведомого: ведущий пишет, читает, завершает запись и чтение.
@@ -154,9 +156,11 @@ class LinkCore:
             first, last = getattr(self, "app_media", (1, 0))
             app = (not resource and command != 0x31 and first <= command <= last
                    and 3 <= length <= 3 + APP_MEDIA_PREFIX)
-            valid = resource or app or (command == 0x31 and length == 3)
+            vfs = command == 0x5F and length == 3 + 6        # окно чтения SMB (kVfsReadMedia, 0.1.131)
+            valid = resource or app or vfs or (command == 0x31 and length == 3)
             size = int.from_bytes(data[HEADER+1:HEADER+3],'little') if valid else 0
-            prefix = data[HEADER+3:HEADER+7] if resource else data[HEADER+3:HEADER+length] if app else b''
+            prefix = (data[HEADER+3:HEADER+7] if resource else data[HEADER+3:HEADER+length] if app else
+                      data[HEADER+3:HEADER+9] if vfs else b'')
             if put_available and 0 < size <= 8192 and self.from_capacity-len(self.from_z80) >= size+len(prefix)+4:
                 self.put_armed = True
                 self.put_media = True
@@ -380,6 +384,14 @@ class EspSide:
         self.put = True                 # прошивка принимает блоки от Z80
         self.put_data: bytes | None = None   # пришедший блок от Z80
         self.corrupt_puts = 0           # столько блоков от Z80 придут с ошибкой
+        # Окно наружу сырым DMA: выложенное окно и где Z80 в нём (как g_raw* в spi_link.cpp).
+        self.raw_data = b""
+        self.raw_generation = self.raw_seen = 0
+        self.raw_offset = self.raw_part = 0
+        self.raw_out = False
+        self.raw_last: bytes | None = None
+        self.raw_last_tid = -1
+        self.raw_parts = 0              # сколько порций выставлено
         self.rx = bytearray()           # приложение -> Z80 (ещё не в очереди)
         self.tx = bytearray()           # Z80 -> приложение
         self.requests_seen = 0
@@ -404,6 +416,51 @@ class EspSide:
 
     def publish_state(self) -> None:
         self.slave.buffer[STATE_ADDR:BUFFER_SIZE] = self.core.state_word()
+
+    def offer_raw(self, data: bytes) -> None:
+        """VfsClient выложил окно в буфер канала (ByteLink::offerRawOut)."""
+        self.raw_data = bytes(data)
+        self.raw_generation += 1
+
+    def _raw_ask(self, data: bytes) -> bytes | None:
+        """Запрос порции окна наружу — мимо ядра, как SpiLink handleRawAsk."""
+        if (data[0] != REQUEST or not data[2] & FLAG_RAWOUT or data[2] & FLAG_SESSION or
+                data[3] != 0 or checksum(data[:HEADER]) != data[HEADER]):
+            self.raw_last = None
+            return None
+        tid = data[1]
+        if self.raw_last is not None and tid == self.raw_last_tid:
+            return self.raw_last
+        status = 0
+        if self.raw_generation != self.raw_seen:
+            self.raw_seen = self.raw_generation
+            self.raw_offset = 0
+            self.raw_out = False
+        total = len(self.raw_data)
+        if self.raw_out:
+            if self.bulk_loaded:
+                status = STATUS_BULK
+            else:
+                self.raw_offset += self.raw_part
+                self.raw_out = False
+        if status == 0 and not self.raw_out and total and self.raw_offset < total:
+            if not self.bulk:
+                status = STATUS_BULK_STALE
+            elif self.bulk_loaded:
+                status = STATUS_BULK | STATUS_BULK_STALE
+            else:
+                self.raw_part = min(RAW_PART, total - self.raw_offset)
+                part = self.raw_data[self.raw_offset:self.raw_offset + self.raw_part]
+                self.slave.dma_tx = part.ljust((len(part) + 511) // 512 * 512, b"\0") + bytes(64)
+                self.bulk_loaded = True
+                self.raw_out = True
+                self.raw_parts += 1
+                status = STATUS_BULK
+        response = bytes([RESPONSE, tid, status, 0, 0])
+        response += bytes([checksum(response)])
+        self.raw_last, self.raw_last_tid = response, tid
+        self.core.last_tid = None       # обмен мимо ядра (SpiLinkCore::forgetLastTurn)
+        return response
 
     def die(self) -> None:
         """ESP сброшена: буфер обнулён, отвечать некому."""
@@ -476,6 +533,12 @@ class EspSide:
                 state = BULK_LOADED
             else:
                 state = BULK_ECHOED if self.echo_good else BULK_FREE
+        raw = self._raw_ask(bytes(self.slave.buffer[:TURN_SIZE]))
+        if raw is not None:
+            self.slave.buffer[4:len(raw)] = raw[4:]
+            self.slave.buffer[0:4] = raw[:4]
+            self.pump()
+            return
         response = self.core.handle_request(bytes(self.slave.buffer[:TURN_SIZE]), state,
                                             put_available=self.bulk and self.put,
                                             put_received=self.put_data)
