@@ -16,16 +16,6 @@
 namespace zifi {
 namespace {
 
-// Сигнал нужен после любого перезапуска, кроме программного: плагины FTP и SMB
-// перезапускают ESP при каждом старте, и там он мешал бы. Причину не
-// перебираем: при включении от блока питания Evo чип может стартовать и через
-// сброс по просадке питания или сторожевому таймеру загрузчика, а после сбоя
-// прошивки сигнал заодно даёт о нём знать.
-bool bootChimeWanted() {
-  const esp_reset_reason_t reason = esp_reset_reason();
-  return reason != ESP_RST_SW && reason != ESP_RST_DEEPSLEEP;
-}
-
 }  // namespace
 
 void* AudioApp::coverAlloc(size_t size) {
@@ -60,7 +50,7 @@ void AudioApp::begin() {
     bringupLog("zifi-audio", "I2S is not started: the board has no power");
     waitsForPower_ = true;
   } else {
-    player_.begin(host_.psram(), bootChimeWanted());
+    player_.begin(host_.psram());
   }
 }
 
@@ -72,7 +62,7 @@ void AudioApp::pollNetworkCore(uint32_t now) {
   if (probeBoardState() != BoardState::kUnpowered) {
     waitsForPower_ = false;
     bringupLog("zifi-audio", "the board got power: starting I2S");
-    player_.begin(host_.psram(), false);
+    player_.begin(host_.psram());
   }
 }
 

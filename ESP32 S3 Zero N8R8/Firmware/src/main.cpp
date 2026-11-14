@@ -232,6 +232,7 @@ class Application : private AppHost {
   void updateWifiPowerSave(bool fileServerRunning, bool appAwake, uint32_t now);
   void processNetworkRequest();
   void processWifiConnect();
+  void beginSavedWifi();
   void processWifiIni();
   void processFtpStart();
   void processFtpStop();
@@ -572,6 +573,15 @@ void Application::begin() {
   }
 }
 
+// Подключиться к сети из сохранённого WIFI_INI (при запуске прошивки).
+void Application::beginSavedWifi() {
+  const char* password = config_.password();
+  WiFi.begin(config_.ssid(), password);
+  snprintf(activeSsid_, sizeof(activeSsid_), "%s", config_.ssid());
+  snprintf(activePassword_, sizeof(activePassword_), "%s", password);
+  wifiBeganMs_ = millis() | 1;
+}
+
 void Application::networkTaskEntry(void* context) {
   static_cast<Application*>(context)->networkTaskLoop();
 }
@@ -758,11 +768,7 @@ void Application::networkTaskLoop() {
   WiFi.onEvent([](arduino_event_id_t, arduino_event_info_t info) { netWifiDropped(info.wifi_sta_disconnected.reason); },
                ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   if (config_.ssid()[0] != 0) {
-    const char* password = config_.password();
-    WiFi.begin(config_.ssid(), password);
-    snprintf(activeSsid_, sizeof(activeSsid_), "%s", config_.ssid());
-    snprintf(activePassword_, sizeof(activePassword_), "%s", password);
-    wifiBeganMs_ = millis() | 1;
+    beginSavedWifi();
   }
   diagnosticLogEvent("NET task-start wifi_status=%d",
                      static_cast<int>(WiFi.status()));

@@ -23,8 +23,9 @@ constexpr uint32_t kTaskStackBytes = 8192;
 constexpr UBaseType_t kTaskPriority = 1;
 constexpr BaseType_t kTaskCore = 0;
 // Проверки после запуска идут по порядку: выводы I2S, самопроверка SPI, печать
-// постоянного журнала. К этому времени прошивка уже запустила звук и цикл
-// протокола; I2S, если он ещё не готов, ждём до kPadsGiveUpMs.
+// постоянного журнала (она ждёт тишины — см. kCheckStoredLog ниже). К этому
+// времени прошивка уже запустила звук и цикл протокола; I2S, если он ещё не
+// готов, ждём до kPadsGiveUpMs.
 constexpr uint32_t kChecksStartMs = 2500;
 constexpr uint32_t kPadsGiveUpMs = 10000;
 // Счётчики линий пишутся в журнал раз в секунду, пока меняются. Постоянный
@@ -155,7 +156,14 @@ void ledTask(void* context) {
       } else if (check == kCheckSelfTest) {
         link->runSelfTest();
         check = kCheckStoredLog;
-      } else {
+      } else if (owner->audio == nullptr || !owner->audio->sounding()) {
+        // Печать журнала — только в тишине (0.1.143, 14.11.2026). Его снимок сначала
+        // сбрасывает в LittleFS всё, что накопилось с запуска, а запись во flash
+        // останавливает кэш обоих ядер на десятки и сотни миллисекунд — дольше
+        // запаса I2S (87 мс). Проверки начинаются через 2,5 с, и сброс приходился
+        // на последний тон сигнала при включении (2,6–3,1 с от начала звука):
+        // пользователь слышал его с запинками. Свой сброс журнала сетевой цикл на
+        // время звука так же откладывает (blocksFlashWrites).
         bringupPrintStoredLog();
         check = kChecksDone;
       }

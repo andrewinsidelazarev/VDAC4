@@ -374,7 +374,7 @@ AudioPlayer::AudioPlayer()
       toneMaxGapUs_(0),
       toneLastUs_(0) {}
 
-bool AudioPlayer::begin(bool usePsram, bool playChime) {
+bool AudioPlayer::begin(bool usePsram) {
   if (task_ != nullptr) {
     return ready_;
   }
@@ -413,22 +413,9 @@ bool AudioPlayer::begin(bool usePsram, bool playChime) {
     return false;
   }
   xSemaphoreTake(opened_, pdMS_TO_TICKS(kStartTimeoutMs));
-  if (ready_ && playChime) {
-    // Левый канал, правый, затем оба: разводка каналов и сам ЦАП проверяются
-    // на слух после включения, ещё без единой программы на Spectrum. Сначала
-    // пауза: усилитель и монитор просыпаются позже, чем запускается ESP.
-    static constexpr ToneStep kChime[kMaxToneSteps] = {
-        {0, 0, 440, 1500},
-        {kChannelLeft, 128, 660, 400},
-        {0, 0, 440, 150},
-        {kChannelRight, 128, 880, 400},
-        {0, 0, 440, 150},
-        {kChannelBoth, 128, 1320, 500},
-    };
-    sendTone(kChime, kMaxToneSteps);
-  }
-  bringupLog(kTag, "I2S %s, boot chime %s", ready_ ? "ready" : "FAILED",
-             ready_ && playChime ? "queued" : "skipped");
+  // Сигнала при включении (три тона, до 0.1.144) нет: пользователь велел его убрать
+  // (14.11.2026) — последний тон на плате шёл с запинками.
+  bringupLog(kTag, "I2S %s", ready_ ? "ready" : "FAILED");
   return ready_;
 }
 
