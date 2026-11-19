@@ -8,6 +8,7 @@
 #define JSON_MAX (24u * 1024u)             /* ответ поиска на 5 записей — ~8 КБ */
 #define OPEN_MS 8000
 #define READ_MS 4000
+#define PICTURE_TRIES 3                    /* картинка оборвалась — скачать заново (1.50) */
 #define NAME_MAX 96                        /* знаков имени исполнителя для сверки */
 
 /* --- текст ------------------------------------------------------------------------- */
@@ -230,13 +231,18 @@ static int net_ready(const zm_core_t* core) {
 }
 
 /* Тело ответа целиком в память (растёт до max). NULL — обрыв, пусто, отмена. */
+/* Тело ответа целиком. Короче Content-Length — обрыв, а не конец (1.50): ядро отдаёт обрыв
+ * соединения как конец потока. 19.11.2026 с флешкой в ESP аппаратному AES не хватило внутренней
+ * памяти («esp-aes: Failed to allocate memory»), TLS оборвался на 8 КБ картинки из 70, и обрезанный
+ * JPEG ушёл декодеру (код 202 — данные кончились раньше картинки). Обрыв — NULL и *cut = 1. */
 static uint8_t* read_body(const zm_core_t* core, void* stream, size_t max, size_t* size,
-                          const volatile int* cancel) {
+                          const volatile int* cancel, int* cut) {
   size_t capacity = 16384;
+  size_t declared = 0;                     /* Content-Length; 0 — сервер длину не назвал */
+  *cut = 0;
   const char* length = core->net_header != NULL ? core->net_header(stream, "Content-Length") : NULL;
   if (length != NULL) {
     /* sscanf ядро модулям не даёт */
-    size_t declared = 0;
     while (*length == ' ') ++length;
     for (; *length >= '0' && *length <= '9' && declared <= max; ++length) {
       declared = declared * 10 + (size_t)(*length - '0');
@@ -248,6 +254,7 @@ static uint8_t* read_body(const zm_core_t* core, void* stream, size_t max, size_
   size_t used = 0;
   int idle = 0;
   while (data != NULL && !*cancel) {
+    if (declared > 0 && used >= declared) break;   /* всё, что сервер назвал, — пришло */
     if (used + 1 >= capacity) {
       if (capacity >= max) break;
       const size_t grown = capacity * 2 < max ? capacity * 2 : max;
@@ -269,6 +276,12 @@ static uint8_t* read_body(const zm_core_t* core, void* stream, size_t max, size_
     core->free(data);
     return NULL;
   }
+  if (data != NULL && used < declared) {
+    core->log("player: online cover: answer cut at %u of %u bytes", (unsigned)used, (unsigned)declared);
+    core->free(data);
+    *cut = 1;
+    return NULL;
+  }
   if (data != NULL) data[used] = 0;
   *size = used;
   return data;
@@ -288,7 +301,8 @@ uint8_t* online_cover_fetch(const zm_core_t* core, const char* artist, const cha
     return NULL;
   }
   size_t json_size = 0;
-  char* json = (char*)read_body(core, stream, JSON_MAX, &json_size, cancel);
+  int cut = 0;
+  char* json = (char*)read_body(core, stream, JSON_MAX, &json_size, cancel, &cut);
   core->net_close(stream);
   if (json == NULL) {
     core->log("player: online cover: no search answer");
@@ -300,14 +314,23 @@ uint8_t* online_cover_fetch(const zm_core_t* core, const char* artist, const cha
     core->log("player: online cover: not found (%u ms)", (unsigned)(core->millis() - started));
     return NULL;
   }
-  stream = core->net_open(url, NULL, OPEN_MS, &status);
-  if (stream == NULL) {
-    core->log("player: online cover: picture failed (HTTP %d)", status);
+  size_t picture_size = 0;
+  uint8_t* picture = NULL;
+  cut = 1;
+  for (int tries = 0; cut && tries < PICTURE_TRIES && !*cancel; ++tries) {
+    stream = core->net_open(url, NULL, OPEN_MS, &status);
+    if (stream == NULL) {
+      core->log("player: online cover: picture failed (HTTP %d)", status);
+      return NULL;
+    }
+    picture = read_body(core, stream, ONLINE_COVER_MAX, &picture_size, cancel, &cut);
+    core->net_close(stream);
+  }
+  if (picture == NULL && cut) {
+    core->log("player: online cover: picture cut %d times (%u ms)", PICTURE_TRIES,
+              (unsigned)(core->millis() - started));
     return NULL;
   }
-  size_t picture_size = 0;
-  uint8_t* picture = read_body(core, stream, ONLINE_COVER_MAX, &picture_size, cancel);
-  core->net_close(stream);
   if (picture != NULL && (picture_size < 4 || picture[0] != 0xFF || picture[1] != 0xD8)) {
     core->free(picture);
     picture = NULL;

@@ -10,6 +10,9 @@
 #if ZIFI_HAS_SPI_LINK
 #include "zifi/tang_sd.hpp"
 #endif
+#if ZIFI_HAS_USB_DRIVE
+#include "zifi/usb_drive.hpp"
+#endif
 
 // Плата VDAC4 — с каналом к Tang: без источника TANG том пуст, а INFO отвечает «не готов»
 #if defined(ZIFI_BOARD_VDAC4) && ZIFI_BOARD_VDAC4 && !ZIFI_HAS_SPI_LINK
@@ -25,6 +28,9 @@ namespace {
 constexpr uint32_t kSectorQuietMs = 3000;
 // Серия дольше — в журнал (обычно 16 секторов — десятки мс); брошенная и с отказом — всегда.
 constexpr uint32_t kSlowSeriesMs = 250;
+// Том USB Flash: столько тишины после записи сектора — и файл, в который писали, дописывается
+// (закрыт, время поставлено, хвост последнего сектора снят): WC кончил копировать.
+constexpr uint32_t kFlushQuietMs = 1000;
 
 void put32(uint8_t* p, uint32_t v) {
   p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
@@ -33,16 +39,24 @@ uint32_t get32(const uint8_t* p) { return p[0] | (uint32_t)p[1] << 8 | (uint32_t
 
 struct State {
   vdisk::Volume volume;
+  vdisk::Volume usbVolume;       // режим 2: флешка ESP с записью (0.1.148)
 #if ZIFI_HAS_SPI_LINK
   vdisk_sources::TangSource tang;
 #endif
 #if ZIFI_HAS_USB_DRIVE
   vdisk_sources::UsbSource usb;
+  vdisk_sources::UsbSource usbWritable;   // свой открытый файл: не мешает чтению тома VFS
 #endif
   bool configured = false;
   bool raw = false;              // режим 1: SD2 — сама карта Tang
+  bool usbMode = false;          // режим 2: SD2 — том флешки с записью
+  bool usbDirty = false;         // в том флешки писали, файл не дописан
+  uint32_t lastWriteMs = 0;
+  uint8_t seriesStatus = 0;                 // серия WRITE (0.1.150): первый отказ с её начала
   uint32_t lba = UINT32_MAX;     // собранный сектор
   uint8_t sector[vdisk::kSectorSize];
+  uint8_t mode() const { return raw ? 1 : usbMode ? 2 : 0; }
+  vdisk::Volume& active() { return usbMode ? usbVolume : volume; }
   void setup() {
     if (configured) return;
     vdisk::Source* sources[] = {
@@ -54,30 +68,44 @@ struct State {
 #endif
         nullptr};
     volume.configure(sources, sizeof sources / sizeof sources[0] - 1);
+#if ZIFI_HAS_USB_DRIVE
+    usbVolume.configureWritable(&usbWritable);
+#endif
     configured = true;
   }
-  uint8_t flags(bool dma) const {
-    return (raw ? (kFlagReady | kFlagRaw) : volume.flags()) | kFlagReadN | (dma ? kFlagReadDma : 0);
+  uint8_t flags(bool dma) {
+    const uint8_t base = raw ? (kFlagReady | kFlagRaw) : usbMode ? (usbVolume.flags() | kFlagUsb) : volume.flags();
+    return base | kFlagReadN | kFlagWriteN | (dma ? kFlagReadDma : 0);
   }
-  uint32_t sectors() const {
+  uint32_t sectors() {
 #if ZIFI_HAS_SPI_LINK
     if (raw) return tang_sd::rawSectors();
 #endif
-    return volume.sectorCount();
+    return active().sectorCount();
   }
   bool readSector(uint32_t at, uint8_t* out) {
 #if ZIFI_HAS_SPI_LINK
     if (raw) return tang_sd::rawRead(at, out);
 #endif
-    return volume.read(at, out);
+    return active().read(at, out);
   }
   // Режим 0 после 1: карта могла измениться — дерево тома собрать заново
   void leaveRaw() {
 #if ZIFI_HAS_SPI_LINK
-    tang_sd::releaseFromWc();
+    if (raw) tang_sd::releaseFromWc();
 #endif
     raw = false;
     volume.reset();
+    lba = UINT32_MAX;
+  }
+  // Уход из режима 2: дописать файл; следующий вход соберёт том флешки заново
+  void leaveUsb() {
+    if (usbMode) {
+      usbVolume.flush();
+      usbVolume.reset();
+    }
+    usbMode = false;
+    usbDirty = false;
     lba = UINT32_MAX;
   }
 };
@@ -94,7 +122,15 @@ bool rawMode() { return state().raw; }
 bool volumeFile(uint32_t cluster, vdisk::Source** source, std::vector<char>& where, uint64_t* size) {
   State& s = state();
   s.setup();
-  return !s.raw && s.volume.fileAt(cluster, source, where, size);
+  return !s.raw && s.active().fileAt(cluster, source, where, size);
+}
+
+void poll(uint32_t now) {
+  State& s = state();
+  if (s.usbMode && s.usbDirty && now - s.lastWriteMs >= kFlushQuietMs) {
+    s.usbVolume.flush();
+    s.usbDirty = false;
+  }
 }
 
 void handle(const PacketView& packet, Z80Transport& transport) {
@@ -105,7 +141,7 @@ void handle(const PacketView& packet, Z80Transport& transport) {
     case kVdiskInfo: {
       reply[0] = kOk;
       reply[1] = s.flags(transport.link().sectorsAvailable());
-      put32(reply + 2, s.volume.generation());
+      put32(reply + 2, s.active().generation());
       put32(reply + 6, s.sectors());
       reply[10] = static_cast<uint8_t>(s.volume.sourceCount());
       transport.send(kRespVdiskInfo, reply, 11);
@@ -116,7 +152,7 @@ void handle(const PacketView& packet, Z80Transport& transport) {
       reply[0] = kBadRequest;
       // 8-й байт — режим, в котором драйвер ждёт сектор (SD2 = карта Tang шлёт 1): ESP после
       // перезагрузки — снова в режиме 0, и WC получит отказ, а не сектор чужого тома
-      if ((packet.length == 8 && packet.data[7] != (s.raw ? 1 : 0))) {
+      if ((packet.length == 8 && packet.data[7] != s.mode())) {
         reply[0] = kWrongMode;
       } else if (packet.length == 7 || packet.length == 8) {
         const uint32_t lba = get32(packet.data);
@@ -150,7 +186,7 @@ void handle(const PacketView& packet, Z80Transport& transport) {
         const uint32_t lba = get32(packet.data);
         const uint8_t count = packet.data[4];
         status = count == 0 ? kBadRequest
-                 : (packet.data[5] & ~kReadNDma) != (s.raw ? 1 : 0) ? kWrongMode
+                 : (packet.data[5] & ~kReadNDma) != s.mode() ? kWrongMode
                  : link.sectorsAvailable() ? kOk : kSourceFailed;
         // для журнала: сколько шла серия и сколько из этого — чтение карты (с ожиданием моста)
         const uint32_t started = millis();
@@ -191,7 +227,7 @@ void handle(const PacketView& packet, Z80Transport& transport) {
       if (packet.length == 6 && packet.data[4] != 0) {
         const uint32_t lba = get32(packet.data);
         const uint8_t count = packet.data[4];
-        status = packet.data[5] != (s.raw ? 1 : 0) ? kWrongMode : kOk;
+        status = packet.data[5] != s.mode() ? kWrongMode : kOk;
         for (uint8_t i = 0; status == kOk && i < count; ++i) {
           s.lba = UINT32_MAX;
           if (!s.readSector(lba + i, s.sector)) {
@@ -212,35 +248,72 @@ void handle(const PacketView& packet, Z80Transport& transport) {
       break;
     }
     case kVdiskWrite: {
-      reply[0] = kBadRequest;
-      if (packet.length == 4 + vdisk::kSectorSize) {
+      // [lba][сектор] — ответ на каждый; [lba][флаги][сектор] — серия (0.1.150, kFlagWriteN)
+      const bool series = packet.length == 5 + vdisk::kSectorSize;
+      const uint8_t flags = series ? packet.data[4] : 0;
+      if (series && (flags & kWriteFirst)) s.seriesStatus = kOk;
+      uint8_t status = kBadRequest;
+      if (series && s.seriesStatus != kOk) {
+        status = s.seriesStatus;               // серия уже с отказом: дальше не писать
+      } else if (packet.length == 4 + vdisk::kSectorSize || series) {
         const uint32_t lba = get32(packet.data);
-        if (!s.raw) {
-          reply[0] = kReadOnly;
+        const uint8_t* sector = packet.data + (series ? 5 : 4);
+        if (s.usbMode) {
+          // том флешки: сектор FAT32 от WC — в операции над файлами флешки (vdisk_rw.cpp)
+          s.lba = UINT32_MAX;
+          status = s.usbVolume.write(lba, sector) ? kOk : kSourceFailed;
+          s.usbDirty = true;
+          s.lastWriteMs = millis();
+        } else if (!s.raw) {
+          status = kReadOnly;
         } else {
           s.lba = UINT32_MAX;                  // прежний собранный сектор мог быть этим
 #if ZIFI_HAS_SPI_LINK
-          reply[0] = tang_sd::rawWrite(lba, packet.data + 4) ? kOk : kSourceFailed;
+          status = tang_sd::rawWrite(lba, sector) ? kOk : kSourceFailed;
 #else
-          reply[0] = kSourceFailed;
+          status = kSourceFailed;
 #endif
         }
       }
+      if (series) {
+        if (status != kOk && s.seriesStatus == kOk) s.seriesStatus = status;
+        if ((flags & kWriteLast) == 0) break;  // Z80 ответа не ждёт: следующий сектор уже идёт
+        status = s.seriesStatus;
+        s.seriesStatus = kOk;
+      }
+      reply[0] = status;
       transport.send(kRespVdiskWrite, reply, 1);
       break;
     }
     case kVdiskMode: {
       reply[0] = kBadRequest;
-      if (packet.length == 1 && packet.data[0] <= 1) {
+      if (packet.length == 1 && packet.data[0] <= 2) {
         if (packet.data[0] == 0) {
+          s.leaveUsb();
           s.leaveRaw();
           reply[0] = kOk;
-        } else {
+        } else if (packet.data[0] == 1) {
+          s.leaveUsb();
 #if ZIFI_HAS_SPI_LINK
-          const char* problem = tang_sd::holdForWc();
+          const char* problem = s.raw ? nullptr : tang_sd::holdForWc();
           s.raw = problem == nullptr;
           s.lba = UINT32_MAX;
           reply[0] = s.raw ? kOk : kNoCard;
+#else
+          reply[0] = kNoCard;
+#endif
+        } else {
+          // режим 2 — флешка ESP: том FAT32 из её файлов с записью (флешка FAT32 или exFAT)
+          if (s.raw) s.leaveRaw();
+#if ZIFI_HAS_USB_DRIVE
+          if (!s.usbMode && usbDrive().ready()) {
+            s.usbVolume.reset();             // свежий снимок флешки
+            s.usbMode = true;
+            s.usbDirty = false;
+            s.lba = UINT32_MAX;
+            bringupLog("vdisk", "SD2 = USB flash, read and write");
+          }
+          reply[0] = s.usbMode ? kOk : kNoCard;
 #else
           reply[0] = kNoCard;
 #endif
@@ -252,10 +325,11 @@ void handle(const PacketView& packet, Z80Transport& transport) {
       break;
     }
     case kVdiskReset: {
-      if (!s.raw) s.volume.reset();
+      if (!s.raw) s.active().reset();       // том флешки: файл дописывается до сброса
+      s.usbDirty = false;
       s.lba = UINT32_MAX;
       reply[0] = kOk;
-      put32(reply + 1, s.volume.generation());
+      put32(reply + 1, s.active().generation());
       transport.send(kRespVdiskReset, reply, 5);
       break;
     }

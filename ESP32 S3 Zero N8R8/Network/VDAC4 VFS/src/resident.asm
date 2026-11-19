@@ -116,7 +116,7 @@ RES_IO:
         ld (DIAG+SIG_CALLS),hl
         cp RES_WAIT
         jr z,.wait_more
-        cp RES_NEXTN+1
+        cp RES_WRITEN+1
         jr nc,.bad
         ld (DIAG+SIG_OP),a
         ld hl,0
@@ -134,11 +134,13 @@ RES_IO:
         cp RES_WRITE
         jr z,.write
         cp RES_RELEASE
-        jr z,.release
+        jp z,.release
         cp RES_READN
         jp z,.readn
         cp RES_NEXTN
         jp z,.nextn
+        cp RES_WRITEN
+        jp z,.writen
         jp .read
 .bad:
         ld a,RES_FAIL
@@ -153,6 +155,9 @@ RES_IO:
         call ZiFi_Init
         ld a,DIAG_LINK
         jr c,.why
+        ld a,(SpiRsp)                   ; ответ на начало сеанса: принимает ли прошивка блоки от Z80
+        and LINK_S_PUT_CAPABLE
+        ld (ResPutCan),a
         ld a,RES_FAIL                   ; CF=0: A не смотрят
         ret
 .info:
@@ -171,26 +176,73 @@ RES_IO:
         ld (DIAG+SIG_WAITS),hl
         jp .wait
 .write:
-        ; сектор целиком одной командой: [lba LE32][512 байт из D_BOUNCE]
-        ld hl,(D_LBA)
-        ld (ResWr),hl
-        ld hl,(D_LBA+2)
-        ld (ResWr+2),hl
+        ; сектор целиком одной командой: [lba LE32][512 байт из D_BOUNCE], ответ на каждый
+        call Res_WrLba
+        ld a,4
+        ld (ResWrLen),a
+        call Res_XorBounce
+        ld (ResPutXor),a
         ld hl,D_BOUNCE
-        ld de,ResWr+4
+        ld de,ResSecBuf
         ld bc,512
         ldir
+        call Res_DstOwn
         xor a
         ld (ProtoErr),a
         ld a,RESP_VDISK_WRITE
         ld (ResWant),a
-        ld hl,ResWr
-        ld bc,4+512
-        ld a,CMD_VDISK_WRITE
-        call Proto_Send
+        call Res_SendWrite              ; сектор — блоком DMA (ESP 0.1.149: так быстрее в разы)
         ld a,DIAG_SEND
         jp c,.why
-        jr .wait
+        jp .wait
+; Сектор серии записи (ESP 0.1.150): кадр [lba][флаги][сектор]; сектор — DMA прямо из буфера
+; вызывающего (D_DEST, страница — окна #C000 вызывающего D_CPAGE либо окна #8000) или из ResSecBuf
+; (копия D_BOUNCE); XOR посчитал драйвер. Ответ ESP — только на последний (WRITE_LAST).
+.writen:
+        call Res_WrLba
+        ld a,(D_WFLAGS)
+        ld (ResWr+4),a
+        ld a,5
+        ld (ResWrLen),a
+        ld a,(D_WXOR)
+        ld (ResPutXor),a
+        ld a,(D_BOUNCED)
+        or a
+        jr z,.wn_direct
+        ld hl,D_BOUNCE
+        ld de,ResSecBuf
+        ld bc,512
+        ldir
+        call Res_DstOwn
+        jr .wn_send
+.wn_direct:
+        ld hl,(D_DEST)
+        ld (ResDst),hl
+        ld a,h
+        cp #C0
+        ld a,(D_CPAGE)
+        jr nc,.wn_page
+        ld bc,VR_PAGE2
+        in a,(c)
+.wn_page:
+        ld (ResDstPage),a
+.wn_send:
+        xor a
+        ld (ProtoErr),a
+        ld a,(D_WFLAGS)
+        and WRITE_LAST
+        jr z,.wn_want                   ; A=0: ответа не ждём
+        ld a,RESP_VDISK_WRITE
+.wn_want:
+        ld (ResWant),a
+        call Res_SendWrite
+        ld a,DIAG_SEND
+        jp c,.why
+        ld a,(ResWant)
+        or a
+        jp nz,.wait
+        ld (DIAG+SIG_WHY),a             ; CF=0 (OR): сектор ушёл, ответа нет
+        ret
 .release:
         ; MODE 0 — со своим началом сеанса: зовёт и установка при старте WC
         call ZiFi_Init
@@ -235,10 +287,15 @@ RES_IO:
         ld (ResWant),a
         ld hl,ResReq
         ld bc,7
-        ld a,(DIAG+SIG_STATE)           ; SD2 = карта Tang: сектор только из неё (байт режима 1);
-        cp STATE_TANG                   ; ESP после перезагрузки — в томе VFS и откажет
+        ld a,(DIAG+SIG_STATE)           ; SD2 = карта Tang (байт режима 1) или флешка ESP (2):
+        cp STATE_TANG                   ; сектор только из неё; ESP после перезагрузки — в томе VFS
+        ld a,1                          ; и откажет
+        jr z,.mode_byte
+        ld a,(DIAG+SIG_STATE)
+        cp STATE_USB
         jr nz,.send_read
-        ld a,1
+        ld a,2
+.mode_byte:
         ld (ResReq+7),a
         inc c
 .send_read:
@@ -316,7 +373,7 @@ RES_IO:
         ; и переключатель (самопроверка) из окна плагина, а в окне #0000 тогда — страница WildDOS
         ; активной панели. У панели на SD1 там драйвер SD-ZC, и #38DB (D_READN) — уже его код: байт
         ; флагов портил инструкцию, и каталоги той панели не читались до перечитывания (13.11.2026).
-        and VDISK_READN|VDISK_READDMA
+        and VDISK_READN|VDISK_READDMA|VDISK_WRITEN
         ld (RES_WINDOW+RES_IMG+(D_READN-#3800)),a
         ld c,a
         ld hl,#3800
@@ -348,11 +405,15 @@ RES_IO:
         ld (ResReq+2),hl
         ld a,(D_COUNT)
         ld (ResReq+4),a
-        ld a,(DIAG+SIG_STATE)           ; режим, как у READ: SD2 = карта Tang — 1
+        ld a,(DIAG+SIG_STATE)           ; режим, как у READ: карта Tang — 1, флешка ESP — 2
         cp STATE_TANG
-        ld a,0
-        jr nz,.readn_mode
-        inc a
+        ld a,1
+        jr z,.readn_mode
+        ld a,(DIAG+SIG_STATE)
+        cp STATE_USB
+        ld a,2
+        jr z,.readn_mode
+        xor a
 .readn_mode:
         ld b,a
         xor a
@@ -503,6 +564,157 @@ RES_IO:
         ld (DIAG+SIG_RES),a
         ld a,DIAG_RESULT
         jp .why
+
+; --- кадр WRITE с сектором блоком DMA (19.11.2026, ESP 0.1.149; серия — 0.1.150) ----------------
+; Прежде кадр WRITE (4 + 512 байт) уходил обычными обменами по 54 байта — около десяти кругов с ESP
+; на сектор, и каждый байт процессор перекладывал сам; копирование на флешку USB шло медленно (слово
+; пользователя). Теперь — как Proto_Send под ZIFI_SPI_DMA (SpiLink_PutBlock): заголовок кадра ResWr
+; (ResWrLen байт: lba и, в серии, флаги) — в накопитель обмена, сектор — блоком DMA «ОЗУ → SPI» из
+; (ResDst) страницы ResDstPage (общий путь адресует память через WC_PAGE2/3 и резиденту не годится,
+; поэтому он здесь свой), XOR сектора — ResPutXor, сумма кадра — за ним обычным обменом. ESP
+; собирает обычный кадр. Нет места под блок — спросить снова (до RES_PUT_WAITS раз: ESP разбирает
+; очередь); прошивка без LINK_S_PUT_CAPABLE (ResPutCan, RES_BEGIN) или блок трижды не сошёлся — те же
+; байты обычными обменами (Res_SecVisible).
+; Выход: CF=1 — ESP не отвечает. Портит всё.
+Res_SendWrite:
+        xor a
+        ld (ProtoCsum),a
+        ld a,PROTO_SYNC                 ; SYNC в сумму не входит
+        call ZiFi_PutChar
+        ret c
+        ld a,CMD_VDISK_WRITE
+        call Proto_PutSum
+        ret c
+        ld a,(ResWrLen)                 ; длина кадра ResWrLen + 512: младший байт — ResWrLen
+        call Proto_PutSum
+        ret c
+        ld a,high 512
+        call Proto_PutSum
+        ret c
+        ld hl,ResWr
+        ld a,(ResWrLen)
+        ld c,a
+        ld b,0
+        call Proto_Body                 ; lba (и флаги) — в накопитель, уйдут запросом LINK_F_PUT
+        ret c
+        ld a,(ResPutCan)
+        or a
+        jr z,.frames
+        ld hl,RES_PUT_WAITS
+        ld (ResPutWait),hl
+        ld e,LINK_PUT_TRIES
+.ask:
+        ld a,(ResPutXor)
+        ld (SpiRoom),a                  ; байт 4 запроса — XOR блока
+        ld hl,SpiRsp+3
+        ld (SpiDest),hl                 ; данных в ответ не будет
+        ld a,LINK_F_PUT
+        push de
+        call SpiLink_Turn
+        pop de
+        ret c
+        ld a,(SpiTxLen)
+        or a
+        jr nz,.wait_room                ; накопленное взято не всё: блок за ним не пойдёт
+        ld a,(SpiRsp)
+        and LINK_S_PUT_READY
+        jr z,.wait_room                 ; места в очереди ESP на блок пока нет
+        push de
+        call Res_SecEcho                ; DMA «ОЗУ → SPI»: #03, сектор, #07
+        ld a,LINK_F_PUT_DONE
+        call SpiLink_Send
+        pop de
+        ret c
+        ld a,(SpiRsp)
+        and LINK_S_PUT_OK
+        jr nz,.sent
+        dec e                           ; не сошёлся: ещё раз
+        jr nz,.ask
+        jr .frames
+.wait_room:
+        ld hl,(ResPutWait)
+        dec hl
+        ld (ResPutWait),hl
+        ld a,h
+        or l
+        jr nz,.ask
+.frames:
+        call Res_SecVisible             ; тот же сектор обычными обменами (в сумму — по пути)
+        ld bc,512
+        call Proto_Body
+        ret c
+        jr .tail
+.sent:
+        ld a,(ResPutXor)                ; блок принят: его XOR — в сумму кадра
+        ld hl,ProtoCsum
+        xor (hl)
+        ld (hl),a
+.tail:
+        ld a,(ProtoCsum)
+        call ZiFi_PutChar
+        ret c
+        jp ZiFi_Flush
+
+; lba кадра WRITE — в ResWr.
+Res_WrLba:
+        ld hl,(D_LBA)
+        ld (ResWr),hl
+        ld hl,(D_LBA+2)
+        ld (ResWr+2),hl
+        ret
+
+; Блок DMA — свой буфер ResSecBuf (страница резидента).
+Res_DstOwn:
+        ld hl,ResSecBuf
+        ld (ResDst),hl
+        ld a,(DIAG+SIG_PAGE)
+        ld (ResDstPage),a
+        ret
+
+; Сектор (ResDst), видимый процессору — для обычных обменов: ResSecBuf и окно #8000 вызывающего —
+; как есть; окно #C000 вызывающего (там сейчас резидент) — копия в ResSecBuf: на время копии его
+; страница — в окне #8000 (прерывания закрыты; стек не трогаем — он мог быть и в #8000). Выход: HL.
+Res_SecVisible:
+        ld hl,(ResDst)
+        ld de,ResSecBuf
+        or a
+        sbc hl,de
+        add hl,de
+        ret z
+        ld a,h
+        cp #C0
+        ret c
+        ld bc,VR_PAGE2
+        in a,(c)
+        ld (ResPage8),a
+        ld a,(D_CPAGE)
+        out (c),a
+        res 6,h                         ; #C000… -> #8000…
+        ld bc,512
+        ldir
+        ld a,(ResPage8)
+        ld bc,VR_PAGE2
+        out (c),a
+        ld hl,ResSecBuf
+        ret
+
+; A = XOR 512 байтов D_BOUNCE. D_BOUNCE — по границе 256: INC L.
+Res_XorBounce:
+        ld hl,D_BOUNCE
+        xor a
+        ld c,2
+.half:
+        ld b,256/8
+.eight:
+        REPT 8
+        xor (hl)
+        inc l
+        ENDR
+        djnz .eight
+        inc h
+        dec c
+        jr nz,.half
+        ret
 
 ; Куда класть сектор с адреса HL. Прямо туда — если адрес чётный (DMA ходит словами), в окне
 ; #8000 или #C000 и сектор целиком в этом окне; страница — окна #C000 вызывающего (D_CPAGE, у
@@ -664,7 +876,12 @@ ResSecBuf:      ds 512                  ; сектор, который в буф
 ResHalf:        db 0                    ; READN: половина сектора, которую ждём
 ResWant:        db 0                    ; какой ответ ждём
 ResReq:         ds 8                    ; READ [lba LE32][смещение LE16][длина][режим]; MODE — [режим]
-ResWr:          ds 4+512                ; WRITE: [lba LE32][сектор]
+ResPutCan:      db 0                    ; <>0 — ESP принимает блоки от Z80 (ответ на начало сеанса)
+ResPutXor:      db 0                    ; XOR сектора WRITE
+ResPutWait:     dw 0                    ; сколько ещё спрашивать место под блок
+ResPage8:       db 0                    ; Res_SecVisible: прежняя страница окна #8000
+ResWrLen:       db 0                    ; заголовок кадра WRITE: 4 — [lba], 5 — серия [lba][флаги]
+ResWr:          ds 5                    ; WRITE: [lba LE32][флаги серии]
 
         INCLUDE "zifi_link.asm"
         INCLUDE "proto.asm"

@@ -7,6 +7,11 @@
  *
  * Байты потока (MP3, WAV, AAC, Ogg Vorbis) приходят кадрами AUDIO_DATA в кольцо в
  * PSRAM; файл модуля (MOD/XM/S3M/IT), MIDI или музыка OPL — целиком в буфер.
+ * Поток с SD2 под VDAC4 VFS (флешка ESP, карта Tang) с 1.47 (19.11.2026) читает сам плеер
+ * (core->sd2_open/sd2_read — как видео): плагин присылает в AUDIO_OPEN первый кластер файла,
+ * его длину и место начала звука, ESP отвечает флагом OPEN_REPLY_SD2, и плагин байтов не шлёт.
+ * Через Z80 (SD2 — плагину, тот же поток — обратно) FLAC 24 бит 1871 кбит/с получал 181 КБ/с из
+ * нужных ~235 и рвался. Не открылся файл — поток, как прежде, от плагина.
  * Декодер — модуль ESP (MP3.ELF, AAC.ELF, OGG.ELF — поток, по расширению из
  * AUDIO_OPEN; TRACKER.ELF, MIDI.ELF, OPL.ELF — файл целиком, по его содержимому,
  * IMF без подписи — по расширению): своя задача плеера зовёт его render и отдаёт
@@ -88,6 +93,12 @@ enum { FMT_NONE = 0, FMT_MP3 = 1, FMT_MOD = 2, FMT_XM = 3, FMT_S3M = 4, FMT_IT =
 #define OPEN_MODULE 0x80                   /* AUDIO_OPEN: файл целиком */
 #define OPEN_MIDI 0x40                     /* ... и это MIDI: банк не освобождать */
 #define OPEN_RELEASE 0x20                  /* AUDIO_OPEN [#20]: только освободить ресурсы */
+/* AUDIO_OPEN потока, 6-й байт (флаги): файл на SD2 под VDAC4 VFS — за расширением
+ * [первый кластер LE32][длина файла LE32][начало звука LE32][n][первые n (<= 16) байтов звука]. */
+#define OPEN_SD2 0x08
+#define OPEN_REPLY_SD2 0x80                /* ответ AUDIO_OPEN: файл читает ESP, байтов не слать */
+#define SD2_CHUNK (32u * 1024u)            /* чтение SD2 за раз (флешка: ~35 мс) */
+#define SD2_CHECK 16                       /* сверка начала звука с плагином */
 #define SKIP_MS 1500                       /* модуль не загрузился: столько «играет» до конца */
 #define SKIP_TITLE "Cannot play this file, skipping"   /* название на это время */
 #define MIDI_BANK "MIDI.SF2"
@@ -244,6 +255,16 @@ typedef struct {
   uint32_t in_first_ms;
   uint32_t in_last_ms;
   uint32_t in_full;
+  /* Поток с SD2 читает сам плеер (1.47): файл (core->sd2_open; NULL — поток от Z80), где в нём
+   * начало звука, следующий байт потока и длина потока. Читает задача декодера (sd2_fill) без
+   * замка — флаг sd2_reading: файл закрывать после чтения. */
+  void* sd2_file;
+  uint8_t* sd2_buf;                       /* SD2_CHUNK в PSRAM */
+  uint32_t sd2_start;
+  uint32_t sd2_pos;
+  uint32_t sd2_end;
+  volatile int sd2_reading;
+  volatile int sd2_eof;                   /* поток весь в кольце (или чтение отказало) */
   float* frames;
   char info_track[16];                    /* дополнительные метки декодера */
   zm_info_t info;                         /* снимок для Z80, пишет задача под lock */
@@ -1499,11 +1520,14 @@ static void radio_tags_reply(void) {
 
 /* Задача плеера: декодер → PCM ядру. */
 static void online_poll(void);          /* обложка из сети: ниже */
+static void sd2_fill(void);             /* поток с SD2 (1.47): ниже */
+static void sd2_end(void);
 
 static void decode_task(void* arg) {
   (void)arg;
   while (!P->stop) {
     online_poll();
+    sd2_fill();                                 /* поток с SD2 плеер читает сам (1.47) */
     if (P->radio && P->radio_restart != 0) {
       /* Радио: новое соединение (или смена станции) — прежний звук прочь,
        * декодер заново (поток начинается не с начала кадра) и того кодека,
@@ -1851,6 +1875,7 @@ static void stop_all(void) {
     P->file = NULL;
   }
   P->file_size = P->file_written = 0;
+  sd2_end();                               /* файл SD2 читал сам плеер — закрыть */
   ring_resize(RING_BYTES);                 /* большое кольцо радио/FLAC — прочь */
   core->pcm_flush();
   P->state = ST_IDLE;
@@ -1947,6 +1972,140 @@ static void release_for(int midi, int opl, int sid) {
       P->kit[0] = 0;
     }
   }
+}
+
+/* --- поток с SD2 (1.47) ------------------------------------------------------------ */
+
+static int sd2_available(void) {
+  return core->size >= offsetof(zm_core_t, sd2_close) + sizeof(core->sd2_close) && core->sd2_open != NULL &&
+         core->sd2_read != NULL && core->sd2_close != NULL;
+}
+
+/* Под P->lock (команда, ядро 1): файл — прочь. Задача декодера его ещё читает — дождаться
+ * (чтение без замка); не дождались за 5 с — не закрывать (ядро закроет при выгрузке), иначе
+ * чтение шло бы по закрытому файлу. */
+static void sd2_end(void) {
+  if (P->sd2_file == NULL) {
+    return;
+  }
+  for (int wait = 0; wait < 5000 && __atomic_load_n(&P->sd2_reading, __ATOMIC_ACQUIRE); ++wait) {
+    core->delay(1);
+  }
+  if (!__atomic_load_n(&P->sd2_reading, __ATOMIC_ACQUIRE)) {
+    core->sd2_close(P->sd2_file);
+  } else {
+    core->log("player: SD2 read did not end in 5 s: file left to the core");
+  }
+  P->sd2_file = NULL;
+  P->sd2_eof = 0;
+}
+
+/* Под P->lock: поток весь в кольце — как AUDIO_CLOSE с доигрыванием. */
+static void sd2_finish(void) {
+  P->sd2_eof = 1;
+  if (P->instance != NULL && P->stream_open) {
+    P->stream_open = 0;
+    P->closed = 1;
+    P->state = ST_DRAINING;
+    core->signal_give(P->wake);
+  }
+}
+
+/* Задача декодера: кусок файла — в кольцо, если в нём есть место под весь кусок. Чтение —
+ * без замка (флешка ~35 мс на 32 КБ, очередь звука больше секунды); новая позиция или стоп за
+ * это время (поколение) — прочитанное прочь. */
+static void sd2_fill(void) {
+  if (P->sd2_file == NULL || P->sd2_eof) {
+    return;
+  }
+  core->mutex_lock(P->lock);
+  void* file = P->sd2_file;
+  const uint32_t generation = P->generation;
+  const uint32_t pos = P->sd2_pos;
+  uint32_t want = 0;
+  if (file != NULL && !P->sd2_eof && P->stream_open && P->ring != NULL) {
+    if (pos >= P->sd2_end) {
+      sd2_finish();
+    } else {
+      want = P->sd2_end - pos;
+      uint32_t chunk = P->ring_size / 4 < SD2_CHUNK ? P->ring_size / 4 : SD2_CHUNK;
+      if (want > chunk) want = chunk;
+      if (ring_free() < want) want = 0;     /* места под кусок нет — потом */
+    }
+  }
+  if (want != 0) {
+    __atomic_store_n(&P->sd2_reading, 1, __ATOMIC_RELEASE);
+  }
+  core->mutex_unlock(P->lock);
+  if (want == 0) {
+    return;
+  }
+  uint32_t got = 0;
+  const int r = core->sd2_read(file, P->sd2_start + pos, P->sd2_buf, want, &got);
+  __atomic_store_n(&P->sd2_reading, 0, __ATOMIC_RELEASE);
+  core->mutex_lock(P->lock);
+  if (P->generation == generation && P->sd2_file == file && P->sd2_pos == pos) {
+    if (got > want) got = want;
+    if (got != 0) {
+      ring_write(P->sd2_buf, got);
+      P->sd2_pos = pos + got;
+      const uint32_t now = core->millis();
+      if (P->in_bytes == 0) P->in_first_ms = now;
+      P->in_bytes += got;
+      P->in_last_ms = now;
+    }
+    if (r != ZM_OK || got < want) {
+      core->log("player: SD2 read at %u: %s, stream ends here", (unsigned)(P->sd2_start + pos),
+                r != ZM_OK ? "failed" : "file is shorter");
+      sd2_finish();
+    } else if (P->sd2_pos >= P->sd2_end) {
+      sd2_finish();
+    }
+  }
+  core->mutex_unlock(P->lock);
+}
+
+/* AUDIO_OPEN потока с OPEN_SD2: файл открыть и сверить начало звука с присланным. Ядро 1. */
+static int sd2_begin(const uint8_t* data, uint16_t length) {
+  if (length < 22 || (data[5] & OPEN_SD2) == 0 || !sd2_available()) {
+    return 0;
+  }
+  const uint32_t cluster = rd32(data + 9), size = rd32(data + 13), start = rd32(data + 17);
+  uint32_t check = data[21];
+  if (check > SD2_CHECK || 22u + check > length || start > size || P->stream_size > size - start) {
+    return 0;
+  }
+  if (P->sd2_buf == NULL) {
+    P->sd2_buf = (uint8_t*)core->alloc(SD2_CHUNK, ZM_MEM_PSRAM);
+    if (P->sd2_buf == NULL) {
+      return 0;
+    }
+  }
+  void* file = NULL;
+  int raw = 0;
+  if (core->sd2_open(cluster, size, &file, &raw) != ZM_OK) {
+    core->log("player: SD2 file at cluster %u (%u bytes) not found: stream from the plugin",
+              (unsigned)cluster, (unsigned)size);
+    return 0;
+  }
+  uint32_t got = 0;
+  if (check != 0 && (core->sd2_read(file, start, P->sd2_buf, check, &got) != ZM_OK || got != check ||
+                     memcmp(P->sd2_buf, data + 22, check) != 0)) {
+    core->log("player: SD2 file at cluster %u differs from the plugin's: stream from the plugin",
+              (unsigned)cluster);
+    core->sd2_close(file);
+    return 0;
+  }
+  command_lock();
+  P->sd2_file = file;
+  P->sd2_start = start;
+  P->sd2_pos = 0;
+  P->sd2_end = P->stream_size;
+  P->sd2_eof = 0;
+  core->mutex_unlock(P->lock);
+  core->log("player: stream read by ESP from SD2 (%s), cluster %u, %u bytes from %u",
+            raw ? "Tang card" : "VFS volume", (unsigned)cluster, (unsigned)P->stream_size, (unsigned)start);
+  return 1;
 }
 
 static void command_open(const uint8_t* data, uint16_t length) {
@@ -2050,8 +2209,9 @@ static void command_open(const uint8_t* data, uint16_t length) {
   P->buffer_target = file_buffer_target(1);
   P->buffering = P->buffer_target != 0;
   P->state = ST_PLAYING;
+  const int own = sd2_begin(data, length);
   core->signal_give(P->wake);
-  reply_open(1);
+  reply_open(own ? 1 | OPEN_REPLY_SD2 : 1);
 }
 
 static void command_data(const uint8_t* data, uint16_t length) {
@@ -2095,8 +2255,8 @@ static void command_data(const uint8_t* data, uint16_t length) {
         core->signal_give(P->wake);
       }
     }
-  } else if (!P->stream_open) {
-    reply[0] = 2;
+  } else if (!P->stream_open || P->sd2_file != NULL) {
+    reply[0] = 2;                        /* закрыт; или файл читает сам плеер (SD2) */
   } else if (length > ring_free()) {
     reply[0] = 0;                        /* блок целиком или никак: Z80 повторит */
     ++P->in_full;
@@ -2114,7 +2274,9 @@ static void command_data(const uint8_t* data, uint16_t length) {
 
 static void command_close(const uint8_t* data, uint16_t length) {
   const int drain = length != 0 && data[0] != 0;
-  if (drain && P->instance != NULL && P->stream_open) {
+  if (drain && P->sd2_file != NULL) {
+    /* Файл читает сам плеер: конец потока он знает и закроет его сам (sd2_finish). */
+  } else if (drain && P->instance != NULL && P->stream_open) {
     P->stream_open = 0;
     P->closed = 1;
     P->state = ST_DRAINING;
@@ -2281,6 +2443,12 @@ static void command_flush(const uint8_t* data, uint16_t length) {
     P->generation++;
     P->source->close(P->instance);
     host.stream_offset = length >= 8 ? rd32(data + 4) : UINT32_MAX;
+    if (P->sd2_file != NULL) {
+      /* Файл читает сам плеер: с нового места (место — от начала звука, как у плагина). */
+      const uint32_t at = length >= 8 ? rd32(data + 4) : 0;
+      P->sd2_pos = at < P->sd2_end ? at : P->sd2_end;
+      P->sd2_eof = 0;
+    }
     P->instance = P->source->open(P->stream_size, NULL);
     ring_reset();
     core->pcm_flush();
@@ -3004,10 +3172,25 @@ static void online_poll(void) {
   copy_text(P->online_artist, sizeof(P->online_artist), artist);
   copy_text(P->online_title, sizeof(P->online_title), title);
   P->online_running = 1;
-  /* Стек — только во внутренней памяти: при радио её нет, и поиск не запускается. В 1.34 он брал
+  /* Радио: стек — только во внутренней памяти: её нет, и поиск не запускается. В 1.34 он брал
    * стек в PSRAM (ZM_TASK_STACK_PSRAM) — и ESP упала при радио (порча кучи, 03.11.2026): поиск со
-   * своим TLS и JPEG рядом с эфиром при ~2 КБ внутренней памяти. Откат по слову пользователя (1.35). */
-  if (core->task_start(online_job, NULL, ONLINE_STACK, ONLINE_PRIORITY, 0) != ZM_OK) {
+   * своим TLS и JPEG рядом с эфиром при ~2 КБ внутренней памяти. Откат по слову пользователя (1.35).
+   * Файл (1.48, 19.11.2026, слово пользователя): внутренней нет — стек в PSRAM. С флешкой в ESP
+   * (хост USB с 0.1.147 держит ~10 КБ внутренней) плееру оставалось 13 КБ, самый большой кусок
+   * 4,8 КБ, и обложку из сети ни одна песня не получала. Только с прошивкой 0.1.152+ (ABI minor 17):
+   * кончившуюся задачу со стеком в PSRAM она снимает с ядра 1 сама, а прежде задача удаляла себя
+   * через задачу очистки во внутренней памяти — вероятная причина сбоя 1.34 (её не было). Поиск
+   * flash ESP не трогает (сеть, JPEG из ПЗУ, журнал — очередью): стек в PSRAM ему годится. */
+  /* 1.49: с прошивкой 0.1.153+ (ABI 18) — сразу в PSRAM: 1.48 садил стек во внутреннюю, когда кусок
+   * 6 КБ находился, и соединению TLS внутренней уже не хватало (13,9 → 1,4 КБ, «closed before the
+   * header», обложки нет). */
+  uint32_t stack = ONLINE_STACK;
+  if (!P->radio && core->abi_minor >= 18) {
+    stack |= ZM_TASK_STACK_PSRAM | ZM_TASK_STACK_PSRAM_FIRST;
+  } else if (!P->radio && core->abi_minor >= 17) {
+    stack |= ZM_TASK_STACK_PSRAM;
+  }
+  if (core->task_start(online_job, NULL, stack, ONLINE_PRIORITY, 0) != ZM_OK) {
     P->online_running = 0;                /* памяти нет — без обложки из сети */
     core->log("player: online cover: no memory for the search task (%u-byte stack)",
               (unsigned)ONLINE_STACK);
@@ -3123,6 +3306,15 @@ static void stop(void) {
     core->log("player: decode task did not stop in 2 s; the core removes it");
   }
   close_output();
+  if (P->task_done) {
+    command_lock();
+    sd2_end();                                  /* файл SD2 — закрыть (не вышла — ядро закроет) */
+    core->mutex_unlock(P->lock);
+  }
+  if (P->sd2_buf != NULL && P->task_done) {
+    core->free(P->sd2_buf);
+    P->sd2_buf = NULL;
+  }
   /* Задача радио: выйти (она могла ждать соединения до RADIO_TIMEOUT_MS). */
   if (P->radio_task_started) {
     P->radio_quit = 1;
@@ -3154,7 +3346,7 @@ int main(int argc, char* argv[]) {
   app.abi_major = ZM_APP_ABI_MAJOR;
   app.abi_minor = ZM_APP_ABI_MINOR;
   app.name = "player";
-  app.version = "1.46";
+  app.version = "1.50";
   app.command_first = AUDIO_VIEW;
   app.command_last = AUDIO_TAGS;
   app.start = start;

@@ -45,6 +45,7 @@ RES_LAYOUT      equ 3                   ; 3: запись сектора (RES_WR
 STATE_SD        equ 0                   ; SD2 — штатная вторая карта ZC
 STATE_VFS       equ 1                   ; SD2 = том VDAC4 VFS (папки источников, только чтение)
 STATE_TANG      equ 2                   ; SD2 = карта Tang целиком, с записью (ESP её не трогает)
+STATE_USB       equ 3                   ; SD2 = флешка ESP: том FAT32 из её файлов, с записью (0.1.148)
 
 DIAG_OK         equ 0
 DIAG_LINK       equ 1                   ; ZiFi_Init: ESP не ответила на начало сеанса
@@ -65,9 +66,13 @@ RES_WRITE       equ 4                   ; сектор D_BOUNCE -> D_LBA (тол
 RES_RELEASE     equ 5                   ; MODE 0: ESP снова владеет картой Tang (старт WC)
 RES_READN       equ 6                   ; серия (ESP 0.1.127): READN с D_LBA на D_COUNT секторов, первый -> D_BOUNCE
 RES_NEXTN       equ 7                   ; следующий сектор серии -> D_DEST (DMA) либо D_BOUNCE (D_BOUNCED)
+RES_WRITEN      equ 8                   ; сектор серии записи (ESP 0.1.150): из D_DEST (DMA) либо D_BOUNCE
+                                        ; (D_BOUNCED), XOR — D_WXOR, флаги — D_WFLAGS; ждёт ответ только
+                                        ; на последний (WRITE_LAST)
 RES_PENDING     equ 1
 RES_FAIL        equ 2
 RES_POLLS       equ 2000                ; опросов за один вызов (прерывания закрыты)
+RES_PUT_WAITS   equ 4096                ; запись: обменов «места под блок нет» до обычных обменов (~1 с)
 RES_SEC_TURNS   equ 128                 ; серия DMA: обменов «сектор?» за один вызов (~30 мс на 14 МГц)
 RES_TRIES       equ 250                 ; вызовов RES_WAIT на один запрос
 
@@ -110,6 +115,9 @@ VDISK_READN     equ #20                 ; флаг INFO: прошивка уме
 ; ESP 0.1.128: секторы серии — не кадрами (каждый байт через Z80: ~89 000 тактов на сектор, SD2 не
 ; быстрее ~79 КБ/с — FLAC с карты Tang не успевал и с READN), а блоками DMA прямо в буфер WC.
 VDISK_READDMA   equ #10                 ; флаг INFO: READN умеет секторы через DMA
+VDISK_WRITEN    equ #80                 ; флаг INFO: серия записи (ESP 0.1.150): WRITE [lba][флаги][сектор]
+WRITE_FIRST     equ #01                 ; флаги кадра серии: начало (итог ESP сбрасывается)
+WRITE_LAST      equ #02                 ; конец: ESP отвечает итогом всей серии
 READN_DMA       equ #80                 ; разряд байта режима READN: секторы — в очередь DMA
 LINK_F_SECTOR   equ #20                 ; флаг запроса канала: взять сектор из очереди секторов
 VDISK_CHUNK     equ 248

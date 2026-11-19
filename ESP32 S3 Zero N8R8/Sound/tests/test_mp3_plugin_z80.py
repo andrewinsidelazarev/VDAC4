@@ -215,6 +215,12 @@ class AudioEsp:
         self.base_seconds = 0
         self.since_flush = 0
         self.flush_while_draining = True    # PLAYER 1.7: перемотка снова открывает закрытый поток
+        # Файл на SD2 (плагин 1.31, PLAYER 1.47): тела AUDIO_OPEN с ним; sd2_own — ESP читает файл
+        # сама (ответ #81) и «играет» sd2_polls запросов состояния; AUDIO_CLOSE [1] её не трогает.
+        self.sd2_bodies: list[bytes] = []
+        self.sd2_own = False
+        self.sd2_polls = 6
+        self.sd2_left = 0
         # Файл целиком: модуль или MIDI.
         self.module_size = 0
         self.module_format = FORMAT_XM
@@ -391,7 +397,8 @@ class AudioEsp:
         seconds = self.base_seconds + self.since_flush // BYTES_PER_SECOND
         if module and self.module_format != 10:
             seconds = self.position * 3
-        decoded = (bool(self.received) and (not module or self.state != STATE_LOADING) and
+        decoded = ((bool(self.received) or bool(self.sd2_own and self.sd2_bodies)) and
+                   (not module or self.state != STATE_LOADING) and
                    self.module_refuse_at is None)
         flags = ((1 if self.finished else 0) | (2 if decoded else 0) |
                  (4 if self.buffering else 0) | (8 if self.paused else 0) |
@@ -454,6 +461,11 @@ class AudioEsp:
                 self.state = STATE_LOADING
                 return self.opened(bytes([1]) + self.free())
             self.queue, self.state, self.finished = 0, STATE_PLAYING, False
+            if len(payload) >= 22 and payload[5] & 8:
+                self.sd2_bodies.append(bytes(payload))
+                if self.sd2_own:
+                    self.sd2_left = self.sd2_polls
+                    return self.opened(bytes([0x81]) + self.free())
             return self.opened(bytes([1]) + self.free())
         if command == AUDIO_DATA:
             if self.module_size:
@@ -479,6 +491,8 @@ class AudioEsp:
             return frame(0xB1, bytes([1]) + self.free())
         if command == AUDIO_CLOSE:
             self.closes.append(payload[0])
+            if payload[0] and self.sd2_left:
+                return frame(0xB2, bytes([1]))      # файл читает ESP: конец она знает сама
             if payload[0] and self.state == STATE_PLAYING:
                 self.state = STATE_DRAINING
             else:
@@ -572,6 +586,12 @@ class AudioEsp:
                         self.row = 0
                         self.position += 1
                     if self.position >= self.length:
+                        self.state, self.finished = STATE_IDLE, True
+            elif self.sd2_left:
+                # Файл читает ESP: «играет» sd2_polls запросов состояния.
+                if not self.paused:
+                    self.sd2_left -= 1
+                    if self.sd2_left == 0:
                         self.state, self.finished = STATE_IDLE, True
             else:
                 # «Проигрывание»: между запросами состояния очередь убывает.
@@ -1164,7 +1184,7 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertEqual(data[63], 0, "и Enter, и F3")
         self.assertEqual(data[64:161], bytes(97), "старое поле 32 расширений у #11 пустое")
         self.assertEqual(data[161:165], b"\xFF" * 4, "размер файла не ограничен")
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.30")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.31")
         self.assertEqual((data[34], data[35]), (2, 0), "две страницы, запуск — страница 0")
         self.assertEqual(data[38], 1, "второй блок файла — в страницу 1")
         self.assertEqual(data[197], 4, "меню выбора просмотрщика, в F10 плеера нет")
@@ -2008,6 +2028,92 @@ class OwnFileTest(unittest.TestCase):
                 self.assertNotIn(AUDIO_COVER, h.audio.commands)
                 self.assertEqual(h.audio.flushes, [], "без своего файла не перематывается")
                 self.assertEqual(bytes(h.audio.received), bytes(100000))
+
+
+class Mp3Sd2Test(unittest.TestCase):
+    """Плагин 1.31 (19.11.2026): файл на SD2 под VDAC4 VFS ESP читает сама (PLAYER 1.47) — через
+    Z80 поток FLAC 24 бит с флешки шёл 181 КБ/с из нужных ~235 и рвался. Плагин узнаёт SD2 как
+    FTVIEW4: переходник VDAC4 VFS стоит (JP #4FE8 по #501C, LD A,I по #4FE8), панель — устройство 6;
+    первый кластер — CUHL ядра (#38A8) до чтения файла."""
+
+    CLUSTER = 0x00123456
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        need(WMF, SYM)
+
+    def harness(self, content: bytes, *, device: int = 6, vfs: bool = True, **esp) -> Mp3Harness:
+        audio = AudioEsp(capacity=16384, played_per_status=1024)
+        for key, value in esp.items():
+            setattr(audio, key, value)
+        h = Mp3Harness(content, esp=audio)
+        if vfs:
+            h.memory[0x501C:0x501F] = bytes([0xC3, 0xE8, 0x4F])
+            h.memory[0x4FE8:0x4FEA] = bytes([0xED, 0x57])
+        h.memory[0x7E00 + 0x1D] = device
+        h.memory[0x38A8:0x38AC] = self.CLUSTER.to_bytes(4, "little")
+        return h
+
+    def body(self, h: Mp3Harness, content: bytes, start: int = 0) -> bytes:
+        [body] = h.audio.sd2_bodies
+        self.assertEqual(body[5] & 8, 8, "бит 3 флагов: файл на SD2")
+        self.assertEqual(int.from_bytes(body[9:13], "little"), self.CLUSTER, "первый кластер — CUHL")
+        self.assertEqual(int.from_bytes(body[13:17], "little"), len(content), "длина файла целиком")
+        self.assertEqual(int.from_bytes(body[17:21], "little"), start, "начало звука — за меткой")
+        self.assertEqual(body[21], 16)
+        self.assertEqual(body[22:38], content[start:start + 16], "начало звука — ESP сверит")
+        self.assertEqual(len(body), 38)
+        return body
+
+    def test_esp_reads_the_file_itself(self) -> None:
+        content = random.Random(5).randbytes(200_000)
+        h = self.harness(content, sd2_own=True)
+        h.start()
+        self.body(h, content)
+        self.assertEqual(int.from_bytes(h.audio.opens[-1][1:5], "little"), len(content))
+        self.assertNotIn(AUDIO_DATA, h.audio.commands, "байтов файла плагин не шлёт")
+        self.assertEqual(h.own_sectors(), 1, "с карты — только первый сектор (метка ID3?)")
+        self.assertEqual((h.audio.state, h.audio.finished), (STATE_IDLE, True), "дождался конца звука")
+        self.assertEqual(h.machine.ix, 0x7E00)
+        self.assertEqual(h.calls[-2:], [base.FN_RRESB, base.FN_GEDPL], "окно закрыто")
+
+    def test_long_tag_starts_the_sound_after_it(self) -> None:
+        tag = Mp3PluginTest.id3(3000)
+        content = tag + random.Random(6).randbytes(100_000)
+        h = self.harness(content, sd2_own=True)
+        h.start()
+        self.body(h, content, start=len(tag))
+        self.assertNotIn(AUDIO_DATA, h.audio.commands)
+
+    def test_esp_without_it_gets_the_stream_as_before(self) -> None:
+        content = random.Random(7).randbytes(70_000)
+        h = self.harness(content)                 # PLAYER 1.46: флага в ответе нет
+        h.start()
+        self.body(h, content)
+        self.assertEqual(bytes(h.audio.received), content, "поток — от плагина, как прежде")
+
+    def test_not_sd2_is_not_offered(self) -> None:
+        content = random.Random(8).randbytes(20_000)
+        for keys in ({'device': 1}, {'vfs': False}):
+            with self.subTest(**keys):
+                h = self.harness(content, sd2_own=True, **keys)
+                h.start()
+                self.assertEqual(h.audio.sd2_bodies, [], "SD1 или SD2 без VDAC4 VFS — как прежде")
+                self.assertEqual(len(h.audio.opens[-1]), 9)
+                self.assertEqual(bytes(h.audio.received), content)
+
+    def test_seek_is_done_by_the_esp(self) -> None:
+        content = bytes((index * 7 + (index >> 9)) & 0xFF for index in range(600_000))
+        h = self.harness(content, sd2_own=True, sd2_polls=400)
+        h.keys = {FN_RIGHT: {40}}
+        h.esc_after = 120
+        h.start()
+        [ms] = h.audio.flushes
+        seconds = ms // 1000
+        self.assertGreaterEqual(seconds, 10)
+        self.assertEqual(h.audio.flush_offsets, [seconds * BYTES_PER_SECOND], "место — ESP, она читает сама")
+        self.assertEqual([s for s in h.skips if s[0] == 0], [], "плагин свой файл не перематывает")
+        self.assertNotIn(AUDIO_DATA, h.audio.commands)
 
 
 class Mp3SeekTest(unittest.TestCase):

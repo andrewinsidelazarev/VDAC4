@@ -81,6 +81,8 @@ T_Main:
         call T_GetState
         cp STATE_TANG
         jr z,.cur_set
+        cp STATE_USB
+        jr z,.cur_set
         ld a,STATE_VFS
 .cur_set:
         ld (T_Cur),a
@@ -99,6 +101,8 @@ T_Main:
         ld a,(T_Mode)
         cp STATE_TANG
         jr z,.to_tang
+        cp STATE_USB
+        jr z,.to_usb
         ld a,(T_EspFlags)               ; том без источников драйвер не примет (DEVINI)
         and VDISK_READY
         ld hl,T_ErrEmpty
@@ -120,10 +124,22 @@ T_Main:
         ld a,STATE_TANG
         call T_Install
         jr .remount
+.to_usb:
+        ld a,2                          ; флешка ESP — томом с записью (прошивка 0.1.148+)
+        call T_EspMode
+        ld hl,T_ErrOld
+        jp c,.error                     ; ответа нет: прошивка без MODE
+        ld a,(ProtoBuf)
+        or a
+        ld hl,T_ErrNoUsb
+        jp nz,.error                    ; флешки нет (или прошивка без режима 2)
+        ld a,STATE_USB
+        call T_Install
+        jr .remount
 .to_sd2:
         ld a,(T_Cur)
-        cp STATE_TANG
-        jr nz,.uninstall
+        cp STATE_VFS
+        jr z,.uninstall                 ; карта Tang и флешка — снова ESP (MODE 0)
         xor a                           ; карту Tang — снова ESP
         call T_EspMode
         jr nc,.uninstall
@@ -544,12 +560,15 @@ T_GetState:
 ;   (1 — последняя строка внутри окна).
 T_Select:
         call WC_WAITUP_                 ; Enter, которым запустили плагин, — не выбор
-        ld a,(T_Cur)                    ; строка того, что стоит сейчас: 0, 1 или 2
+        ld a,(T_Cur)                    ; строка того, что стоит сейчас: 0…3
         ld c,0
         or a
         jr z,.now
         inc c
         cp STATE_TANG
+        jr z,.now
+        inc c
+        cp STATE_VFS
         jr z,.now
         inc c
 .now:
@@ -581,7 +600,7 @@ T_Select:
         jr .wait
 .down:
         ld a,(T_Sel)
-        cp 2
+        cp T_ROWS-1
         jr nc,.wait
         inc a
         ld (T_Sel),a
@@ -649,7 +668,7 @@ T_SelBuild:
         pop hl
         inc b
         ld a,b
-        cp 3
+        cp T_ROWS
         jr c,.row
         ld hl,T_SelFoot
         call T_Put
@@ -929,7 +948,7 @@ T_Header:       db #0E,9," VDAC4 VFS ",0
 T_SelWin:
         db #81,0                        ; тень и рамка стиля 1 (двойная)
         db #FF,#FF                      ; X,Y: центр
-        db T_WINW,11                    ; 9 строк внутри
+        db T_WINW,12                    ; 10 строк внутри
         db T_COLOUR,0
         dw 0
         db 2,0                          ; разделитель ╟──╢ — над строкой клавиш
@@ -959,6 +978,11 @@ T_SelRows:
 .d2:    db 5,"TANG + USB folders, read only"
         ds T_DESC_W-($-.d2-1),' '
         db 0
+.r3:    db 7,7,"USB Flash"
+        ds T_NAME_W-($-.r3-2),' '
+.d3:    db 5,"ESP USB flash, read and write"
+        ds T_DESC_W-($-.d3-1),' '
+        db 0
 T_SelNowMark:   db 4,4,#11," now",0     ; «◄ now» ярко-зелёным
 T_SelNoMark:    db "     ",0
 T_SelEnd:       db " ",#0D,0
@@ -968,7 +992,8 @@ T_SelFoot:
         db #0E,6,6,#18,#19,T_INK," choose      "
         db 6,6,"Enter",T_INK," set      "
         db 6,6,"Esc",T_INK," cancel",0
-T_SelStates:    db 0,STATE_TANG,STATE_VFS
+T_SelStates:    db 0,STATE_TANG,STATE_VFS,STATE_USB
+T_ROWS          equ $-T_SelStates
 T_ResWin:
         db #81,0
         db #FF,#FF
@@ -1014,6 +1039,10 @@ T_ErrNoCard:
         db #0E,7,7,"No Tang microSD card.",#0D
         db #0E,7,7,"Insert it into the Tang Nano",#0D
         db #0E,7,7,"(Tang core TS-Config 1.30 or newer).",0
+T_ErrNoUsb:
+        db #0E,7,7,"No USB flash drive in the ESP.",#0D
+        db #0E,7,7,"Insert a FAT32 or exFAT flash drive",#0D
+        db #0E,7,7,"(ESP firmware 0.1.148 or newer).",0
 T_SigText:      db "VDAC4VFS"
         INCLUDE "wc111i_data.inc"
 

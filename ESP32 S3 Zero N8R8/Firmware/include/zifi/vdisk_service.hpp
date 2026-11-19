@@ -1,8 +1,11 @@
 #pragma once
 // Служба виртуального диска VDAC4 VFS для Z80: драйвер устройства 6 Wild Commander (плагин VDAC4 VFS)
-// читает и пишет сектора SD2. Два режима (MODE):
+// читает и пишет сектора SD2. Три режима (MODE):
 //   0 — том vdisk: папки источников (TANG — карта Tang через FatFs ESP), только чтение;
-//   1 — сама карта Tang посекторно (tang_sd::holdForWc): FAT32 ведёт CORE32 WC, запись есть.
+//   1 — сама карта Tang посекторно (tang_sd::holdForWc): FAT32 ведёт CORE32 WC, запись есть;
+//   2 — флешка ESP (0.1.148): том FAT32 из её файлов, как в режиме 0, но с записью — секторы WC
+//       том переводит в операции над файлами флешки (vdisk_rw.cpp); флешка FAT32 или exFAT.
+//       Нет флешки — MODE отвечает 4.
 // Команды — на ядре 1, ответ сразу (сектор собирается или пишется за время команды):
 //   INFO  0x15 []                              -> 0x95 [итог][флаги][поколение LE32][секторов LE32][источников]
 //   READ  0x16 [lba LE32][смещение LE16][длина][режим] -> 0x96 [итог][данные: длина байт]
@@ -46,6 +49,15 @@ constexpr uint8_t kFlagReadDma = 0x10;
 constexpr uint8_t kReadNDma = 0x80;
 constexpr uint8_t kFlagReadN = 0x20;   // прошивка умеет READN (0.1.127)
 constexpr uint8_t kFlagRaw = 0x40;
+constexpr uint8_t kFlagUsb = 0x08;     // режим 2: SD2 — том флешки с записью (0.1.148)
+// Серия записи (0.1.150, 19.11.2026): кадр WRITE [lba LE32][флаги][сектор 512] — сектор
+// резидент шлёт блоком DMA и ответа не ждёт; ответ (итог всей серии: первый отказ) — только на кадр
+// с kWriteLast. kWriteFirst — начало серии (итог сбрасывается). После отказа остальные секторы
+// серии не пишутся. Прежний кадр [lba][сектор] (4 + 512) — как раньше, с ответом на каждый.
+// Посекторный ответ стоил копированию на флешку около 2 мс на сектор (обмены и ожидание цикла).
+constexpr uint8_t kFlagWriteN = 0x80;
+constexpr uint8_t kWriteFirst = 0x01;
+constexpr uint8_t kWriteLast = 0x02;
 
 void handle(const PacketView& packet, Z80Transport& transport);
 
@@ -53,6 +65,9 @@ void handle(const PacketView& packet, Z80Transport& transport);
 // (режим 1)?; файл тома VFS по первому кластеру — источник, путь, длина (vdisk::Volume::fileAt).
 bool rawMode();
 bool volumeFile(uint32_t cluster, vdisk::Source** source, std::vector<char>& where, uint64_t* size);
+
+// Каждый проход цикла обмена (ядро 1): том флешки после секунды тишины дописывает файл.
+void poll(uint32_t now);
 
 }  // namespace vdisk_service
 }  // namespace zifi

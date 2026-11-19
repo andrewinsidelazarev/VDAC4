@@ -146,5 +146,15 @@ CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 # Буферы TLS (16 + 4 КБ на соединение и контекст) — в PSRAM: во внутренней памяти их не было
 # места, пока работает PLAYER, и HTTPS (обложки Deezer) падал (0.1.88)
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+# AES — программный, таблицы во флеш (0.1.154). Аппаратный AES ESP-IDF 6.0 шифрует запись TLS через
+# DMA, а буфер TLS в PSRAM не выровнен по строке кэша — на каждую запись он берёт буфер до 1,6 КБ из
+# внутренней памяти. 19.11.2026 с флешкой в ESP при плеере её было ~5 КБ кусками: «esp-aes: Failed
+# to allocate memory», соединение с Deezer оборвалось на 8 КБ картинки (а она 70 КБ), обложки нет.
+# Нашим потокам (радио, обложки, обновления — сотни КБ/с) программного AES хватает с запасом.
+# CONFIG_MBEDTLS_HARDWARE_AES is not set
 # Образы дисков ядер на карте Tang: быстрый поиск по файлу (zm_core_t::sd_open)
 CONFIG_FATFS_USE_FASTSEEK=y
+# Кодовая страница имён FatFs — CP866, как у Wild Commander (0.1.148, 19.11.2026): с CP437 имена с
+# кириллицей на флешке ESP и на карте Tang были '?', и создать такой файл (том USB Flash, шара SMB
+# TANG) было нельзя. tang_vfs и vdisk_sources перекодируют через ff_uni2oem/ff_oem2uni(FF_CODE_PAGE).
+CONFIG_FATFS_CODEPAGE_866=y

@@ -374,6 +374,7 @@ bool ModuleApp::handleCommand(const PacketView& packet) {
 
 // Codex: только владелец канала; appLock_ в stopApp исключает одновременный poll ELF.
 void ModuleApp::pollCore1(uint32_t now) {
+  reapTasks();
 #if ZIFI_HAS_SPI_LINK
   if (app_ == nullptr || !ftDetach_.due(now)) return;
   uint32_t state[3] = {};
@@ -1273,9 +1274,9 @@ void ModuleApp::stopApp() {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
   for (TaskSlot& slot : tasks_) {
-    if (slot.running && slot.handle != nullptr) {
+    if ((slot.running || slot.finished) && slot.handle != nullptr) {
       if (slot.psram) {
-        vTaskDeleteWithCaps(slot.handle);
+        vTaskDeleteWithCaps(slot.handle);   // и кончившуюся (finished): она стоит, ждёт ядра 1
       } else {
         vTaskDelete(slot.handle);
       }
@@ -1545,16 +1546,48 @@ uint32_t ModuleApp::coreMillis() { return static_cast<uint32_t>(esp_timer_get_ti
 
 void ModuleApp::coreDelay(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms == 0 ? 1 : ms)); }
 
+namespace {
+// Место задачи: занять (coreTaskStart) и освободить снятую (reapTasks) — под замком: снимает ядро 1, а
+// задачи приложение запускает и из своих задач (ядро 0).
+portMUX_TYPE g_taskSlotLock = portMUX_INITIALIZER_UNLOCKED;
+}  // namespace
+
 void ModuleApp::taskTrampoline(void* context) {
   TaskSlot* slot = static_cast<TaskSlot*>(context);
   slot->fn(slot->arg);
-  const bool psram = slot->psram;         // место может тут же занять другая задача
-  slot->running = false;
+  if (slot->psram) {
+    // Стек в PSRAM (0.1.152): себя не удалять — vTaskDeleteWithCaps(nullptr) запускает задачу очистки
+    // во внутренней памяти, а её при плеере нет (abort; вероятно, сбой PLAYER 1.34 при радио). Встать
+    // и ждать: снимет ядро 1 (reapTasks), место освободится тогда же.
+    slot->finished = true;
+    slot->running = false;
+    vTaskSuspend(nullptr);
+    for (;;) vTaskDelay(portMAX_DELAY);   // сюда не возвращаются
+  }
+  slot->running = false;                  // место может тут же занять другая задача
   slot->handle = nullptr;
-  if (psram) {
-    vTaskDeleteWithCaps(nullptr);         // стек в PSRAM освободит задача очистки
-  } else {
-    vTaskDelete(nullptr);
+  vTaskDelete(nullptr);
+}
+
+// Ядро 1 (цикл обмена): кончившиеся задачи со стеком в PSRAM — снять. Задача уже стоит (vTaskSuspend):
+// удалить её отсюда — стек и TCB освобождаются сразу, без задачи очистки.
+void ModuleApp::reapTasks() {
+  for (TaskSlot& slot : tasks_) {
+    if (!slot.finished || slot.handle == nullptr) continue;
+    if (eTaskGetState(slot.handle) != eSuspended) continue;   // ещё не встала
+    TaskHandle_t handle = nullptr;
+    portENTER_CRITICAL(&g_taskSlotLock);
+    if (slot.finished) {                  // её не снимает ли уже другая задача (task_start с ядра 0)
+      handle = slot.handle;
+      slot.finished = false;
+      slot.running = true;                // место занято, пока снимаем
+    }
+    portEXIT_CRITICAL(&g_taskSlotLock);
+    if (handle == nullptr) continue;
+    vTaskDeleteWithCaps(handle);
+    portENTER_CRITICAL(&g_taskSlotLock);
+    slot = TaskSlot{};
+    portEXIT_CRITICAL(&g_taskSlotLock);
   }
 }
 
@@ -1566,14 +1599,23 @@ int ModuleApp::coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t p
   // ZM_TASK_STACK_PSRAM (0.1.112): внутренней памяти на стек нет — задаче, которой это можно, стек в
   // PSRAM. 03.11.2026 при радио задаче поиска обложки PLAYER (6 КБ) внутренней не хватало (свободно
   // ~2 КБ, самый большой кусок 704 байта). Без флага — как прежде, только внутренняя.
-  const bool psramAllowed = (stack & ZM_TASK_STACK_PSRAM) != 0;
-  stack &= ~ZM_TASK_STACK_PSRAM;
+  // ZM_TASK_STACK_PSRAM_FIRST (0.1.153, ABI 18): во внутренней не пробовать — она нужна задаче на другое
+  const bool psramFirst = (stack & ZM_TASK_STACK_PSRAM_FIRST) != 0;
+  const bool psramAllowed = psramFirst || (stack & ZM_TASK_STACK_PSRAM) != 0;
+  stack &= ~(ZM_TASK_STACK_PSRAM | ZM_TASK_STACK_PSRAM_FIRST);
   const uint32_t depth = stack < 2048 ? 2048 : stack;
+  instance_->reapTasks();                 // место кончившейся задачи со стеком в PSRAM — свободно
   for (TaskSlot& slot : instance_->tasks_) {
-    if (!slot.running) {
+    bool claimed = false;
+    portENTER_CRITICAL(&g_taskSlotLock);
+    if (!slot.running && !slot.finished) {
+      slot.running = true;
+      claimed = true;
+    }
+    portEXIT_CRITICAL(&g_taskSlotLock);
+    if (claimed) {
       slot.fn = fn;
       slot.arg = arg;
-      slot.running = true;
       slot.psram = false;
       const BaseType_t core = cpu < 0 ? tskNO_AFFINITY : cpu;
       const UBaseType_t level = priority > 20 ? 20 : priority;
@@ -1581,7 +1623,7 @@ int ModuleApp::coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t p
       const size_t internalLargest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
       BaseType_t made=pdFAIL;
       uint32_t waited=0;
-      allocateAfterCleanup(
+      if (!psramFirst) allocateAfterCleanup(
           [&]() {
             made=xTaskCreatePinnedToCore(taskTrampoline, "zm-app", depth, &slot, level,
                                          &slot.handle, core);

@@ -38,6 +38,8 @@ D_READN:        db 0                    ; флаги INFO READN|READDMA (рез�
 D_DEST:         dw 0                    ; куда сектор серии: резидент кладёт туда DMA
 D_CPAGE:        db 0                    ; страница окна #C000 вызывающего (D_CALL)
 D_BOUNCED:      db 0                    ; сектор лёг в D_BOUNCE: драйверу перенести его в HL
+D_WFLAGS:       db 0                    ; серия записи: WRITE_FIRST / WRITE_LAST этого сектора
+D_WXOR:         db 0                    ; серия записи: XOR сектора (байт 4 запроса LINK_F_PUT)
 
 D_SELDEV:
         xor a
@@ -139,6 +141,9 @@ D_FAIL:
         ret
 
 ; A секторов из HL в D_BLKNUM…, HL продвигается. Том VFS (не карта Tang) — отказ ESP: ABT=1.
+; С ESP 0.1.150 (флаг INFO VDISK_WRITEN) — серией (19.11.2026: копирование на флешку шло 67 КБ/с):
+; каждый сектор резидент шлёт блоком DMA прямо из HL (иначе — копией из D_BOUNCE), ответа ESP ждёт
+; только на последний. Прежде — сектор в D_BOUNCE, команда и ответ на каждый.
 D_SDDSE:
         or a
         jr z,D_OK
@@ -146,6 +151,30 @@ D_SDDSE:
         ld a,RES_BEGIN
         call D_DO
         jr c,D_FAIL
+        ld a,(D_READN)
+        and VDISK_WRITEN
+        jr z,.sector
+        ld a,WRITE_FIRST
+        ld (D_WFLAGS),a
+.series:
+        call D_WPREP
+        ld a,(D_COUNT)
+        dec a
+        jr nz,.more
+        ld a,(D_WFLAGS)
+        or WRITE_LAST
+        ld (D_WFLAGS),a
+.more:
+        ld a,RES_WRITEN
+        call D_DO
+        jr c,D_FAIL
+        xor a
+        ld (D_WFLAGS),a
+        inc h
+        inc h                           ; HL += 512
+        call D_NEXT
+        jr nz,.series
+        jr D_OK
 .sector:
         ld de,D_BOUNCE
         ld bc,512
@@ -156,6 +185,50 @@ D_SDDSE:
         call D_NEXT
         jr nz,.sector
         jr D_OK
+
+; Сектор записи с HL: XOR его 512 байтов -> D_WXOR; D_DEST = HL. Резидент возьмёт его DMA прямо из
+; окна вызывающего (D_BOUNCED = 0), если адрес чётный (DMA ходит словами), в окне #8000 или #C000 и
+; сектор целиком в этом окне — как чтение (Res_SecPlace); иначе копия в D_BOUNCE (D_BOUNCED = 1).
+; Сохраняет HL.
+D_WPREP:
+        ld (D_DEST),hl
+        push hl
+        ld a,l
+        rra
+        jr c,.bounce
+        ld a,h
+        cp #80
+        jr c,.bounce
+        and #3F
+        cp #3E
+        jr c,.direct
+        jr nz,.bounce
+        ld a,l
+        or a
+        jr z,.direct
+.bounce:
+        ld de,D_BOUNCE
+        ld bc,512
+        ldir
+        ld a,1
+        jr .flag
+.direct:
+        xor a
+.flag:
+        ld (D_BOUNCED),a
+        pop hl
+        push hl
+        xor a
+        ld b,512/8
+.xor:
+        REPT 8
+        xor (hl)
+        inc hl
+        ENDR
+        djnz .xor
+        ld (D_WXOR),a
+        pop hl
+        ret
 
 ; Следующий сектор: D_BLKNUM+1, D_COUNT-1. NZ — ещё есть. Сохраняет HL.
 D_NEXT:
@@ -178,11 +251,11 @@ D_NEXT:
 ; запрос, оборванный тайм-аутом, не подменит ответ.
 D_RDDSE:
         or a
-        jr z,D_OK
+        jp z,D_OK
         ld (D_COUNT),a
         ld a,RES_BEGIN
         call D_DO
-        jr c,D_FAIL
+        jp c,D_FAIL
         ld a,(D_READN)
         or a
         jr z,.sector

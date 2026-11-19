@@ -15,6 +15,7 @@ constexpr uint32_t kDirRecords = kDirClusters * kClusterBytes / 32;
 constexpr uint32_t kWindowBytes = kClusterBytes;
 constexpr uint32_t kVolumeId = 0x56443446;   // "F4DV"
 const char kLabel[11] = {'V', 'D', 'A', 'C', '4', ' ', 'V', 'F', 'S', ' ', ' '};
+const char kUsbLabel[11] = {'U', 'S', 'B', ' ', 'F', 'L', 'A', 'S', 'H', ' ', ' '};
 
 void put16(uint8_t* p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 void put32(uint8_t* p, uint32_t v) { put16(p, (uint16_t)v); put16(p + 2, (uint16_t)(v >> 16)); }
@@ -81,13 +82,25 @@ void Volume::configure(Source* const* sources, size_t count) {
   reset();
 }
 
+void Volume::configureWritable(Source* source) {
+  writable_ = true;
+  configure(&source, 1);
+}
+
 void Volume::reset() {
+  if (writable_ && built_) flush();
   built_ = false;
   ++generation_;
   for (Window& w : windows_) w.node = UINT32_MAX;
+  overlay_.clear();
+  owners_.clear();
+  firsts_.clear();
+  dirty_ = UINT32_MAX;
 }
 
-uint8_t Volume::flags() const { return kReadOnly | (sources_.empty() ? 0 : kReady) | (truncated_ ? kTruncated : 0); }
+uint8_t Volume::flags() const {
+  return (writable_ ? 0 : kReadOnly) | (sources_.empty() ? 0 : kReady) | (truncated_ ? kTruncated : 0);
+}
 
 void Volume::build() {
   nodes_.clear();
@@ -95,6 +108,12 @@ void Volume::build() {
   names_.clear();
   nextCluster_ = kRootCluster;
   truncated_ = false;
+  if (writable_) {
+    // том с записью: корень — корень единственного источника, читается лениво, как каталоги
+    addNode(0, "", 0, true, 0, 0, 0, 0);
+    built_ = true;
+    return;
+  }
   addNode(0, "", 0, true, 0, 0, 0, 0xFF);   // корень: кластеры 2…
   Node& root = nodes_[0];
   root.firstChild = (uint32_t)nodes_.size();
@@ -135,10 +154,16 @@ uint32_t Volume::addNode(uint32_t parent, const char* name, size_t nameLength, b
 bool Volume::allocate(Node& node, uint32_t clusters) {
   node.cluster = node.clusters = 0;
   if (!clusters) return true;
+  // Том с записью: кластеры, которые WC уже занял (накладка FAT, таблица владельцев), раскладка
+  // перешагивает, а в секторы FAT из накладки вписывает свою цепочку.
+  for (uint32_t used; writable_ && (uint64_t)nextCluster_ + clusters <= (uint64_t)clusterCount_ + 2 &&
+                      (used = firstUsed(nextCluster_, clusters)) != UINT32_MAX;)
+    nextCluster_ = used + 1;
   if ((uint64_t)nextCluster_ + clusters > (uint64_t)clusterCount_ + 2) return false;
   node.cluster = nextCluster_;
   node.clusters = clusters;
   nextCluster_ += clusters;
+  if (writable_) patchFat(node.cluster, clusters);
   return true;
 }
 
@@ -228,9 +253,10 @@ bool Volume::path(uint32_t index, std::vector<char>& out) const {
   std::vector<uint32_t> chain;
   for (uint32_t i = index; i != 0; i = nodes_[i].parent) chain.push_back(i);
   out.clear();
-  // chain.back() — папка источника в корне: в путь источника не входит
+  // chain.back() — папка источника в корне: в путь источника не входит (у тома с записью корень —
+  // сам источник, и папки нет)
   for (size_t k = chain.size(); k-- > 0;) {
-    if (k == chain.size() - 1) continue;
+    if (k == chain.size() - 1 && !writable_) continue;
     const Node& n = nodes_[chain[k]];
     if (!out.empty()) out.push_back('/');
     out.insert(out.end(), names_.begin() + n.nameOffset, names_.begin() + n.nameOffset + n.nameLength);
@@ -290,11 +316,17 @@ bool Volume::load(uint32_t index) {
 }
 
 bool Volume::fileAt(uint32_t cluster, Source** source, std::vector<char>& where, uint64_t* size) const {
-  const int x = built_ ? findExtent(cluster) : -1;
-  if (x < 0) return false;
-  const uint32_t index = extents_[x].node;
+  if (!built_) return false;
+  uint32_t index = UINT32_MAX, k = 0;
+  // Файл, который записал WC (том USB Flash, 0.1.151): его цепочку держит firsts_, а не раскладка —
+  // без этого плеер не находил только что скопированный на флешку файл (sd2_open, PLAYER 1.47)
+  if (!(writable_ && firsts_.find(cluster, &index, &k))) {
+    const int x = findExtent(cluster);
+    if (x < 0) return false;
+    index = extents_[x].node;
+  }
   const Node& n = nodes_[index];
-  if ((n.flags & kDir) || n.cluster != cluster || n.source >= sources_.size()) return false;
+  if ((n.flags & (kDir | kDeleted)) || n.cluster != cluster || n.source >= sources_.size()) return false;
   if (!path(index, where)) return false;
   *source = sources_[n.source];
   *size = n.size;
@@ -343,7 +375,7 @@ void Volume::renderInfo(uint8_t* p) const {
   memset(p, 0, kSectorSize);
   put32(p, 0x41615252);
   put32(p + 484, 0x61417272);
-  put32(p + 488, 0);            // свободного нет: только чтение
+  put32(p + 488, writable_ ? 0xFFFFFFFF : 0);   // только чтение — свободного нет; с записью — неизвестно
   put32(p + 492, 0xFFFFFFFF);
   put32(p + 508, 0xAA550000);
 }
@@ -406,7 +438,7 @@ bool Volume::renderDir(uint32_t index, uint64_t offset, uint8_t* out) {
     emit(r);
   };
   if (index == 0) {
-    shortEntry((const uint8_t*)kLabel, 0x08, 0, 0, 0, 0);
+    shortEntry((const uint8_t*)(writable_ ? kUsbLabel : kLabel), 0x08, 0, 0, 0, 0);
   } else {
     uint8_t dot[11], dotdot[11];
     memset(dot, ' ', 11); dot[0] = '.';
@@ -436,7 +468,7 @@ bool Volume::renderDir(uint32_t index, uint64_t offset, uint8_t* out) {
       }
     }
     const uint32_t size = (n.flags & kDir) ? 0 : (uint32_t)std::min<uint64_t>(n.size, 0xFFFFFFFFu);
-    shortEntry(n.sfn, (n.flags & kDir) ? 0x10 : 0x21, n.cluster, size, n.date, n.time);
+    shortEntry(n.sfn, (n.flags & kDir) ? 0x10 : writable_ ? 0x20 : 0x21, n.cluster, size, n.date, n.time);
   }
   return true;
 }
@@ -473,6 +505,20 @@ bool Volume::read(uint32_t lba, uint8_t* out) {
   if (!built_) build();
   memset(out, 0, kSectorSize);
   if (lba >= kTotalSectors) return false;
+  if (writable_) {
+    // том с записью: записанное WC — из накладки; данные — по владельцу кластера (у узлов WC
+    // кластеры идут по FAT, а не подряд)
+    if (const uint8_t* p = overlay_.find(lba)) { memcpy(out, p, kSectorSize); return true; }
+    if (lba >= dataStart()) {
+      const uint32_t rel = lba - dataStart();
+      uint32_t node, index;
+      if (!owner(kRootCluster + rel / kSectorsPerCluster, &node, &index)) return true;   // свободный
+      const uint64_t offset = (uint64_t)index * kClusterBytes + (uint64_t)(rel % kSectorsPerCluster) * kSectorSize;
+      const Node& n = nodes_[node];
+      if (n.flags & kDir) return (n.flags & kWc) ? true : renderDir(node, offset, out);
+      return renderFile(node, offset, out);
+    }
+  }
   if (lba == 0 || lba == 6) { renderBoot(out); return true; }
   if (lba == 1 || lba == 7) { renderInfo(out); return true; }
   if (lba < kReservedSectors) return true;

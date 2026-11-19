@@ -179,6 +179,7 @@ page1Start:
         INCLUDE "track.asm"
         INCLUDE "fast_media.asm"
         INCLUDE "screen.asm"
+        INCLUDE "seek.asm"
         ENDMODULE
 page1End:
         ASSERT page1End <= Mp3ReadBuffer, "page 1 code overlaps SD read buffer"

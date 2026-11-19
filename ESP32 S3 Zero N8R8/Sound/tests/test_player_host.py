@@ -694,6 +694,64 @@ class PlayerHostTest(unittest.TestCase):
         self.assertEqual(r['seconds'], str(60 + 200 * FRAME_SAMPLES // RATE))
         self.assertGreaterEqual(int(r['pcm_flushes']), 1)
 
+    def test_sd2_file_is_read_by_the_player(self) -> None:
+        """PLAYER 1.47 (19.11.2026): файл на SD2 под VDAC4 VFS плеер читает сам (sd2_open/sd2_read),
+        а не плагин через Z80 — FLAC 24 бит с флешки так получал 181 КБ/с из нужных 235 и рвался.
+        AUDIO_OPEN с OPEN_SD2 — ответ с OPEN_REPLY_SD2, AUDIO_DATA отвергается, AUDIO_CLOSE [1]
+        плагина (он «всё отдал» сразу) поток не закрывает, песня — до конца, файл закрыт."""
+        mp3 = silent_mp3(300, tag=2000)
+        r = self.run_host('sd2', mp3)
+        self.assertEqual((r['open'], r['open_sd2'], r['data_while_sd2']), ('1', '1', '2'))
+        self.assertEqual(r['state_after_close'], '1', 'AUDIO_CLOSE [1] плагина звук не кончает')
+        self.assertEqual((r['state'], r['finished'], r['decoded']), ('0', '1', '1'))
+        self.assertEqual(int(r['pcm_frames']), 300 * FRAME_SAMPLES)
+        self.assertEqual((r['errors'], r['underruns']), ('0', '0'))
+        self.assertEqual(int(r['sd2_bytes']), len(mp3) + 16, 'весь файл — по разу (и сверка начала)')
+        self.assertEqual((r['sd2_opens'], r['sd2_closes']), ('1', '1'))
+        self.assertIn('stream read by ESP from SD2 (VFS volume), cluster 7', self.log)
+        self.assertRegex(self.log, r'player: input \d+ KB in \d+ ms')
+
+    def test_sd2_stream_after_a_long_tag(self) -> None:
+        """Длинную метку ID3 плагин пропускает сам: звук — с места --start файла."""
+        mp3 = silent_mp3(200, tag=5000)
+        start = 10 + 5000
+        r = self.run_host('sd2', mp3, start=start)
+        self.assertEqual(r['open_sd2'], '1')
+        self.assertEqual(r['finished'], '1')
+        self.assertEqual(int(r['pcm_frames']), 200 * FRAME_SAMPLES)
+        self.assertEqual(int(r['sd2_bytes']), len(mp3) - start + 16, 'сверка начала и поток за меткой')
+
+    def test_sd2_seek_reads_from_the_new_place(self) -> None:
+        """Перемотка: AUDIO_FLUSH [мс][место] — плеер читает файл с нового места сам."""
+        mp3 = silent_mp3(400)
+        r = self.run_host('sd2', mp3, resume=200 * FRAME_BYTES, base=60000)
+        self.assertEqual((r['open_sd2'], r['flush']), ('1', '1'))
+        self.assertEqual(r['finished'], '1')
+        self.assertEqual(r['seconds'], str(60 + 200 * FRAME_SAMPLES // RATE))
+        self.assertEqual(r['sd2_closes'], '1')
+
+    def test_sd2_refused_streams_from_the_plugin(self) -> None:
+        """Файла на SD2 нет (том собран заново) или начало не то — поток, как прежде, от плагина."""
+        mp3 = silent_mp3(200)
+        for keys, why in (({'sd2-missing': 1}, 'not found'), ({'sd2-bad': 1}, 'differs from the plugin')):
+            with self.subTest(why=why):
+                r = self.run_host('sd2', mp3, **keys)
+                self.assertEqual((r['open'], r['open_sd2']), ('1', '0'))
+                self.assertEqual(r['finished'], '1')
+                self.assertEqual(int(r['pcm_frames']), 200 * FRAME_SAMPLES)
+                self.assertIn(why, self.log)
+                self.assertEqual(r['sd2_open_now'], '0', 'файл не остался открытым')
+
+    def test_sd2_read_failure_ends_the_song(self) -> None:
+        """Флешку вынули посреди песни: чтение отказало — играет прочитанное и встаёт, не виснет."""
+        mp3 = silent_mp3(400)
+        r = self.run_host('sd2', mp3, **{'sd2-fail': 150 * FRAME_BYTES})
+        self.assertEqual(r['open_sd2'], '1')
+        self.assertEqual((r['state'], r['finished']), ('0', '1'))
+        self.assertLess(int(r['pcm_frames']), 400 * FRAME_SAMPLES)
+        self.assertIn('SD2 read at', self.log)
+        self.assertEqual(r['sd2_closes'], '1')
+
     def test_seek_while_draining_reopens_the_stream(self) -> None:
         """Плагин всё отдал и закрыл поток для доигрывания, а пользователь мотает
         назад: прежде FLUSH отвергался (поток закрыт), теперь поток открывается снова."""
@@ -855,6 +913,47 @@ class PlayerHostTest(unittest.TestCase):
         self.assertEqual(r['cover_search_url'],
                          'https://api.deezer.com/search?limit=5&q=Robert%20Miles%20Children')
         self.assertEqual(r['cover_pictures'], '1', 'исполнитель тот же — обложка взята')
+
+    def test_online_cover_cut_picture_downloaded_again(self) -> None:
+        """PLAYER 1.50 (19.11.2026): ядро отдаёт обрыв соединения как конец потока. На плате TLS
+        оборвался на 8 КБ картинки из 70 («esp-aes: Failed to allocate memory»), и обрезанный JPEG
+        ушёл декодеру — код 202, обложки нет. Тело короче Content-Length — обрыв: скачать заново,
+        обрезанное декодеру не давать."""
+        name = '01 - Robert Miles - Children (Dream Version).mp3'.encode('cp866')
+        block = bytes([1, 1, 0, 3, 0, 10, 0]) + bytes(4) + name + b'\0' + b'\0'
+        size = len(self.NET_JPEG)
+        r = self.ui_run(b'', block=block, **{'cover-cut': 1000})
+        self.assertIn(f'player: online cover: answer cut at 1000 of {size} bytes', self.log)
+        self.assertEqual(r['cover_pictures'], '2', 'оборвалась — скачана заново')
+        self.assertIn('player: online cover: JPEG, 1 KB', self.log)
+        self.assertNotEqual(r['ui_cover_serial'], '0', 'обложка на экране')
+        r = self.ui_run(b'', block=block, **{'cover-cut': 1000, 'cover-cuts': 9})
+        self.assertEqual(r['cover_pictures'], '3', 'три попытки, не больше')
+        self.assertIn('player: online cover: picture cut 3 times', self.log)
+        self.assertNotIn('player: online cover: JPEG', self.log)
+        self.assertEqual(r['ui_cover_serial'], '0', 'обрезанную картинку декодеру не дали')
+
+    def test_online_cover_stack_in_psram_for_files(self) -> None:
+        """PLAYER 1.48 (19.11.2026): с флешкой в ESP внутренней памяти на стек поиска (6 КБ) нет — у
+        файла он в PSRAM, обложка находится. Только с прошивкой 0.1.152+ (ABI minor 17): старая
+        кончившуюся задачу со стеком в PSRAM удаляет через задачу очистки во внутренней памяти."""
+        name = '01 - Robert Miles - Children (Dream Version).mp3'.encode('cp866')
+        block = bytes([1, 1, 0, 3, 0, 10, 0]) + bytes(4) + name + b'\0' + b'\0'
+        wide = self.ui_run(b'', block=block, internal=1_000_000, **{'abi-minor': 17})
+        self.assertNotIn('-> PSRAM', self.log, 'прошивка 0.1.152: памяти хватает — стек во внутренней')
+        tight = int(wide['internal_peak']) - 2000          # на стек поиска внутренней не хватает
+        r = self.ui_run(b'', block=block, internal=tight, **{'abi-minor': 17})
+        self.assertIn('internal: task stack 6144 -> PSRAM', self.log)
+        self.assertEqual((r['cover_searches'], r['cover_pictures']), ('1', '1'), 'обложка из сети есть')
+        # PLAYER 1.49 с прошивкой 0.1.153 (ABI 18): сразу в PSRAM, и при достатке внутренней —
+        # она остаётся соединению TLS (на плате 1.48 сел во внутреннюю, и TLS не хватило)
+        r = self.ui_run(b'', block=block, internal=1_000_000)
+        self.assertIn('internal: task stack 6144 -> PSRAM', self.log)
+        self.assertEqual(r['cover_pictures'], '1')
+        r = self.ui_run(b'', block=block, internal=tight, **{'abi-minor': 16})
+        self.assertIn('player: online cover: no memory for the search task', self.log)
+        self.assertNotIn('-> PSRAM', self.log, 'старая прошивка — флага нет')
+        self.assertEqual(r['cover_pictures'], '0')
 
     def test_screen_model_and_online_cover(self) -> None:
         # Экран оверлеем Tang (PLAYER 1.21): что прислал плагин в теле AUDIO_STATUS, метки,

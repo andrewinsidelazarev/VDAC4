@@ -36,7 +36,8 @@ DRACT, ORIGA, XPAN, STATUS, GATE, SELDEV_INV = 0x6868, 0x63ED, 0x6149, 0x8723, 0
 SPACE, ENTER, ESC = 0x10, 0x16, 0x17
 UP, DOWN = 0x11, 0x12
 ANY = 0xFF                              # любая клавиша: её берёт только ANYK (окно итога)
-CHOICE = {None: [], 'esc': [ESC], 'sd': [ENTER], 'tang': [DOWN, ENTER], 'vfs': [DOWN, DOWN, ENTER]}
+CHOICE = {None: [], 'esc': [ESC], 'sd': [ENTER], 'tang': [DOWN, ENTER], 'vfs': [DOWN, DOWN, ENTER],
+          'usb': [DOWN, DOWN, DOWN, ENTER]}
 API_TABLE = 0x6FEF                      # PLUGIN_API_TABLE WC: адреса функций API (MD20.ASM)
 REAL_UI = (0x01, 0x02, 0x0B)            # PRWOW, RRESB, TXTPR: с real_ui — настоящий код WC (WCIF.ASM)
 DEV_SD1, DEV_SD2 = 1, 6                 # (IX+#1D) панели: первый и второй SD ZC
@@ -74,6 +75,8 @@ class Vdisk:
         self.writes = []                # LBA записей
         self.card = {}
         self.raw = False
+        self.usb = False                # режим 2 (0.1.148): SD2 — том флешки ESP с записью
+        self.no_usb = False             # MODE 2: флешки нет
         self.fail_lba = set()
         self.no_service = False
         self.no_mode = False            # прошивка до 0.1.100: MODE и WRITE без ответа
@@ -84,6 +87,10 @@ class Vdisk:
         self.readn = False              # прошивка 0.1.127+: READN (флаг INFO #20)
         self.readn_reqs = []            # (lba, секторов, режим)
         self.readdma = False            # прошивка 0.1.128+: READN с секторами через DMA (INFO #10)
+        self.writen = False             # прошивка 0.1.150+: серия записи (INFO #80)
+        self.series_status = 0          # серия: первый отказ с её начала
+        self.write_replies = 0          # ответов на WRITE
+        self.series_frames = 0          # кадров WRITE серии ([lba][флаги][сектор])
         self.core = None                # ядро канала (сеанс и очередь секторов) — ставит Wc
         self.pending = []               # (сеанс, сектор либо None — отказ): ещё не в очереди
         self.sector_gap = 0             # чтений буфера до каждого следующего сектора (карта медленная)
@@ -102,21 +109,40 @@ class Vdisk:
         elif cmd in (0x18, 0x19) and self.no_mode:
             return b''                  # старая прошивка: неизвестная команда — без ответа
         elif cmd == 0x19:
-            assert len(p) == 1 and p[0] <= 1, p
+            assert len(p) == 1 and p[0] <= 2, p
             self.modes.append(p[0])
             status = 0
-            if p[0] == 1 and self.no_card:
+            if (p[0] == 1 and self.no_card) or (p[0] == 2 and self.no_usb):
                 status = 4
             else:
                 self.raw = p[0] == 1
+                self.usb = p[0] == 2
             reply = frame(0x99, bytes([status, self.info_flags()]) + struct.pack('<I', 0x03B00000))
         elif cmd == 0x18:
-            assert len(p) == 516, len(p)
+            # 0.1.150: [lba][флаги][сектор] — серия, ответ только на WRITE_LAST (vdisk_service.cpp)
+            assert len(p) in (516, 517), len(p)
+            series = len(p) == 517
+            if series:
+                assert self.writen, 'серия у прошивки без флага'
+                self.series_frames += 1
+            flags = p[4] if series else 0
+            if flags & 1:
+                self.series_status = 0
             lba = struct.unpack_from('<I', p)[0]
-            status = 3 if not self.raw else 2 if lba in self.fail_lba else 0
-            if status == 0:
-                self.card[lba] = bytes(p[4:])
-                self.writes.append(lba)
+            if series and self.series_status:
+                status = self.series_status
+            else:
+                status = 3 if not (self.raw or self.usb) else 2 if lba in self.fail_lba else 0
+                if status == 0:
+                    self.card[lba] = bytes(p[5:] if series else p[4:])
+                    self.writes.append(lba)
+            if series:
+                if status and not self.series_status:
+                    self.series_status = status
+                if not flags & 2:
+                    return b''
+                status, self.series_status = self.series_status, 0
+            self.write_replies += 1
             reply = frame(0x98, bytes([status]))
         elif cmd == 0x15:
             assert p == b''
@@ -134,24 +160,24 @@ class Vdisk:
                 # секторы — в очередь канала (ByteLink::pushSector), кадров нет
                 assert self.readdma, 'READN DMA у прошивки без флага'
                 session = self.core.sector_session
-                if mode & 0x7F != (1 if self.raw else 0):
+                if mode & 0x7F != self.mode_now():
                     self.pending.append((session, None))
                     return b''
                 for i in range(count):
                     if lba + i in self.fail_lba:
                         self.pending.append((session, None))
                         break
-                    data = self.card.get(lba + i, self.sector(lba + i)) if self.raw else self.sector(lba + i)
+                    data = self.card.get(lba + i, self.sector(lba + i)) if self.mode_now() else self.sector(lba + i)
                     self.pending.append((session, data))
                 return b''
-            if mode != (1 if self.raw else 0):
+            if mode != self.mode_now():
                 return frame(0x9E, b'\5')                # не тот режим
             out = b''
             for i in range(count):
                 if lba + i in self.fail_lba:
                     out += frame(0x9E, b'\2')           # источник не ответил: серия кончилась
                     break
-                data = self.card.get(lba + i, self.sector(lba + i)) if self.raw else self.sector(lba + i)
+                data = self.card.get(lba + i, self.sector(lba + i)) if self.mode_now() else self.sector(lba + i)
                 out += frame(0x9E, data[:256]) + frame(0x9E, data[256:])
             self.max_payload = max(self.max_payload, 256)
             return out
@@ -161,8 +187,8 @@ class Vdisk:
             assert 1 <= n <= 248 and ofs + n <= 512
             self.reads.append((lba, ofs, n))
             self.read_modes.append(p[7] if len(p) == 8 else None)
-            data = self.card.get(lba, self.sector(lba)) if self.raw else self.sector(lba)
-            if len(p) == 8 and p[7] != (1 if self.raw else 0):
+            data = self.card.get(lba, self.sector(lba)) if self.mode_now() else self.sector(lba)
+            if len(p) == 8 and p[7] != self.mode_now():
                 reply = frame(0x96, b'\5')             # не тот режим
             else:
                 reply = frame(0x96, b'\2' if lba in self.fail_lba else b'\0' + data[ofs:ofs + n])
@@ -172,9 +198,12 @@ class Vdisk:
         assert len(reply) - 5 <= 256, 'кадр ESP -> Z80 длиннее 256'
         return reply
 
+    def mode_now(self):
+        return 1 if self.raw else 2 if self.usb else 0
+
     def info_flags(self):
-        return ((0x41 if self.raw else self.flags) | (0x20 if self.readn else 0) |
-                (0x30 if self.readdma else 0))
+        return ((0x41 if self.raw else 0x09 if self.usb else self.flags) | (0x20 if self.readn else 0) |
+                (0x30 if self.readdma else 0) | (0x80 if self.writen else 0))
 
     def feed(self):
         """Служба кладёт секторы, пока в очереди канала есть место (pushSector ждёт)."""
@@ -618,21 +647,21 @@ class Vfs(unittest.TestCase):
     def selector(self, scr):
         """Окно выбора на экране: строка полосы (0…2) и строка метки «◄ now» (0…2 или None);
         заодно — рамка, разделитель, вопрос, цвета строк и клавиш."""
-        w, h = 56, 11
+        w, h = 56, 12
         x, y = window_at(w, h)
         chars, colours = cells(scr, x, y, w)
         self.assertEqual((chars[0], chars[-1]), (0xC9, 0xBB), 'двойная рамка')
         self.assertIn(b' VDAC4 VFS ', chars)
         head = chars.index(b' VDAC4 VFS ')
         self.assertEqual(set(colours[head:head + 11]), {0x71}, 'заголовок — инверсией окна')
-        chars, colours = cells(scr, x, y + 8, w)
+        chars, colours = cells(scr, x, y + 9, w)
         self.assertEqual(chars, bytes([0xC7]) + bytes([0xC4]) * (w - 2) + bytes([0xB6]), 'разделитель ╟──╢')
         chars, colours = cells(scr, x, y + 2, w)
         title = chars.index(b'Choose what drive SD2 shows')
         self.assertEqual(set(colours[title:title + 27]), {0x1F})
         bar, now = None, None
-        names = (b'SD-Card 2', b'SD Tang', b'VFS')
-        for i in range(3):
+        names = (b'SD-Card 2', b'SD Tang', b'VFS', b'USB Flash')
+        for i in range(4):
             chars, colours = cells(scr, x, y + 4 + i, w)
             self.assertEqual(chars[5:5 + len(names[i])], names[i])
             if colours[2] == 0x50:              # полоса: чёрный по голубому, «►», по знаку поля с боков
@@ -650,7 +679,7 @@ class Vfs(unittest.TestCase):
                     self.assertEqual(set(colours[48:53]), {0x1C}, '«◄ now» — ярко-зелёным')
             else:
                 self.assertEqual(chars[48:53], b'     ')
-        chars, colours = cells(scr, x, y + 9, w)
+        chars, colours = cells(scr, x, y + 10, w)
         for key in (b'\x18\x19', b'Enter', b'Esc'):
             at = chars.index(key)
             self.assertEqual(set(colours[at:at + len(key)]), {0x1E}, 'клавиши — жёлтым')
@@ -672,7 +701,7 @@ class Vfs(unittest.TestCase):
         msg = wc.toggle('esc')
         self.assertEqual(msg[0], '')
         self.assertEqual(len(wc.windows), 1, 'только окно выбора')
-        self.assertEqual((wc.windows[0][4], wc.windows[0][5], wc.windows[0][6]), (56, 11, 0x17))
+        self.assertEqual((wc.windows[0][4], wc.windows[0][5], wc.windows[0][6]), (56, 12, 0x17))
         self.assertEqual(len(wc.screens), 1)
         self.assertEqual(self.selector(wc.screens[0]), (0, 0), 'полоса и метка — на SD-Card 2')
         self.assertEqual(wc.screen(), background, 'окно закрыто, экран под ним — прежний')
@@ -1082,6 +1111,183 @@ class Vfs(unittest.TestCase):
         self.assertEqual(wc.vdisk.modes, [0, 1, 0])
         self.assertEqual(wc.page(RES_PAGE)[0x10A], 0)
         self.assertEqual(wc.core_bytes(0x4FE8, len(ORIGINAL)), ORIGINAL)
+
+    def test_writes_go_as_dma_blocks(self):
+        """19.11.2026 (ESP 0.1.149, «Файл копируется медленно»): сектор WRITE — блоком DMA «ОЗУ → SPI»
+        (LINK_F_PUT) из страницы резидента, а не обменами по 54 байта. Прошивка без приёма блоков и
+        блок, трижды не сошедшийся, — прежним путём; кадр и данные у ESP везде те же. Тактов Z80 на
+        сектор — заметно меньше прежнего."""
+        data = bytes((i * 53 + 11) & 255 for i in range(8 * 512))
+
+        def write(put=True, corrupt=0, sectors=8, lba=9000):
+            wc = self.tang_driver()
+            wc.link.put = put
+            wc.link.corrupt_puts = corrupt
+            wc.map(3, 0x44)
+            wc.flush()
+            wc.page(0x44)[0x100:0x100 + sectors * 512] = data[:sectors * 512]
+            wc.mem[0xC100:0xC100 + sectors * 512] = data[:sectors * 512]
+            wc.run(0x3809, hl=lba, de=0)
+            start = wc.ticks
+            wc.run(0x3812, a=sectors, hl=0xC100)
+            per = (wc.ticks - start) / sectors
+            self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0x40, 0))
+            self.assertEqual(wc.vdisk.writes, list(range(lba, lba + sectors)))
+            self.assertEqual(b''.join(wc.vdisk.card[lba + i] for i in range(sectors)), data[:sectors * 512])
+            self.assertEqual(wc.vdisk.max_request, 516)
+            return wc, per
+
+        wc, dma = write()
+        self.assertEqual((wc.link.core.put_blocks, wc.link.core.put_bad), (8, 0))
+        wc, frames = write(put=False)
+        self.assertEqual(wc.link.core.put_blocks, 0)
+        wc, _ = write(corrupt=1, sectors=2)
+        self.assertEqual((wc.link.core.put_blocks, wc.link.core.put_bad), (2, 1))
+        wc, _ = write(corrupt=3, sectors=2)        # блок первого сектора трижды неверен: он — обменами
+        self.assertEqual((wc.link.core.put_blocks, wc.link.core.put_bad), (1, 3))
+        print(f'\nзапись: {dma:.0f} тактов Z80 на сектор блоком DMA, {frames:.0f} — обменами по 54 байта')
+        self.assertLess(dma, frames * 0.6)
+
+    def test_series_writes_dma_from_wc_buffer(self):
+        """19.11.2026 (ESP 0.1.150, флаг INFO #80, копирование 67 КБ/с): секторы одного вызова SDDSE —
+        серией кадров [lba][флаги][сектор], сектор блоком DMA прямо из буфера WC (окна #C000 и #8000,
+        чётный адрес) либо копией из D_BOUNCE (нечётный адрес); ответ ESP — один, на
+        последний сектор. Отказ посреди серии — ABT и дальше не пишется. Прошивка без приёма блоков —
+        те же кадры обычными обменами, и из окна #C000 вызывающего тоже. Тактов Z80 на сектор — меньше,
+        чем у посекторной записи."""
+        data = bytes((i * 71 + 29) & 255 for i in range(8 * 512))
+
+        def series(hl, window, page, sectors=8, put=True, lba=12000, fail=()):
+            wc = Wc()
+            wc.vdisk.writen = True
+            wc.install_resident()
+            self.assertEqual(wc.toggle('tang')[0], '')
+            wc.map(0, 0xF1)
+            wc.run(0x4FF8, a=6, ix=0)
+            self.assertEqual(wc.peek(wc.res_sym['D_READN']) & 0x80, 0x80, 'флаг серии — в драйвере')
+            wc.link.put = put
+            wc.vdisk.fail_lba = set(fail)
+            wc.map(window, page)
+            wc.flush()
+            base = hl - window * 0x4000
+            wc.page(page)[base:base + sectors * 512] = data[:sectors * 512]
+            wc.mem[hl:hl + sectors * 512] = data[:sectors * 512]
+            wc.run(0x3809, hl=lba, de=0)
+            replies = wc.vdisk.write_replies
+            start = wc.ticks
+            wc.m.iff1 = wc.m.iff2 = 1
+            wc.run(0x3812, a=sectors, hl=hl)
+            per = (wc.ticks - start) / sectors
+            self.assertEqual((wc.window[window], wc.m.iff1), (page, 1), 'страница и прерывания — прежние')
+            return wc, per, wc.vdisk.write_replies - replies
+
+        # окно #4000 в стенде — код WC, стек и заглушки: копию через D_BOUNCE проверяет нечётный адрес
+        for hl, window, page in ((0xC100, 3, 0x44), (0x8000, 2, 0x45), (0xC101, 3, 0x44), (0x8001, 2, 0x45)):
+            with self.subTest(hl=hex(hl)):
+                wc, per, replies = series(hl, window, page)
+                self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0x40, 0))
+                self.assertEqual(wc.m.hl, hl + 8 * 512)
+                self.assertEqual(wc.vdisk.writes, list(range(12000, 12008)))
+                self.assertEqual(b''.join(wc.vdisk.card[12000 + i] for i in range(8)), data)
+                self.assertEqual((wc.vdisk.series_frames, replies), (8, 1), 'один ответ на серию')
+                self.assertEqual(wc.link.core.put_blocks, 8)
+                if hl == 0xC100:
+                    direct = per
+        # отказ посреди серии: ABT, дальше не пишется, ответ — один
+        wc, _, replies = series(0xC100, 3, 0x44, fail=(12003,))
+        self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0, 1))
+        self.assertEqual((wc.vdisk.writes, replies), (list(range(12000, 12003)), 1))
+        # следующая серия — с чистого итога
+        wc.run(0x3809, hl=13000, de=0)
+        wc.vdisk.fail_lba = set()
+        wc.run(0x3812, a=2, hl=0xC100)
+        self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0x40, 0))
+        self.assertEqual(wc.vdisk.writes[-2:], [13000, 13001])
+        # прошивка без приёма блоков: обычными обменами, и из окна #C000 вызывающего
+        for hl, window, page in ((0xC100, 3, 0x44), (0x8000, 2, 0x45)):
+            with self.subTest(put=False, hl=hex(hl)):
+                wc, frames, replies = series(hl, window, page, sectors=3, put=False)
+                self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0x40, 0))
+                self.assertEqual(b''.join(wc.vdisk.card[12000 + i] for i in range(3)), data[:3 * 512])
+                self.assertEqual((wc.link.core.put_blocks, replies), (0, 1))
+        # посекторно (прошивка 0.1.149) — для сравнения
+        wc = self.tang_driver()
+        wc.map(3, 0x44)
+        wc.flush()
+        wc.page(0x44)[0x100:0x100 + 8 * 512] = data
+        wc.mem[0xC100:0xC100 + 8 * 512] = data
+        wc.run(0x3809, hl=12000, de=0)
+        start = wc.ticks
+        wc.run(0x3812, a=8, hl=0xC100)
+        single = (wc.ticks - start) / 8
+        self.assertEqual(b''.join(wc.vdisk.card[12000 + i] for i in range(8)), data)
+        print(f'\nсерия записи: {direct:.0f} тактов Z80 на сектор, посекторно — {single:.0f}')
+        self.assertLess(direct, single * 0.7)
+
+    def test_usb_flash_mode(self):
+        """19.11.2026: режим USB Flash — SD2 = том флешки ESP с записью (прошивка 0.1.148, MODE 2).
+        Состояние резидента 3, READ и READN — с байтом режима 2, WRITE принимается; ESP после
+        перезагрузки (режим 0) отказывает в чтении; переходы во все режимы и обратно; без флешки —
+        окно «No USB flash drive in the ESP.» и SD2 не меняется."""
+        wc = Wc(real_ui=True)
+        wc.vdisk.readn = True
+        wc.install_resident()
+        wc.poke(WINDOW + 0x1D, 6)
+        msg = wc.toggle('usb')
+        self.assertEqual(msg[0], '', msg)
+        self.assertEqual(wc.page(RES_PAGE)[0x10A], 3)
+        self.assertEqual(wc.vdisk.modes, [0, 2])
+        self.assertEqual(wc.peek(WINDOW + 0x1D), DEV_SD2, 'панель — на SD2 с новым томом')
+        # окно выбора: метка «◄ now» — на USB Flash
+        wc.screens.clear()
+        wc.toggle('esc')
+        self.assertEqual(self.selector(wc.screens[0]), (0, 3))
+        # драйвер SD2: запись двух секторов, чтение их же (байт режима 2), серия READN — тоже 2
+        wc.map(0, 0xF1)
+        wc.run(0x4FF8, a=6, ix=0)
+        data = bytes((i * 29 + 3) & 255 for i in range(1024))
+        wc.map(3, 0x44)
+        wc.flush()
+        wc.page(0x44)[0x100:0x100 + 1024] = data
+        wc.mem[0xC100:0xC100 + 1024] = data
+        wc.run(0x3809, hl=7000, de=0)
+        wc.m.iff1 = wc.m.iff2 = 1
+        wc.run(0x3812, a=2, hl=0xC100)
+        self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0x40, 0))
+        self.assertEqual(wc.vdisk.writes, [7000, 7001])
+        wc.run(0x3809, hl=7000, de=0)
+        wc.run(0x380F, a=2, hl=0xC800)
+        wc.flush()
+        self.assertEqual(bytes(wc.page(0x44)[0x800:0x800 + 1024]), data)
+        self.assertTrue(wc.vdisk.readn_reqs and all(r[2] & 0x7F == 2 for r in wc.vdisk.readn_reqs),
+                        wc.vdisk.readn_reqs)
+        self.assertTrue(set(wc.vdisk.read_modes) <= {2}, wc.vdisk.read_modes)
+        # ESP перезагрузилась: чтение — отказ, а не сектор тома VFS
+        wc.vdisk.usb = False
+        wc.run(0x3809, hl=7000, de=0)
+        wc.run(0x380F, a=1, hl=0xC800)
+        self.assertEqual((wc.m.f & 0x40, wc.peek(0x384A)), (0, 1))
+        wc.vdisk.usb = True
+        # USB Flash -> VFS -> USB Flash -> SD Tang -> USB Flash -> SD-Card 2
+        self.assertEqual(wc.toggle('vfs')[0], '')
+        self.assertEqual((wc.page(RES_PAGE)[0x10A], wc.vdisk.modes[-1]), (1, 0))
+        self.assertEqual(wc.toggle('usb')[0], '')
+        self.assertEqual(wc.toggle('tang')[0], '')
+        self.assertEqual((wc.page(RES_PAGE)[0x10A], wc.vdisk.modes[-1]), (2, 1))
+        self.assertEqual(wc.toggle('usb')[0], '')
+        self.assertEqual((wc.page(RES_PAGE)[0x10A], wc.vdisk.modes[-1]), (3, 2))
+        self.assertEqual(wc.toggle('sd')[0], '')
+        self.assertEqual(wc.vdisk.modes[-1], 0, 'флешка — снова ESP')
+        self.assertEqual(wc.page(RES_PAGE)[0x10A], 0)
+        self.assertEqual(wc.core_bytes(0x4FE8, len(ORIGINAL)), ORIGINAL)
+        self.assertEqual(wc.peek(WINDOW + 0x1D), DEV_SD1, 'возврат SD-Card 2: панель — на 1:')
+        # флешки нет
+        wc2 = Wc()
+        wc2.install_resident()
+        wc2.vdisk.no_usb = True
+        self.assertEqual(wc2.toggle('usb')[0], 'No USB flash drive in the ESP.')
+        self.assertEqual(wc2.page(RES_PAGE)[0x10A], 0)
+        self.assertEqual(wc2.core_bytes(0x4FE8, 16), bytes(16), 'SD2 не тронут')
 
     def test_vfs_mode_refuses_writes(self):
         wc = self.driver()

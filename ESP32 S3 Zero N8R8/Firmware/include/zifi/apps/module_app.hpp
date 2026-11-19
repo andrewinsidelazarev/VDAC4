@@ -44,6 +44,7 @@ class ModuleApp : public App {
   void pollNetworkCore(uint32_t now) override;
   // Codex: владельцу канала разрешено выгрузить ELF, даже когда Z80 уже ушёл.
   void pollCore1(uint32_t now);
+  void reapTasks();                        // кончившиеся задачи со стеком в PSRAM — снять (ядро 1)
   // Приложение качает поток (net_open, интернет-радио): Wi-Fi без энергосбережения.
   bool keepsWifiAwake() const override;
   // Кристалл ESP, десятые доли °C (раз в секунду); INT16_MIN — датчика нет.
@@ -68,6 +69,7 @@ class ModuleApp : public App {
     void* arg;
     volatile bool running;
     bool psram;                            // стек в PSRAM (ZM_TASK_STACK_PSRAM): снимать WithCaps
+    volatile bool finished;                // стек в PSRAM: функция кончилась, задача стоит — снять (reapTasks)
   };
   struct LoadedModule {
     bool used;

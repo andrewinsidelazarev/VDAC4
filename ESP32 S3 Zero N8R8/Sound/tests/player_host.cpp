@@ -23,6 +23,12 @@
 //   stop    — выгрузка приложения посреди звука;
 //   module  — модуль (или MIDI с --midi 1) целиком, AUDIO_INFO, --seek позиций
 //             (у MIDI — по 10 с), до конца песни;
+//   sd2     — файл на SD2 читает сам плеер (1.47): AUDIO_OPEN с OPEN_SD2 (кластер 7, длина
+//             файла, --start — начало звука, первые 16 байтов звука), ответ с OPEN_REPLY_SD2,
+//             AUDIO_CLOSE [1] (плеер его не ждёт), с --resume — посреди звука AUDIO_FLUSH(--base
+//             мс, место --resume), до конца песни; --sd2-missing 1 — sd2_open не находит файл,
+//             --sd2-bad 1 — начало не то: поток — от «плагина», как прежде; --sd2-fail N —
+//             sd2_read с места файла N и дальше отказывает;
 //   missing — нет декодеров потока в кэше (с --ext — того, что по расширению):
 //             AUDIO_OPEN должен отказать;
 //   cover   — метка ID3 файла досылается AUDIO_COVER с того места, что просит
@@ -309,13 +315,14 @@ int coreTaskStart(zm_task_fn fn, void* arg, uint32_t stack, uint8_t priority, in
     return ZM_ERROR;                   // помощник PLAYER на ядре 1
   }
   // ZM_TASK_STACK_PSRAM (прошивка 0.1.112): внутренней нет — стек в PSRAM
-  const bool psramAllowed = (stack & ZM_TASK_STACK_PSRAM) != 0;
-  stack &= ~ZM_TASK_STACK_PSRAM;
+  const bool psramFirst = (stack & ZM_TASK_STACK_PSRAM_FIRST) != 0;   // прошивка 0.1.153, ABI 18
+  const bool psramAllowed = psramFirst || (stack & ZM_TASK_STACK_PSRAM) != 0;
+  stack &= ~(ZM_TASK_STACK_PSRAM | ZM_TASK_STACK_PSRAM_FIRST);
   const size_t bytes = (stack < 2048 ? 2048 : stack) + kTaskOverhead;
   bool inPsram = false;
   {
     std::lock_guard<std::mutex> lock(allocLock);
-    if (!internalTakeLocked(bytes)) {
+    if (psramFirst || !internalTakeLocked(bytes)) {
       if (!psramAllowed || !psramTakeLocked(bytes)) {
         fprintf(stderr, "internal: task stack %u not allocated (used %zu of %zu, block %zu)\n",
                 static_cast<unsigned>(stack), internalUsed, internalBudget, internalBlock);
@@ -675,6 +682,8 @@ uint32_t netJitterMs = 0;
 // (net_opens) не идут.
 std::string coverJson;
 std::vector<uint8_t> coverJpeg;
+size_t coverCut = 0;                   // --cover-cut N: картинка обрывается после N байтов
+int coverCuts = 1;                     // --cover-cuts K: столько первых загрузок картинки (1.50)
 int coverSearches = 0;
 int coverPictures = 0;
 std::string coverSearchUrl;
@@ -688,6 +697,7 @@ struct FakeStream {
   std::string headers;                 // «имя:значение\n»
   std::string value;
   size_t position = 0;                 // в netFile
+  size_t cutAt = 0;                    // тело: обрыв после стольких байтов (--cover-cut)
   size_t audio = 0;                    // байтов звука отдано
   uint32_t metaint = 0;
   uint32_t untilMeta = 0;
@@ -745,6 +755,9 @@ void* coreNetOpen(const char* url, const char* extra, uint32_t timeoutMs, int* s
     s->isBody = true;
     s->body = data;
     s->headers = "content-length:" + std::to_string(data.size()) + "\n";
+    if (!search && coverCut != 0 && coverPictures <= coverCuts && coverCut < data.size()) {
+      s->cutAt = coverCut;               // соединение рвётся: длина названа полная, байтов меньше
+    }
     if (status != nullptr) *status = 200;
     return s;
   }
@@ -794,7 +807,8 @@ const char* coreNetHeader(void* stream, const char* name) {
 int netReadNow(FakeStream* s, void* data, uint32_t count) {
   uint8_t* out = static_cast<uint8_t*>(data);
   if (s->isBody) {
-    const size_t left = s->body.size() - s->position;
+    const size_t end = s->cutAt != 0 ? s->cutAt : s->body.size();
+    const size_t left = end - s->position;
     if (left == 0) return -1;
     const size_t part = count < left ? count : left;
     memcpy(out, s->body.data() + s->position, part);
@@ -1258,6 +1272,46 @@ void stopApp() {
 
 }  // namespace
 
+// --- SD2 (ABI 1.15): файл стенда — «файл тома» с первым кластером 7 ---------------------
+std::vector<uint8_t> sd2Data;
+bool sd2Missing = false;
+uint32_t sd2FailAt = UINT32_MAX;
+std::atomic<int> sd2Opens{0}, sd2Closes{0}, sd2Reads{0}, sd2Open{0};
+std::atomic<uint64_t> sd2Bytes{0};
+int sd2Token = 0;
+
+int coreSd2Open(uint32_t cluster, uint32_t size, void** file, int* raw) {
+  *file = nullptr;
+  if (raw != nullptr) *raw = 0;
+  if (std::this_thread::get_id() != scenarioThread) fail("sd2_open not from a command");
+  if (sd2Missing || cluster != 7 || size != sd2Data.size()) return ZM_NOT_FOUND;
+  ++sd2Opens;
+  ++sd2Open;
+  *file = &sd2Token;
+  return ZM_OK;
+}
+
+int coreSd2Read(void* file, uint32_t offset, uint8_t* data, uint32_t count, uint32_t* got) {
+  *got = 0;
+  if (file != &sd2Token || sd2Open.load() == 0) fail("sd2_read of a closed file");
+  ++sd2Reads;
+  std::this_thread::sleep_for(std::chrono::milliseconds(2));   // флешка: чтение не мгновенное
+  if (offset >= sd2FailAt) return ZM_ERROR;
+  if (offset >= sd2Data.size()) return ZM_OK;
+  uint32_t n = static_cast<uint32_t>(std::min<size_t>(count, sd2Data.size() - offset));
+  if (offset + n > sd2FailAt) n = sd2FailAt - offset;
+  memcpy(data, sd2Data.data() + offset, n);
+  *got = n;
+  sd2Bytes += n;
+  return offset + n >= sd2FailAt && n < count ? ZM_ERROR : ZM_OK;
+}
+
+void coreSd2Close(void* file) {
+  if (file != &sd2Token || sd2Open.load() == 0) fail("sd2_close of a closed file");
+  --sd2Open;
+  ++sd2Closes;
+}
+
 int main(int argc, char** argv) {
   timeBeginPeriod(1);
   scenarioThread = std::this_thread::get_id();
@@ -1290,6 +1344,9 @@ int main(int argc, char** argv) {
   int coverWait = 0;                    // --cover-wait 1: обложка от декодера (флаг 64)
   std::string ext;
   int viewSync = 0;                    // --view-sync 1: сравнить спектр с проигранным PCM
+  size_t sd2Start = 0;                  // --start N: сценарий sd2 — звук с места N файла
+  int abiMinor = -1;                    // --abi-minor N: ядро старой прошивки (16 — до 0.1.152)
+  int sd2Bad = 0;                       // --sd2-bad 1: начало звука в AUDIO_OPEN не то
   for (int index = 2; index < argc; ++index) {
     const std::string key = argv[index];
     if (key.rfind("--", 0) == 0 && index + 1 < argc) {
@@ -1297,6 +1354,11 @@ int main(int argc, char** argv) {
       if (key == "--block") block = strtoul(value, nullptr, 10);
       else if (key == "--cut") cut = strtoul(value, nullptr, 10);
       else if (key == "--resume") resume = strtoul(value, nullptr, 10);
+      else if (key == "--start") sd2Start = strtoul(value, nullptr, 10);
+      else if (key == "--abi-minor") abiMinor = atoi(value);
+      else if (key == "--sd2-missing") sd2Missing = atoi(value) != 0;
+      else if (key == "--sd2-bad") sd2Bad = atoi(value);
+      else if (key == "--sd2-fail") sd2FailAt = strtoul(value, nullptr, 10);
       else if (key == "--base") base = strtoul(value, nullptr, 10);
       else if (key == "--seek") seek = atoi(value);
       else if (key == "--hold") hold = atoi(value);
@@ -1349,6 +1411,8 @@ int main(int argc, char** argv) {
         coverJson.assign(json.begin(), json.end());
       }
       else if (key == "--cover-jpeg") coverJpeg = readFile(value);
+      else if (key == "--cover-cut") coverCut = strtoul(value, nullptr, 10);
+      else if (key == "--cover-cuts") coverCuts = atoi(value);
       else if (key == "--wait-ms") waitMs = atoi(value);
       else if (key == "--list-wait") listWait = atoi(value);
       else if (key == "--cover-wait") coverWait = atoi(value);
@@ -1370,7 +1434,7 @@ int main(int argc, char** argv) {
 
   core.size = sizeof(core);
   core.abi_major = ZM_APP_ABI_MAJOR;
-  core.abi_minor = ZM_APP_ABI_MINOR;
+  core.abi_minor = abiMinor >= 0 ? static_cast<uint16_t>(abiMinor) : ZM_APP_ABI_MINOR;
   core.firmware = "vdac4-host";
   core.alloc = coreAlloc;
   core.realloc = coreRealloc;
@@ -1413,6 +1477,9 @@ int main(int argc, char** argv) {
     core.ui_available = coreUiAvailable;
   }
   core.app_done = coreAppDone;
+  core.sd2_open = coreSd2Open;
+  core.sd2_read = coreSd2Read;
+  core.sd2_close = coreSd2Close;
 
   const zm_app_t* table = nullptr;
   char* args[3] = {const_cast<char*>("PLAYER.ELF"), reinterpret_cast<char*>(&core),
@@ -1966,6 +2033,57 @@ int main(int argc, char** argv) {
       command(kClose, {0});
       print("free_after_close", status().free);
     }
+  } else if (scenario == "sd2") {
+    // Плагин 1.24+: файл на SD2 под VDAC4 VFS — ESP читает его сама (плеер 1.47).
+    sd2Data = file;
+    const uint32_t size = static_cast<uint32_t>(file.size());
+    const uint32_t stream = size - static_cast<uint32_t>(sd2Start);
+    std::vector<uint8_t> body = {0, static_cast<uint8_t>(stream), static_cast<uint8_t>(stream >> 8),
+                                 static_cast<uint8_t>(stream >> 16), static_cast<uint8_t>(stream >> 24),
+                                 3 | 8};
+    const std::string e = ext.empty() ? "MP3" : ext;
+    for (size_t i = 0; i < 3; ++i) body.push_back(i < e.size() ? static_cast<uint8_t>(e[i]) : ' ');
+    for (uint32_t v : {7u, size, static_cast<uint32_t>(sd2Start)}) {
+      for (int k = 0; k < 4; ++k) body.push_back(static_cast<uint8_t>(v >> (8 * k)));
+    }
+    body.push_back(16);
+    for (size_t i = 0; i < 16; ++i) {
+      uint8_t byte = sd2Start + i < file.size() ? file[sd2Start + i] : 0;
+      body.push_back(sd2Bad && i == 3 ? static_cast<uint8_t>(byte ^ 0x5A) : byte);
+    }
+    const std::vector<uint8_t> r = command(kOpen, body);
+    print("open", r[0] & 0x7F);
+    print("open_sd2", (r[0] >> 7) & 1);
+    if ((r[0] & 0x7F) != 1) fail("open refused");
+    if ((r[0] & 0x80) == 0) {
+      // ESP файла не нашла: поток — от плагина, как прежде
+      feed(file, sd2Start, file.size(), block);
+    } else {
+      const std::vector<uint8_t> d = command(kData, {1, 2, 3, 4});
+      print("data_while_sd2", d[0]);
+    }
+    command(kClose, {1});                      // плагин «всё отдал» сразу: ESP его не ждёт
+    print("state_after_close", status().state);
+    if (resume != 0) {
+      waitSound(sinkFrames() + 20000);
+      const std::vector<uint8_t> f = command(kFlush, {static_cast<uint8_t>(base),
+                                                      static_cast<uint8_t>(base >> 8),
+                                                      static_cast<uint8_t>(base >> 16),
+                                                      static_cast<uint8_t>(base >> 24),
+                                                      static_cast<uint8_t>(resume),
+                                                      static_cast<uint8_t>(resume >> 8),
+                                                      static_cast<uint8_t>(resume >> 16),
+                                                      static_cast<uint8_t>(resume >> 24)});
+      print("flush", f[0]);
+    }
+    printStatus("", waitFinished(60000));
+    printSink();
+    print("sd2_opens", sd2Opens.load());
+    print("sd2_reads", sd2Reads.load());
+    print("sd2_bytes", static_cast<long long>(sd2Bytes.load()));
+    print("sd2_open_now", sd2Open.load());
+    command(kClose, {0});
+    print("sd2_closes", sd2Closes.load());
   } else if (scenario == "release") {
     const std::vector<uint8_t> r = command(kOpen, {0x20});
     print("open", r.empty() ? -1 : r[0]);

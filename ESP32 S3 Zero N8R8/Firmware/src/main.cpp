@@ -1994,6 +1994,7 @@ void Application::pollLink() {
 #if ZIFI_HAS_USB_DRIVE
   usbDrive().poll();                        // вынутую флешку отмонтировать здесь же, на ядре 1
 #endif
+  vdisk_service::poll(millis());            // том USB Flash: дописать файл после записи (0.1.148)
   // Сначала обслуживаем запрос ядра 0 к файловой системе. Внутри VfsClient
   // канал остаётся под единственным владельцем ядра 1 до получения ответа Z80.
 #if ZIFI_HAS_SPI_LINK

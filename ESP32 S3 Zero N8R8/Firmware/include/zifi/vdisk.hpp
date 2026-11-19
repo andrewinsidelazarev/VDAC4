@@ -46,6 +46,22 @@ class Source {
   virtual bool list(const char* path, Each each, void* user) = 0;
   // Байты файла path с offset: true — прочитано *got (меньше n только у конца файла)
   virtual bool read(const char* path, uint64_t offset, uint8_t* out, size_t n, size_t* got) = 0;
+
+  // Запись — только у источника тома с записью (USB Flash, 0.1.148): WC меняет том секторами
+  // FAT32, а том переводит их в эти операции над файлами источника. false — отказ (WC получит
+  // ошибку носителя). Пути — как у list/read, UTF-8.
+  virtual bool create(const char* path, uint64_t size) { (void)path; (void)size; return false; }   // новый файл длины size
+  virtual bool write(const char* path, uint64_t offset, const uint8_t* data, size_t n) {
+    (void)path; (void)offset; (void)data; (void)n; return false;
+  }
+  virtual bool resize(const char* path, uint64_t size) { (void)path; (void)size; return false; }
+  virtual bool makeDir(const char* path) { (void)path; return false; }
+  virtual bool remove(const char* path, bool dir) { (void)path; (void)dir; return false; }
+  virtual bool rename(const char* from, const char* to) { (void)from; (void)to; return false; }
+  // Время изменения (FAT: дата, время) — ставится, когда файл дописан (flush или другой файл)
+  virtual bool setTime(const char* path, uint16_t date, uint16_t time) { (void)path; (void)date; (void)time; return false; }
+  // Дописать открытое (источник может держать файл открытым между записями секторов)
+  virtual void flush() {}
 };
 
 enum Flags : uint8_t {
@@ -58,6 +74,14 @@ class Volume {
  public:
   // Источники живут дольше тома; порядок — порядок папок в корне
   void configure(Source* const* sources, size_t count);
+  // Том одного источника с записью (USB Flash, 0.1.148): корень тома — корень источника, WC пишет
+  // секторы, том переводит их в операции источника (см. vdisk_rw.cpp).
+  void configureWritable(Source* source);
+  bool writable() const { return writable_; }
+  // Сектор lba (512 байт) от WC. false — отказ (ошибка источника или том только для чтения).
+  bool write(uint32_t lba, const uint8_t* data);
+  // Дописать отложенное у источника (перед простоем, сменой режима)
+  void flush();
   void reset();                     // забыть дерево: следующий запрос строит заново
   uint32_t sectorCount() const { return kTotalSectors; }
   uint8_t flags() const;
@@ -89,10 +113,77 @@ class Volume {
     uint8_t sfn[11];
     uint8_t lfnCount;      // записей LFN перед короткой
     uint8_t source;        // 0xFF — корень тома
-    uint8_t flags;         // kDir, kLoaded
+    uint8_t flags;         // kDir, kLoaded, kDeleted, kWc, kMoved
+    // Том с записью: где SFN-запись узла, если её поставил WC (создание, перенос)
+    uint32_t slotDir;      // каталог (узел)
+    uint32_t slot;         // номер 32-байтной записи в каталоге
   };
-  static constexpr uint8_t kDir = 1, kLoaded = 2;
+  // kDeleted — WC удалил запись (файл источника удалён); kWc — узел создан WC: кластеры — по цепочке
+  // FAT (таблица владельцев), каталог — в накладке; kMoved — запись перенесена WC (slotDir/slot).
+  static constexpr uint8_t kDir = 1, kLoaded = 2, kDeleted = 4, kWc = 8, kMoved = 16;
   struct Extent { uint32_t cluster, node; };
+
+  // ---- том с записью (vdisk_rw.cpp) ----
+  // Секторы, записанные WC: FAT, каталоги, данные кластеров без владельца. Открытая адресация в
+  // больших векторах (PSRAM): мелкие узлы map легли бы во внутреннюю память ESP.
+  class SectorStore {
+   public:
+    const uint8_t* find(uint32_t lba) const;
+    bool put(uint32_t lba, const uint8_t* data);   // false — места нет (kMaxSectors)
+    void erase(uint32_t lba);
+    void clear();
+    size_t size() const { return used_; }
+    static constexpr size_t kMaxSectors = 8192;    // 4 МиБ
+   private:
+    int slotOf(uint32_t lba) const;
+    std::vector<uint32_t> keys_;                    // lba + 1; 0 — пусто, 1 — удалено
+    std::vector<uint32_t> index_;                   // номер сектора в pages_
+    std::vector<std::vector<uint8_t>> pages_;       // по 64 сектора
+    std::vector<uint32_t> freeList_;
+    size_t used_ = 0, live_ = 0;
+  };
+  // Кластер -> (узел, номер кластера в цепочке узла) для цепочек, известных по FAT, а не по раскладке
+  class OwnerMap {
+   public:
+    bool find(uint32_t cluster, uint32_t* node, uint32_t* index) const;
+    void put(uint32_t cluster, uint32_t node, uint32_t index);
+    void erase(uint32_t cluster);
+    void clear();
+   private:
+    int slotOf(uint32_t cluster) const;
+    struct Slot { uint32_t key, node, index; };     // key: cluster + 1; 0 — пусто, 1 — удалено
+    std::vector<Slot> slots_;
+    size_t used_ = 0, live_ = 0;
+  };
+  bool owner(uint32_t cluster, uint32_t* node, uint32_t* index) const;   // по таблице, потом по раскладке
+  uint32_t synthFat(uint32_t cluster) const;    // FAT по раскладке
+  uint32_t fatEntry(uint32_t cluster) const;    // FAT с накладкой
+  bool clusterOf(uint32_t node, uint32_t index, uint32_t* cluster) const;   // index-й кластер цепочки
+  uint32_t firstUsed(uint32_t first, uint32_t count) const;
+  void patchFat(uint32_t first, uint32_t count);
+  void claim(uint32_t cluster, uint32_t node, uint32_t index);
+  void registerChain(uint32_t node, uint64_t size);
+  bool writeFat(uint32_t lba, const uint8_t* data);
+  bool writeDir(uint32_t node, uint64_t offset, uint32_t lba, const uint8_t* data);
+  bool writeFile(uint32_t node, uint64_t offset, const uint8_t* data);
+  bool record(uint32_t dir, uint32_t index, uint8_t* out);
+  void entryName(uint32_t dir, uint32_t index, const uint8_t* sfn, std::vector<char>& out);
+  uint32_t nodeOfRecord(uint32_t dir, const uint8_t* rec) const;
+  uint32_t appendNode(uint32_t parent, const std::vector<char>& name, bool dir, uint64_t size,
+                      const uint8_t* rec, uint32_t slot);
+  void childPath(uint32_t dir, const std::vector<char>& name, std::vector<char>& out) const;
+  void rename(uint32_t node, uint32_t dir, const std::vector<char>& name);
+  bool created(uint32_t dir, uint32_t index, const uint8_t* rec);
+  bool changed(uint32_t dir, uint32_t index, const uint8_t* was, const uint8_t* rec);
+  bool removed(uint32_t dir, uint32_t index, const uint8_t* was);
+  void finishDirty();
+
+  bool writable_ = false;
+  SectorStore overlay_;
+  OwnerMap owners_;
+  OwnerMap firsts_;          // первый кластер -> узел у узлов WC (index не нужен); FAT его не снимает
+  uint32_t dirty_ = UINT32_MAX;   // файл, в который шла запись: дописать и поставить время
+  uint64_t dirtyEnd_ = 0;         // докуда в него писали (за размером из записи — хвост сектора)
 
   void build();
   bool load(uint32_t node);
