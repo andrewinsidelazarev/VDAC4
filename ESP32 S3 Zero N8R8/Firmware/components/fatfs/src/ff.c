@@ -553,7 +553,12 @@ static WCHAR LfnBuf[FF_MAX_LFN + 1];		/* LFN working buffer */
 #define FREE_NAMBUF()	ff_memfree(lfn)
 #endif
 #define LEAVE_MKFS(res)	{ if (!work) ff_memfree(buf); return res; }
-#define MAX_MALLOC	0x8000	/* Must be >=FF_MAX_SS */
+/* VDAC4 (0.1.147, 19.11.2026): было 0x8000. dir_clear (новая папка) обнуляет кластер записями
+   по MAX_MALLOC байтов, и драйвер флешек USB растит под такую передачу свой буфер во внутренней
+   памяти; не вырос — в драйвере остаётся освобождённый буфер, и следующая команда освобождает
+   его второй раз (паника на 0.1.146 при первом mkdir на флешке exFAT). Передача флешке — не
+   больше 4 КБ (UsbDrive::kTransferBytes). */
+#define MAX_MALLOC	0x1000	/* Must be >=FF_MAX_SS */
 
 #else
 #error Wrong setting of FF_USE_LFN

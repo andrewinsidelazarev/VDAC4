@@ -195,6 +195,11 @@ class ModuleApp : public App {
   bool loadResourceFromDrive(const char* name, uint32_t size, uint32_t stamp);
   // Только что принятый ресурс — на флешку (если она есть и ресурс кэшируется).
   void copyResourceToDrive(const Resource& resource);
+  // Кэш ELF на флешке (/usb/ELF, 0.1.146). Годная копия модуля — отметка «с флешки»
+  // (таблица в module_app.cpp, в PSRAM): true — передавать с карты не нужно.
+  bool moduleFromDrive(const char* name, uint32_t size, uint32_t stamp);
+  // Только что принятый модуль — в /usb/ELF: true — записан, запуск будет с флешки.
+  bool storeModuleOnDrive(const char* name, const uint8_t* data, uint32_t size, uint32_t stamp);
   void handleStart(const PacketView& packet);
   // Ядра ПЛИС (плагин VDAC4 Cores): список /CORES/ на SD Tang и слой ESP ядра
   void handleCoreList();

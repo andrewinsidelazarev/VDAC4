@@ -8,6 +8,7 @@
 #include <esp_littlefs.h>
 #include <esp_partition.h>
 #include <esp_timer.h>
+#include <atomic>
 #include <math.h>
 #include <new>
 #include <stdarg.h>
@@ -395,6 +396,94 @@ void ModuleApp::pollNetworkCore(uint32_t now) {
   xSemaphoreGive(appLock_);
 }
 
+// Отметки «модуль с флешки» (0.1.146): его нет в кэше ESP (или там другая версия), а копия в
+// /usb/ELF годна — loadElf читает её. Ставит и снимает ядро обмена, читает loadElf (и из задач
+// приложений: module_open). Таблица — в PSRAM, заводится при первой отметке: внутренняя
+// память ядра 1 на счету (бюджет Application в main.cpp).
+namespace {
+
+struct DriveModule {
+  char name[13];                          // пусто — место свободно
+  uint32_t size;
+  uint32_t stamp;
+};
+constexpr size_t kMaxDriveModules = 16;
+std::atomic<DriveModule*> g_driveModules{nullptr};
+size_t g_driveNext = 0;                   // какую отметку вытеснять, когда мест нет
+portMUX_TYPE g_driveLock = portMUX_INITIALIZER_UNLOCKED;
+
+// Отметка «с флешки» для name (size 0 — снять). true — источник образа сменился
+// (работающее приложение тогда надо перезапустить).
+bool markDriveModule(const char* name, uint32_t size, uint32_t stamp) {
+  DriveModule* table = g_driveModules.load();
+  if (table == nullptr) {
+    if (size == 0) {
+      return false;                       // отметок не было
+    }
+    table = static_cast<DriveModule*>(
+        heap_caps_calloc(kMaxDriveModules, sizeof(DriveModule), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (table == nullptr) {
+      return false;
+    }
+    g_driveModules.store(table);
+  }
+  bool changed = false;
+  portENTER_CRITICAL(&g_driveLock);
+  DriveModule* slot = nullptr;
+  DriveModule* empty = nullptr;
+  for (size_t i = 0; i < kMaxDriveModules; ++i) {
+    DriveModule& item = table[i];
+    if (item.name[0] != 0 && strcmp(item.name, name) == 0) {
+      slot = &item;
+    } else if (item.name[0] == 0 && empty == nullptr) {
+      empty = &item;
+    }
+  }
+  if (size == 0) {
+    if (slot != nullptr) {
+      *slot = DriveModule{};
+      changed = true;
+    }
+  } else if (slot != nullptr) {
+    changed = slot->size != size || slot->stamp != stamp;
+    slot->size = size;
+    slot->stamp = stamp;
+  } else {
+    if (empty == nullptr) {
+      empty = &table[g_driveNext];
+      g_driveNext = (g_driveNext + 1) % kMaxDriveModules;
+    }
+    strncpy(empty->name, name, sizeof(empty->name) - 1);
+    empty->name[sizeof(empty->name) - 1] = 0;
+    empty->size = size;
+    empty->stamp = stamp;
+    changed = true;
+  }
+  portEXIT_CRITICAL(&g_driveLock);
+  return changed;
+}
+
+// Отмечен ли name «с флешки»; size — длина копии.
+bool driveModuleSize(const char* name, uint32_t* size) {
+  DriveModule* table = g_driveModules.load();
+  if (table == nullptr) {
+    return false;
+  }
+  bool found = false;
+  portENTER_CRITICAL(&g_driveLock);
+  for (size_t i = 0; i < kMaxDriveModules; ++i) {
+    if (table[i].name[0] != 0 && strcmp(table[i].name, name) == 0) {
+      *size = table[i].size;
+      found = true;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&g_driveLock);
+  return found;
+}
+
+}  // namespace
+
 void ModuleApp::replyQuery(uint8_t state) {
   uint8_t reply[5];
   reply[0] = state;
@@ -440,22 +529,37 @@ void ModuleApp::handleQuery(const PacketView& packet) {
       }
     }
   } else if (cache_->has(name, size, stamp)) {
+    // Модуль в кэше ESP — как раньше; отметка «с флешки», если была, снимается (0.1.146).
+    if (markDriveModule(name, 0, 0) && moduleInUse(name)) {
+      appStale_ = true;
+    }
     replyQuery(0);
     return;
+  } else if (size <= kMaxModuleBytes && moduleFromDrive(name, size, stamp)) {
+    replyQuery(0);                             // копия на флешке годна: с карты не передавать
+    return;
   }
+  // Есть флешка — принятый модуль ляжет на неё (/usb/ELF), а не в кэш ESP: места в кэше
+  // не нужно, и приложение, которое его держит, останавливать незачем (0.1.146).
+#if ZIFI_HAS_USB_DRIVE
+  const bool toDrive = !resource && usbDrive().ready();
+#else
+  const bool toDrive = false;
+#endif
   // Модуль не ляжет лишь потому, что кэш держит ELF приложения, которому давно никто не шлёт его
   // команд (kAbandonedMs): его программа Z80 ушла, не выгрузив его (упала, Evo сброшен) — живое
   // приложение плагин опрашивает постоянно. 29.10.2026 так остался HMM2 после сбоя игры: HMM2.ELF
   // (1,5 МБ из 1664 КБ кэша) не давал места VIDEO.ELF, и FTVIEW4 на «нет места» молча уходил на
   // путь FT812. Брошенное приложение останавливается — его ELF кэш вытеснит.
-  if (!resource && size <= kMaxModuleBytes && app_ != nullptr && !cache_->canFit(size, appName_) &&
+  if (!resource && !toDrive && size <= kMaxModuleBytes && app_ != nullptr &&
+      !cache_->canFit(size, appName_) &&
       cache_->canFit(size, nullptr) && coreMillis() - appCommandMs_ >= kAbandonedMs) {
     bringupLog(kTag, "module %s: the cache is held by app %s, no command for it for %u ms: stopping it",
                name, appName_, static_cast<unsigned>(coreMillis() - appCommandMs_));
     stopApp();
   }
   if (size > (resource ? kMaxResourceBytes : kMaxModuleBytes) ||
-      (!resource && !cache_->canFit(size, app_ != nullptr ? appName_ : nullptr))) {
+      (!resource && !toDrive && !cache_->canFit(size, app_ != nullptr ? appName_ : nullptr))) {
     // Отказ — в журнал: плагин на него уходит молча (FTVIEW4 — на путь FT812)
     bringupLog(kTag, "module %s, %u bytes: no room (cache %u KB free, app %s holds its ELF)", name,
                static_cast<unsigned>(size), static_cast<unsigned>(cache_->freeBytes() / 1024),
@@ -593,6 +697,7 @@ void ModuleApp::handleCommit() {
   // Запись модуля в LittleFS (стирание секторов) идёт секунды, и всё это время
   // плагин ждёт ответа: сколько именно — в строке журнала.
   const int64_t started = esp_timer_get_time();
+  const char* where = "stored";
   if (delivery_ != nullptr && deliveryReceived_ == deliverySize_) {
     if (deliveryResource_) {
       if (adoptResource(deliveryName_, delivery_, deliverySize_, deliveryStamp_)) {
@@ -603,11 +708,21 @@ void ModuleApp::handleCommit() {
       // Загрузчик ELF размера файла не знает и верит заголовкам: битый или чужой
       // образ в кэш не попадает (прежде проверялись только четыре байта сигнатуры).
       bringupLog(kTag, "module %s: not a loadable ELF (%s)", deliveryName_, problem);
+    } else if (storeModuleOnDrive(deliveryName_, delivery_, deliverySize_, deliveryStamp_)) {
+      // Флешка есть (0.1.146): модуль — в /usb/ELF, запуск — оттуда; кэш ESP не трогается.
+      ok = 1;
+      where = "stored on the USB drive";
+      if (moduleInUse(deliveryName_)) {
+        appStale_ = true;
+      }
     } else {
       ok = cache_->store(deliveryName_, deliveryStamp_, delivery_, deliverySize_,
                          app_ != nullptr ? appName_ : nullptr)
                ? 1
                : 0;
+      if (ok != 0 && markDriveModule(deliveryName_, 0, 0) && moduleInUse(deliveryName_)) {
+        appStale_ = true;
+      }
       // Перезапуск нужен, только если сменилось само приложение или модуль, который у него
       // загружен (0.1.114). Прежде — после любого: плагин плеера шлёт новый декодер после
       // запуска PLAYER, и экран Tang гас на секунду, хотя декодер PLAYER берёт из кэша при
@@ -617,7 +732,7 @@ void ModuleApp::handleCommit() {
       }
     }
     bringupLog(kTag, "%s %s: %u bytes %s in %u ms", deliveryResource_ ? "resource" : "module",
-               deliveryName_, static_cast<unsigned>(deliverySize_), ok ? "stored" : "REFUSED",
+               deliveryName_, static_cast<unsigned>(deliverySize_), ok ? where : "REFUSED",
                static_cast<unsigned>((esp_timer_get_time() - started) / 1000));
     // Принятый ресурс — сразу и на флешку, до ответа: плагин всё это время пишет
     // «Storing on the ESP» и запускает проигрывание после.
@@ -678,7 +793,13 @@ bool ModuleApp::loadResourceFromDrive(const char* name, uint32_t size, uint32_t 
 
 void ModuleApp::copyResourceToDrive(const Resource& resource) {
 #if ZIFI_HAS_USB_DRIVE
-  if (!ResourceDiskCache::cacheable(resource.name) || !usbDrive().ready()) {
+  if (!ResourceDiskCache::cacheable(resource.name)) {
+    return;
+  }
+  if (!usbDrive().ready()) {
+    // Прежде молча: на 0.1.145 флешка не подключилась, и по журналу было не понять почему.
+    bringupLog(kTag, "resource %s: not copied to the USB drive (%s)", resource.name,
+               usbDrive().status());
     return;
   }
   const ResourceDiskCache disk(UsbDrive::kMusicCache);
@@ -690,6 +811,63 @@ void ModuleApp::copyResourceToDrive(const Resource& resource) {
              static_cast<unsigned>((esp_timer_get_time() - started) / 1000));
 #else
   (void)resource;
+#endif
+}
+
+// --- кэш ELF на флешке (0.1.146) ------------------------------------------------
+// Пользователь, 19.11.2026: есть флешка FAT32/exFAT — запускаемый ELF копируется в /ELF
+// (папки нет — создать) и запускается оттуда; в следующий раз, если копия не старее файла
+// на карте Evo, берётся она, а не карта; старее — заменяется файлом с Evo. Модуль в кэше
+// ESP — как раньше. Копия годна, если и длина та же (как у кэша ресурсов): другая длина —
+// другой файл, и его тоже заменяет файл с карты.
+
+bool ModuleApp::moduleFromDrive(const char* name, uint32_t size, uint32_t stamp) {
+#if ZIFI_HAS_USB_DRIVE
+  if (!usbDrive().ready()) {
+    return false;
+  }
+  if (!ResourceDiskCache(UsbDrive::kElfFolder).fresh(name, size, stamp)) {
+    return false;                         // нет копии, другая длина или старее карты
+  }
+  if (markDriveModule(name, size, stamp) && moduleInUse(name)) {
+    appStale_ = true;                     // работает другая версия — APP_START перезапустит
+  }
+  bringupLog(kTag, "module %s: %u bytes on the USB drive, not sent from the card", name,
+             static_cast<unsigned>(size));
+  return true;
+#else
+  (void)name;
+  (void)size;
+  (void)stamp;
+  return false;
+#endif
+}
+
+bool ModuleApp::storeModuleOnDrive(const char* name, const uint8_t* data, uint32_t size,
+                                   uint32_t stamp) {
+#if ZIFI_HAS_USB_DRIVE
+  if (!usbDrive().ready()) {
+    return false;
+  }
+  mkdir(UsbDrive::kElfFolder, 0777);      // папку /ELF могли стереть на ПК: нет — создать
+  const int64_t started = esp_timer_get_time();
+  const bool written = ResourceDiskCache(UsbDrive::kElfFolder).write(name, data, size, stamp);
+  const unsigned ms = static_cast<unsigned>((esp_timer_get_time() - started) / 1000);
+  if (!written) {
+    bringupLog(kTag, "module %s: NOT written to the USB drive in %u ms, the ESP cache instead",
+               name, ms);
+    return false;
+  }
+  bringupLog(kTag, "module %s: %u bytes written to the USB drive in %u ms", name,
+             static_cast<unsigned>(size), ms);
+  markDriveModule(name, size, stamp);
+  return true;
+#else
+  (void)name;
+  (void)data;
+  (void)size;
+  (void)stamp;
+  return false;
 #endif
 }
 
@@ -822,6 +1000,7 @@ void ModuleApp::handleCoreApp(const PacketView& packet) {
     appStale_=appStale_ || stored;
   }
   heap_caps_free(data);
+  markDriveModule(module, 0, 0);            // ELF ядра — из кэша ESP, не с флешки
   if (result == ZM_OK) {
     result = startApp(module);
   }
@@ -897,23 +1076,53 @@ void ModuleApp::handleStart(const PacketView& packet) {
 int ModuleApp::loadElf(const char* name, void* arg1, void* arg2, void** elfOut,
                        int* entryResult) {
   *elfOut = nullptr;
-  const ZmCacheEntry* entry = cache_ != nullptr ? cache_->find(name) : nullptr;
-  if (entry == nullptr) {
+  // Отмеченный «с флешки» (0.1.146) — оттуда: его нет в кэше ESP или там другая версия.
+  uint32_t driveSize = 0;
+  const bool fromDrive = driveModuleSize(name, &driveSize);
+  const ZmCacheEntry* entry = !fromDrive && cache_ != nullptr ? cache_->find(name) : nullptr;
+  if (!fromDrive && entry == nullptr) {
     return ZM_NOT_FOUND;
   }
-  const uint32_t size = entry->size;
+  const uint32_t size = fromDrive ? driveSize : entry->size;
   uint8_t* file = static_cast<uint8_t*>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (file == nullptr) {
     return ZM_NO_MEMORY;
   }
-  if (!cache_->read(name, file, size)) {
+  if (fromDrive) {
+#if ZIFI_HAS_USB_DRIVE
+    const int64_t started = esp_timer_get_time();
+    const bool read = ResourceDiskCache(UsbDrive::kElfFolder).read(name, file, size);
+    const unsigned ms = static_cast<unsigned>((esp_timer_get_time() - started) / 1000);
+#else
+    const bool read = false;
+    const unsigned ms = 0;
+#endif
+    if (!read) {
+      // Флешку вынули или копию стёрли на ПК: следующий запрос пришлёт модуль с карты.
+      bringupLog(kTag, "%s: NOT read from the USB drive in %u ms", name, ms);
+      markDriveModule(name, 0, 0);
+      heap_caps_free(file);
+      return ZM_NOT_FOUND;
+    }
+    bringupLog(kTag, "%s: %u bytes from the USB drive in %u ms", name,
+               static_cast<unsigned>(size), ms);
+  } else if (!cache_->read(name, file, size)) {
     heap_caps_free(file);
     return ZM_NOT_FOUND;
   }
-  // Ещё раз — после чтения из кэша: образ во flash мог испортиться.
+  // Ещё раз — после чтения из кэша или с флешки: образ мог испортиться.
   if (const char* problem = elfImageProblem(file, size)) {
     bringupLog(kTag, "%s: not a loadable ELF (%s)", name, problem);
     heap_caps_free(file);
+#if ZIFI_HAS_USB_DRIVE
+    if (fromDrive) {
+      // Негодная копия на флешке не должна жить: следующий запрос пришлёт модуль с карты.
+      char path[64];
+      snprintf(path, sizeof(path), "%s/%s", UsbDrive::kElfFolder, name);
+      remove(path);
+      markDriveModule(name, 0, 0);
+    }
+#endif
     return ZM_ERROR;
   }
   esp_elf_t* elf = static_cast<esp_elf_t*>(heap_caps_calloc(1, sizeof(esp_elf_t), MALLOC_CAP_8BIT));

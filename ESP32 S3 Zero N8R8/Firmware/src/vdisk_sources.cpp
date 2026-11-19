@@ -129,6 +129,29 @@ bool UsbSource::list(const char* path, Each each, void* user) {
   if (!usbDrive().ready()) return false;      // нет флешки (или не FAT32/exFAT) — папка пуста
   return PosixSource::list(path, each, user);
 }
+
+// Как PosixSource::read, но кусками по UsbDrive::kTransferBytes: FatFs отдаёт драйверу USB
+// целые сектора прямо в буфер вызывающего, и одно чтение окна тома (десятки КБ) вырастило бы
+// буфер драйвера во внутренней памяти до своей длины.
+bool UsbSource::read(const char* path, uint64_t offset, uint8_t* out, size_t n, size_t* got) {
+  char file[600];
+  *got = 0;
+  if (!full(path, file, sizeof file)) return false;
+  FILE* f = fopen(file, "rb");
+  if (!f) return false;
+  bool ok = fseek(f, (long)offset, SEEK_SET) == 0;
+  while (ok && *got < n) {
+    const size_t part = n - *got < UsbDrive::kTransferBytes ? n - *got : UsbDrive::kTransferBytes;
+    const size_t done = fread(out + *got, 1, part, f);
+    *got += done;
+    if (done != part) {
+      ok = !ferror(f);                      // конец файла — не ошибка
+      break;
+    }
+  }
+  fclose(f);
+  return ok;
+}
 #endif
 
 #if ZIFI_HAS_SPI_LINK

@@ -60,6 +60,9 @@
 #if ZIFI_HAS_STATUS_LED
 #include "zifi/status_led.hpp"
 #endif
+#if ZIFI_HAS_USB_DRIVE
+#include "zifi/usb_drive.hpp"
+#endif
 
 // Прошивка — только для платы VDAC4: канал до Z80 — SPI платы Evo (SpiLink).
 #if !ZIFI_HAS_SPI_LINK
@@ -458,6 +461,12 @@ void Application::begin() {
 #else
   startStatusLed(link_, nullptr);
 #endif
+#endif
+#if ZIFI_HAS_USB_DRIVE
+  // Флешка в USB-C модуля (0.1.146): хост и флешку задача usb-drive включает через 3 с после
+  // запуска, если к разъёму не подключён ПК, — пока внутренней памяти много. Прежде хост
+  // включался при первом запросе ресурса музыки, и флешке не хватило памяти (0.1.145).
+  usbDrive().begin();
 #endif
   clearError();
   bool startupHealthy = true;
@@ -1981,6 +1990,9 @@ void Application::pollLink() {
 #if ZIFI_HAS_AUDIO
   // Codex: проверять потерю FT до VFS и без ожидания новой команды Z80.
   moduleApp_.pollCore1(millis());
+#endif
+#if ZIFI_HAS_USB_DRIVE
+  usbDrive().poll();                        // вынутую флешку отмонтировать здесь же, на ядре 1
 #endif
   // Сначала обслуживаем запрос ядра 0 к файловой системе. Внутри VfsClient
   // канал остаётся под единственным владельцем ядра 1 до получения ответа Z80.

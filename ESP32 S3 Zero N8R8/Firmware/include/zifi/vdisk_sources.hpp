@@ -32,20 +32,24 @@ class PosixSource : public vdisk::Source {
   bool list(const char* path, Each each, void* user) override;
   bool read(const char* path, uint64_t offset, uint8_t* out, size_t n, size_t* got) override;
 
- private:
+ protected:
   bool full(const char* path, char* out, size_t size) const;
+
+ private:
   const char* folder_;
   const char* mount_;
 };
 
 #if ZIFI_HAS_USB_DRIVE
-// Флешка USB: каталог (WC открыл папку USB — ядро 1) включает USB-хост и ждёт флешку (UsbDrive::ready,
-// до 2 с при первом обращении; до того разъём — консоль USB). Чтение файла — из любой задачи (видео
-// с SD2: задача подачи VIDEO.ELF): флешка уже смонтирована каталогом.
+// Флешка USB: каталог (WC открыл папку USB — ядро 1) показывается, когда флешка готова (UsbDrive::ready;
+// хост и флешку с 0.1.146 включает при запуске ESP задача usb-drive). Чтение файла — из любой задачи
+// (видео с SD2: задача подачи VIDEO.ELF): флешка уже смонтирована. Читается кусками не больше
+// UsbDrive::kTransferBytes — буфер драйвера USB во внутренней памяти не растёт (0.1.146).
 class UsbSource : public PosixSource {
  public:
   UsbSource() : PosixSource("USB", "/usb") {}
   bool list(const char* path, Each each, void* user) override;
+  bool read(const char* path, uint64_t offset, uint8_t* out, size_t n, size_t* got) override;
 };
 #endif
 

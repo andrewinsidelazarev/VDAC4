@@ -58,7 +58,7 @@ bool fail(const char* scenario, const char* why) {
 bool storedCopyIsFreshAndReadsBack() {
   removeAll();
   const ResourceDiskCache disk(g_dir.c_str());
-  const auto data = pattern(3 * 16384 + 123, 1);       // больше куска в 16 КБ, не кратно
+  const auto data = pattern(3 * 16384 + 123, 1);       // больше куска (4 КБ), не кратно
   const uint32_t stamp = fatStamp(2026, 9, 20, 13, 45, 30);
   if (disk.fresh("MIDI.SF2", static_cast<uint32_t>(data.size()), stamp)) {
     return fail("stored_copy", "fresh before writing");
