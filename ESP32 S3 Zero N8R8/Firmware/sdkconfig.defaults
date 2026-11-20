@@ -158,3 +158,10 @@ CONFIG_FATFS_USE_FASTSEEK=y
 # кириллицей на флешке ESP и на карте Tang были '?', и создать такой файл (том USB Flash, шара SMB
 # TANG) было нельзя. tang_vfs и vdisk_sources перекодируют через ff_uni2oem/ff_oem2uni(FF_CODE_PAGE).
 CONFIG_FATFS_CODEPAGE_866=y
+# Кэш данных: строка 64 Б вместо 32 (0.1.155, 20.11.2026). Размер кэша прежний — 32 КБ, внутренняя RAM
+# не меняется. Замер Metal Slug на плате (тестовая 0.1.154-d64): простой данных 20,2 → 18,5 % тактов,
+# ожидание буфера записи 1,5 → 0,9 %; плеер работает. Собственный DMA прошивки уже выровнен на 64 Б
+# (spi_link.cpp kRawAlign, module_app.cpp forgetStaleCode).
+# Кэш команд остаётся 16 КБ: 32 КБ заняли бы всю SRAM0 и отняли 16 КБ внутренней RAM, а её при плеере
+# остаётся ~9 КБ (19 КБ при старте Metal Slug) — откажут стеки, Wi-Fi, USB-хост, TLS.
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
