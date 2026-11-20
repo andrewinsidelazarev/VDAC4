@@ -827,5 +827,47 @@ class ChecksumTest(unittest.TestCase):
             self.assertNotEqual(body[-1], checksum(body[:-1]))
 
 
+class StaleReceiveTest(unittest.TestCase):
+    """(0.1.156) Приём DMA под блок от Z80 после потерянной WR_DONE (Metal Slug, 21.11.2026)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        exe = host_exe()
+        if exe is None:
+            raise unittest.SkipTest('нет Visual Studio Build Tools')
+        cls.host = Host(exe)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.host.close()
+
+    def stale(self, flags: int, status: int, repeat: bool, open_: bool, arrived: bool) -> bool:
+        line = f'stale {flags:x} {status:x} {int(repeat)} {int(open_)} {int(arrived)}'
+        return self.host.ask(line) == '1'
+
+    def test_put_done_with_open_receive_closes_it(self) -> None:
+        # Z80: «блок записан», ядро: «не пришёл», а приём всё ещё открыт — WR_DONE потерялась.
+        self.assertTrue(self.stale(FLAG_PUT_DONE, STATUS_PUT_BAD | STATUS_PUT_CAPABLE,
+                                   False, True, False))
+        # То же вместе с новым запросом raw-блока в этом же обмене.
+        self.assertTrue(self.stale(FLAG_PUT_DONE | 0x10, STATUS_PUT_BAD, False, True, False))
+
+    def test_new_session_drops_abandoned_receive(self) -> None:
+        self.assertTrue(self.stale(FLAG_SESSION, 0, False, True, False))
+
+    def test_normal_turns_keep_receive(self) -> None:
+        # Приём открыт под блок, который Z80 ещё пишет: «блок записан» не было.
+        self.assertFalse(self.stale(FLAG_PUT, STATUS_PUT_READY, False, True, False))
+        self.assertFalse(self.stale(0x10, 0, False, True, False))
+        # Блок пришёл и принят либо отвергнут по XOR — приём уже закрыт.
+        self.assertFalse(self.stale(FLAG_PUT_DONE, STATUS_PUT_OK, False, False, True))
+        self.assertFalse(self.stale(FLAG_PUT_DONE, STATUS_PUT_BAD, False, False, True))
+        # Повтор запроса: «блок записан» разобран прежде, открытый приём — уже под новый блок.
+        self.assertFalse(self.stale(FLAG_PUT_DONE, STATUS_PUT_BAD | STATUS_PUT_READY,
+                                    True, True, False))
+        # Приём открыт под обратную посылку, а не под блок от Z80.
+        self.assertFalse(self.stale(FLAG_PUT_DONE, STATUS_PUT_BAD, False, False, False))
+
+
 if __name__ == '__main__':
     unittest.main()

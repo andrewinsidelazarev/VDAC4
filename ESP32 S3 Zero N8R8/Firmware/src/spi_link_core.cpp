@@ -75,6 +75,19 @@ bool SpiLinkCore::begin(uint8_t* fromZ80Storage, size_t fromZ80Capacity,
          toZ80_.attach(toZ80Storage, toZ80Capacity);
 }
 
+bool SpiLinkCore::putReceiveStale(uint8_t requestFlags, uint8_t responseStatus, bool repeat,
+                                  bool receiveOpenForPut, bool arrived) {
+  if (repeat || !receiveOpenForPut || arrived) {
+    return false;
+  }
+  if ((requestFlags & kFlagNewSession) != 0) {
+    return true;  // прежняя программа блок так и не записала
+  }
+  // «Блок записан», а приём открыт: WR_DONE потерялась. Ядро ответило kStatusPutBad
+  // («не пришёл») — Z80 пришлёт блок снова, в свежий приём.
+  return (requestFlags & kFlagPutDone) != 0 && (responseStatus & kStatusPutBad) != 0;
+}
+
 uint8_t SpiLinkCore::checksum(const uint8_t* data, size_t length) {
   uint8_t sum = 0;
   for (size_t index = 0; index < length; ++index) {
@@ -391,6 +404,10 @@ size_t SpiLinkCore::pendingToZ80() const {
 uint32_t SpiLinkCore::activity() const {
   return turns_.load(std::memory_order_relaxed) +
          repeats_.load(std::memory_order_relaxed);
+}
+
+uint32_t SpiLinkCore::repeats() const {
+  return repeats_.load(std::memory_order_relaxed);
 }
 
 SpiLinkCore::Stats SpiLinkCore::stats() const {

@@ -111,6 +111,13 @@ int main() {
       printf("%u %u %u\n", static_cast<unsigned>(color.red),
              static_cast<unsigned>(color.green),
              static_cast<unsigned>(color.blue));
+    } else if (strcmp(command, "stale") == 0) {
+      // stale <флаги запроса> <статус ответа> <повтор> <приём открыт> <принят> (hex/0/1)
+      unsigned flags = 0, status = 0, repeat = 0, open = 0, arrived = 0;
+      sscanf(rest, "%x %x %u %u %u", &flags, &status, &repeat, &open, &arrived);
+      printf("%u\n", zifi::SpiLinkCore::putReceiveStale(
+                         static_cast<uint8_t>(flags), static_cast<uint8_t>(status),
+                         repeat != 0, open != 0, arrived != 0) ? 1u : 0u);
     } else if (core == nullptr) {
       printf("no core\n");
     } else if (strcmp(command, "request") == 0) {

@@ -623,6 +623,7 @@ void SpiLink::taskLoop() {
   size_t putLength = 0;
   uint32_t bulkReports = 0;
   uint32_t putReports = 0;
+  uint32_t staleReports = 0;
   uint32_t gaveUp = 0;
   uint32_t sectorWakes = core_.sectorWakes();
   for (;;) {
@@ -697,6 +698,7 @@ void SpiLink::taskLoop() {
       publishState();
       continue;
     }
+    const uint32_t repeatsBefore = core_.repeats();
     if (!core_.handleRequest(request, response, length, bulk, bulkBuffer_,
                              put)) {
       // Начало записи остаётся для журнала наладки: по нему видно, что именно
@@ -743,6 +745,30 @@ void SpiLink::taskLoop() {
       }
       putReceived = false;
       putLength = 0;
+    }
+    if (SpiLinkCore::putReceiveStale(request[2], response[2],
+                                     core_.repeats() != repeatsBefore,
+                                     echoPending && receiveIsPut, putReceived)) {
+      // (0.1.156) Приём под блок от Z80 открыт, а Z80 его уже закончила либо бросила: команда
+      // WR_DONE (CMD7) до ESP не дошла. ESP ставит её признак сама — драйвер закрывает приём,
+      // как если бы команда пришла, и следующий блок ляжет в свежий приём с начала буфера.
+      // Z80 в это время ждёт ответа и по линии ничего не шлёт. Без этого Metal Slug
+      // (21.11.2026) после одного искажённого байта 6,7 с просил приём и упал.
+      taskStep_.store(kStepLoadReceive, std::memory_order_relaxed);
+      GPSPI2.dma_int_set.cmd7_int_set = 1;
+      spi_slave_hd_data_t* stale = nullptr;
+      const bool closed = spi_slave_hd_get_trans_res(kHost, SPI_SLAVE_CHAN_RX, &stale,
+                                                     pdMS_TO_TICKS(5)) == ESP_OK;
+      if (closed) {
+        echoPending = false;
+      }
+      if (staleReports < kBulkReports) {
+        ++staleReports;
+        bringupLog(kTag, closed
+                             ? "DMA receive for a Z80 block closed by the ESP (end-of-write lost), %u bytes dropped"
+                             : "DMA receive for a Z80 block could not be closed (%u)",
+                   static_cast<unsigned>(closed && stale != nullptr ? stale->trans_len : 0));
+      }
     }
     if ((response[2] & SpiLinkCore::kStatusPutReady) != 0) {
       // Z80 сейчас напишет блок: открыть приём, если он ещё не открыт (тогда
