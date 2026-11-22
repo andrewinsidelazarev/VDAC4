@@ -1,8 +1,10 @@
-/* Нормализация стерео PCM: общий алгоритм TRACKER.ELF и OPL.ELF.
+/* Нормализация стерео PCM: общий алгоритм TRACKER.ELF, OPL.ELF, SID.ELF и MIDI.ELF.
  * Фильтр K влияет только на замер. 400 мс / 100 мс, абсолютный и относительный
  * пороги, накопительная громкость песни; цель -12 LUFS, плавность 0,5 дБ/с.
  * Начальное усиление и нижний предел задаёт декодер; верхний предел +18 дБ.
- * Пики выше 0,75 мягко ограничиваются. Состояние отдельно для каждой песни.
+ * Пики выше 0,75 мягко ограничиваются (zm_level_process). MIDI.ELF (с 1.9) берёт только
+ * замер (zm_level_measure) и усиление (zm_level_gain_to): ограничитель у него свой, связанный
+ * на оба канала. Состояние отдельно для каждой песни.
  * Без ожидания, предварительного прохода и динамических выделений памяти.
  */
 #ifndef ZM_LEVEL_H
@@ -157,20 +159,31 @@ static void zm_level_step(zm_level_t* lv) {
   lv->gain_db += step;
 }
 
+/* Замер одного кадра — до усиления. Декодер со своим ограничителем (MIDI.ELF с 1.9) зовёт его
+ * сам на каждом кадре и ведёт усиление от lv->gain к zm_level_gain_to(). */
+static inline void zm_level_measure(zm_level_t* lv, float left, float right) {
+  const float l = zm_level_biquad(&lv->highpass, 0, zm_level_biquad(&lv->shelf, 0, left));
+  const float r = zm_level_biquad(&lv->highpass, 1, zm_level_biquad(&lv->shelf, 1, right));
+  lv->step_sum += l * l + r * r;
+  if (++lv->step_count == lv->step_len) {
+    zm_level_step(lv);
+  }
+}
+
+/* Усиление, к которому идти к концу куска, — линейное (lv->gain — на конце прошлого куска). */
+static inline float zm_level_gain_to(const zm_level_t* lv) {
+  return powf(10.0f, lv->gain_db / 20.0f);
+}
+
 /* Кусок звука: замер (до усиления), затем усиление — плавно от прежнего к
  * новому за кусок — и мягкое ограничение: отсчёты выше ZM_LEVEL_KNEE — к 1,0 по x/(1+x)
  * (у колена наклон 1, дальше — плавно), как soft_limit в MIDI.ELF. */
 static void zm_level_process(zm_level_t* lv, float* samples, uint32_t frames) {
   for (uint32_t i = 0; i < frames; ++i) {
-    const float l = zm_level_biquad(&lv->highpass, 0, zm_level_biquad(&lv->shelf, 0, samples[2 * i]));
-    const float r = zm_level_biquad(&lv->highpass, 1, zm_level_biquad(&lv->shelf, 1, samples[2 * i + 1]));
-    lv->step_sum += l * l + r * r;
-    if (++lv->step_count == lv->step_len) {
-      zm_level_step(lv);
-    }
+    zm_level_measure(lv, samples[2 * i], samples[2 * i + 1]);
   }
   const float from = lv->gain;
-  const float to = powf(10.0f, lv->gain_db / 20.0f);
+  const float to = zm_level_gain_to(lv);
   const float delta = frames != 0 ? (to - from) / (float)frames : 0.0f;
   float gain = from;
   for (uint32_t i = 0; i < frames * 2; i += 2) {

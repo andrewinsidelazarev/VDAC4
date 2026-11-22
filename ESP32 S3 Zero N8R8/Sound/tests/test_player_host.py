@@ -1512,6 +1512,32 @@ class PlayerHostTest(unittest.TestCase):
         ratio = energy(right_both, 0.5, 1.5) / energy(right_alone, 0.5, 1.5)
         self.assertLess(ratio, 0.8, f'справа убавлено тем же усилением: {ratio}')
 
+    def test_midi_song_loudness_is_levelled(self) -> None:
+        # MIDI.ELF 1.9: громкость песни меряется по ходу (zm_level.h), и после 5 с звука усиление
+        # плавно, по 0,5 дБ/с, подводит её к −12 LUFS. Тихий орган (громкость канала 20 из 127) к
+        # концу 40 с заметно громче, чем в начале; громкий аккорд из 12 нот — ослаблен. До 1.9
+        # громкость задавали только GAIN_DB и сама песня.
+        if not BANK.is_file():
+            self.skipTest(f'нет {BANK}')
+
+        def song(volume: int, velocity: int, keys: list[int]) -> list[tuple[int, bytes]]:
+            events = [(0, b'\xB0\x5B\x00'), (0, b'\xC0\x13'), (0, bytes([0xB0, 0x07, volume]))]
+            for second in range(40):
+                events += [(second * 960, bytes([0x90, key, velocity])) for key in keys]
+                events += [(second * 960 + 900, bytes([0x80, key, 0])) for key in keys]
+            return events
+
+        left, right = self.midi_pcm(song(20, 0x50, [60, 64, 67]))
+        found = re.search(r'midi: level (-\d+\.\d) LUFS before gain, gain \+(\d+\.\d) dB', self.log)
+        self.assertIsNotNone(found, self.log)
+        self.assertGreater(float(found.group(2)), 10.0, 'тихая песня поднята')
+        rise = energy(left, 36, 39) / energy(left, 1, 4)
+        self.assertGreater(rise, 10.0, f'к концу громче на 10 дБ и больше: {rise}')
+        left, right = self.midi_pcm(song(127, 127, [48 + k for k in range(12)]))
+        found = re.search(r'midi: level (-?\d+\.\d) LUFS before gain, gain (-\d+\.\d) dB', self.log)
+        self.assertIsNotNone(found, self.log)
+        self.assertLess(float(found.group(2)), -2.0, 'громкая песня ослаблена')
+
     def test_midi_without_bank(self) -> None:
         self.assert_skipped(self.run_host('module', song_midi(2), midi=1))
 

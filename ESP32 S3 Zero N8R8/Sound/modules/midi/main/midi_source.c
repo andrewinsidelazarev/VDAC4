@@ -61,6 +61,16 @@
  * память), powf огибающей, фильтра и высоты — только когда сменилось значение. Предел
  * голосов: задержанный чужой задачей кусок считается не дороже двух кадров, среднее — за
  * ~0,4 с. В журнале при закрытии — такты голоса на каждом ядре и эффекты по видам.
+ *
+ * 1.9 — выравнивание громкости по песне, как у TRACKER, OPL и SID (zm_level.h). Громкость
+ * звука после общей громкости SysEx меряется по ходу песни (EBU R128), и с шестой секунды
+ * звука усиление плавно, не быстрее 0,5 дБ/с, подводит песню к −12 LUFS, в пределах
+ * LEVEL_MIN_DB…+18 дБ. Мягкое ограничение zm_level не берётся: после усиления — свой
+ * связанный ограничитель. Прежде громкость задавали только GAIN_DB и сама песня, и тихие
+ * файлы так и звучали тихо. Перемотка найденное усиление сохраняет. Нет памяти под замер
+ * (PSRAM, ~1,4 КБ) — звук как в 1.8. В журнале при закрытии — громкость песни, усиление,
+ * сколько звука прошло под ограничителем и такты выхода на кадр. На ПК (TimGM6mb, 42 песни)
+ * до выравнивания −27,3…−7,7 LUFS, после −14,3…−10,4.
  */
 #include <stddef.h>
 #include <string.h>
@@ -70,6 +80,7 @@
 #include "tsf_memory.h"
 #include "zm_app.h"
 #include "zm_source.h"
+#include "zm_level.h"
 
 #define RATE 44100
 #define BANK "MIDI.SF2"
@@ -86,6 +97,7 @@
 #define LIMIT_LEVEL 0.89f        /* потолок ограничителя (−1 дБ) */
 #define LIMIT_RELEASE 0.99985f   /* отпускание ограничителя за отсчёт: ~150 мс */
 #define DC_POLE 0.99929f         /* фильтр постоянной составляющей: 5 Гц */
+#define LEVEL_MIN_DB (-18.0f)    /* выравнивание (1.9): громкие песни можно и ослабить */
 #define BLOCK 64                 /* кадров в куске (TSF_RENDER_EFFECTSAMPLEBLOCK) */
 #define EVENT_QUANTUM 16         /* место ноты в куске — с точностью до 16 кадров (0,36 мс):
                                     не больше четырёх частей на кусок, такты голосов на часть — те же */
@@ -220,6 +232,11 @@ typedef struct {
   uint32_t fade_left;
   /* Выход: фильтр постоянной составляющей, огибающая ограничителя. */
   float dc_xl, dc_yl, dc_xr, dc_yr, limit_env;
+  /* 1.9: выравнивание громкости (PSRAM: в нём гистограмма ~1,3 КБ, а внутренняя память
+   * дорога; нет памяти — без выравнивания), кадров под ограничителем, такты выхода. */
+  zm_level_t* level;
+  uint64_t limited_frames;
+  uint64_t cycles_output;
 } midi_t;
 
 enum { MODE_GM, MODE_GM2, MODE_GS, MODE_XG };
@@ -1063,6 +1080,10 @@ static void* open_source(uint32_t file_size, const uint8_t* file) {
     close_source(m);
     return NULL;
   }
+  m->level = (zm_level_t*)host->alloc(sizeof(zm_level_t), ZM_MEM_PSRAM);
+  if (m->level != NULL) {
+    zm_level_init(m->level, RATE, 0.0f, LEVEL_MIN_DB);   /* сначала — громкость 1.8 */
+  }
   m->pipelined = host->size >= offsetof(zm_host_t, worker_wait) + sizeof(host->worker_wait) &&
                  host->worker_start != NULL && host->worker_wait != NULL;
   m->voice_cap = m->voice_cap_min = MAX_VOICES;
@@ -1089,12 +1110,23 @@ static uint64_t event_frame(const tml_message* message) {
   return ((uint64_t)message->time * RATE / 1000) & ~(uint64_t)(EVENT_QUANTUM - 1);
 }
 
-/* Выход: постоянная составляющая прочь, общая громкость (к цели линейно за кусок),
- * затухание в конце песни, связанный стереоограничитель (огибающая — пик большего канала,
- * отпускание LIMIT_RELEASE; |отсчёт| не выше LIMIT_LEVEL). */
+/* Выход: постоянная составляющая прочь, общая громкость (к цели линейно за кусок), замер и
+ * выравнивание громкости (1.9), затухание в конце песни, связанный стереоограничитель
+ * (огибающая — пик большего канала, отпускание LIMIT_RELEASE; |отсчёт| не выше LIMIT_LEVEL).
+ * Усиление выравнивания идёт за кусок линейно от прежнего к найденному замером к началу куска:
+ * оно меняется не быстрее 0,5 дБ/с, и отставание на кусок не слышно. */
 static void output_stage(midi_t* m, float* out, uint32_t frames) {
+  const uint32_t start = cycle_count();
   float master = m->master;
   const float step = (m->master_target - master) / (float)frames;
+  zm_level_t* const level = m->level;
+  float gain = 1.0f, gain_step = 0.0f;
+  if (level != NULL) {
+    const float to = zm_level_gain_to(level);
+    gain = level->gain;
+    gain_step = (to - gain) / (float)frames;
+    level->gain = to;
+  }
   for (uint32_t i = 0; i < frames; ++i) {
     const float l = out[2 * i], r = out[2 * i + 1];
     float yl = l - m->dc_xl + DC_POLE * m->dc_yl;
@@ -1102,6 +1134,11 @@ static void output_stage(midi_t* m, float* out, uint32_t frames) {
     m->dc_xl = l, m->dc_yl = yl, m->dc_xr = r, m->dc_yr = yr;
     master += step;
     yl *= master, yr *= master;
+    if (level != NULL) {
+      zm_level_measure(level, yl, yr);          /* громкость песни — до выравнивания */
+      gain += gain_step;
+      yl *= gain, yr *= gain;
+    }
     if (m->fade_left != 0) {
       const float fade = (float)m->fade_left / (float)FADE_FRAMES;
       yl *= fade, yr *= fade;
@@ -1116,12 +1153,23 @@ static void output_stage(midi_t* m, float* out, uint32_t frames) {
     const float decayed = m->limit_env * LIMIT_RELEASE;
     m->limit_env = peak > decayed ? peak : decayed;
     if (m->limit_env > LIMIT_LEVEL) {
-      const float gain = LIMIT_LEVEL / m->limit_env;
-      yl *= gain, yr *= gain;
+      const float limit = LIMIT_LEVEL / m->limit_env;
+      yl *= limit, yr *= limit;
+      ++m->limited_frames;
     }
     out[2 * i] = yl, out[2 * i + 1] = yr;
   }
   m->master = m->master_target;
+  m->cycles_output += cycle_count() - start;
+}
+
+/* Десятые доли со знаком — для журнала (без lroundf и abs). */
+static void log_tenths(float value, const char** sign, unsigned* whole, unsigned* tenth) {
+  int t = (int)(value * 10.0f + (value < 0.0f ? -0.5f : 0.5f));
+  *sign = t < 0 ? "-" : "+";
+  t = t < 0 ? -t : t;
+  *whole = (unsigned)t / 10u;
+  *tenth = (unsigned)t % 10u;
 }
 
 /* Конец событий: клавиши и педали всех каналов отпущены — хвосты отзвучат по отпусканию,
@@ -1257,6 +1305,9 @@ static int seek(void* instance, int32_t delta, uint32_t* file_offset) {
   m->carry_frames = 0;                         /* помощник уже свободен: кусок ждёт его */
   m->sends_frames = 0;
   effects_clear(&m->effects);
+  if (m->level != NULL) {
+    zm_level_discontinuity(m->level);          /* усиление остаётся, замер — без старого места */
+  }
   m->master = m->master_target = 1.0f;
   reset_channels(m, MODE_GM);                  /* каналы — как в начале песни */
   keymap_reset(m);
@@ -1400,6 +1451,19 @@ static void close_source(void* instance) {
                 (unsigned)(m->full_first_ms / 60000), (unsigned)(m->full_first_ms / 1000 % 60),
                 refused);
     }
+    /* 1.9: громкость песни до выравнивания и усиление к концу (если звука было на замер), сколько
+     * звука прошло под ограничителем, такты выхода (замер, усиление, ограничитель) на кадр. */
+    if (m->level != NULL && m->level->blocks >= ZM_LEVEL_WARMUP_STEPS) {
+      const char *song_sign, *gain_sign;
+      unsigned song_whole, song_tenth, gain_whole, gain_tenth;
+      log_tenths(m->level->song_lufs, &song_sign, &song_whole, &song_tenth);
+      log_tenths(m->level->gain_db, &gain_sign, &gain_whole, &gain_tenth);
+      host->log("midi: level %s%u.%u LUFS before gain, gain %s%u.%u dB (target %d LUFS)",
+                song_sign, song_whole, song_tenth, gain_sign, gain_whole, gain_tenth,
+                (int)ZM_LEVEL_TARGET);
+    }
+    host->log("midi: limiter %u ms, output stage %u cycles per frame",
+              (unsigned)(m->limited_frames * 1000 / RATE), (unsigned)(m->cycles_output / m->frames));
   }
   if (m->synth != NULL) {
     tsf_close(m->synth);
@@ -1414,6 +1478,9 @@ static void close_source(void* instance) {
   if (m->keymap != NULL) {
     host->free(m->keymap);
   }
+  if (m->level != NULL) {
+    host->free(m->level);
+  }
   host->free(m);
 }
 
@@ -1426,7 +1493,7 @@ int main(int argc, char* argv[]) {
   table.abi_major = ZM_SOURCE_ABI_MAJOR;
   table.abi_minor = ZM_SOURCE_ABI_MINOR;
   table.name = "midi";
-  table.version = "1.8";
+  table.version = "1.9";
   table.extensions = "MID RMI";
   table.input = ZM_INPUT_WHOLE;
   table.keeps_file = 0;
