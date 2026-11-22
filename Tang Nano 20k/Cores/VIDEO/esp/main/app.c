@@ -13,6 +13,7 @@
  *                                       [звук: 0 нет, 1 ждёт, 2 играет, 3 нет декодера][ошибка,0]
  *        тело: [1][флаги VS_*][кадр начала LE32][кадров LE32][мкс на кадр LE32]
  *              [байтов звука до начала потока LE32][имя,0]
+ *        VS_VOL_UP/VS_VOL_DOWN (0.13) — клавиши громкости: шаг и автоповтор здесь (volume_keys).
  *        Новый поток (ролик, перемотка): REG_CPURESET 1 (новая эпоха звука), HDR (новый ролик),
  *        STATUS с новыми кадром начала и байтами звука, REG_CPURESET 0, подача.
  *   73 EXIT                         → F3 [1]: ядро — назад в слот 0, затем состояние 3
@@ -167,6 +168,33 @@ static void worker(void* arg)
   worker_done = 1;
 }
 
+/* --- громкость ----------------------------------------------------------------------------------- */
+/* Клавиши вверх/вниз во время ролика (пользователь, 22.11.2026). FTVIEW4 опрашивает их раз в тик WC и
+   ставит в STATUS VS_VOL_UP/VS_VOL_DOWN, если клавишу держали с прошлого STATUS (банк ядра плагина
+   полон — шаг и автоповтор здесь). Шаг — 16 из 255, как у MP3-плеера (MP3_VOLUME_STEP, клавиши те же);
+   держат — первый шаг сразу, следующий через VOL_DELAY_MS, дальше раз в VOL_REPEAT_MS. Громкость —
+   общая для ЦАП ESP (core->set_volume): её же ставит плеер, и после выхода из ролика она остаётся.
+   Показ — в панели (hud.cpp, core->volume). Обе клавиши сразу — ничего. */
+#define VOL_STEP 16
+#define VOL_DELAY_MS 400u
+#define VOL_REPEAT_MS 150u
+static uint8_t vol_held;          /* какую держат: VS_VOL_UP, VS_VOL_DOWN или 0 */
+static uint32_t vol_next_ms;      /* когда следующий шаг удерживаемой */
+
+static void volume_keys(uint8_t flags, uint32_t now)
+{
+  const zm_core_t* core = V.core;
+  const uint8_t key = flags & (VS_VOL_UP | VS_VOL_DOWN);
+  if (key != VS_VOL_UP && key != VS_VOL_DOWN) { vol_held = 0; return; }
+  if (!core->set_volume || !core->volume) return;
+  if (key == vol_held && (int32_t)(now - vol_next_ms) < 0) return;
+  vol_next_ms = now + (key == vol_held ? VOL_REPEAT_MS : VOL_DELAY_MS);
+  vol_held = key;
+  const int v = core->volume();
+  core->set_volume((uint8_t)(key == VS_VOL_UP ? (v > 255 - VOL_STEP ? 255 : v + VOL_STEP)
+                                              : (v < VOL_STEP ? 0 : v - VOL_STEP)));
+}
+
 /* --- команды ------------------------------------------------------------------------------------ */
 static int cmd_status(const uint8_t* p, uint16_t n)
 {
@@ -187,6 +215,7 @@ static int cmd_status(const uint8_t* p, uint16_t n)
     take_str(V.status.name, sizeof V.status.name, p + 18, (uint16_t)(n - 18));
     V.ui_serial++;
     core->mutex_unlock(V.lock);
+    volume_keys(p[1], now);
   }
   uint32_t slots = 0, aborts = 0;
   if (state == 2) {
@@ -344,6 +373,7 @@ static int start(const zm_core_t* c)
   avi_info_reset();
   state = 0;
   exit_req = 0;
+  vol_held = 0;
   error_text[0] = 0;
   V.running = 1;
   worker_done = 0;

@@ -9,8 +9,9 @@
 // (пользователь, 28.10.2026: «оверлей и надписи ... всё мутное, особенно меню файлов» — до 0.8 окно
 // было холстом 390×308 RGB565 ×2 со шрифтом 13, а прозрачность — на весь оверлей, вместе с текстом).
 // ПАНЕЛЬ (оверлей 1, холст до 960×64) — низ окна картинки (4:3 или 16:9, 100/95/90 % — из CTRL
-// настроек ядра): тёмная полоса, полоса хода, время сейчас и всего, куда идёт звук, подсказки
-// клавиш. Видна, пока плагин ставит VS_PANEL, и не видна под окном.
+// настроек ядра): тёмная полоса, полоса хода, время сейчас и всего, куда идёт звук, громкость ЦАП ESP
+// (0.13: клавиши вверх/вниз, app.c), подсказки клавиш. Видна, пока плагин ставит VS_PANEL (любая
+// клавиша — 15 с), и не видна под окном.
 // ОКНО (оверлей 0, холст 780×616 — окно FTVIEW 96…928 × 56…712 ×0,9375, по центру картинки):
 // список роликов папки (страница строк от плагина) или сообщение («Building seek index...»).
 // Сообщение — поверх списка. Шрифт списка — 24 точки (как шрифт 28 FT812 в FTVIEW), строки — через
@@ -223,17 +224,38 @@ struct PanelView {
   uint32_t now_s, total_s;
   int bar;                    // точек заполненной части полосы
   int w;                      // ширина холста
+  int volume;                 // громкость ЦАП ESP 0…255 (core->volume); −1 — прошивка её не даёт
   char busy[32];              // плагин занят (VS_BUSY): текст вместо подсказок, например «Indexing 37%»
   bool operator==(const PanelView& o) const
   {
     return paused == o.paused && audio == o.audio && audio_tag == o.audio_tag && now_s == o.now_s &&
-           total_s == o.total_s && bar == o.bar && w == o.w && !strcmp(busy, o.busy);
+           total_s == o.total_s && bar == o.bar && w == o.w && volume == o.volume && !strcmp(busy, o.busy);
   }
 };
 
 constexpr int BAR_X = 22, BAR_Y = 8, BAR_H = 11, ROW1 = 26, ROW2 = 45;
+constexpr int VOL_W = 100, VOL_H = 9, VOL_GAP = 8;   // полоса громкости во второй строке
 
 int bar_width(int w) { return w - 2 * BAR_X; }
+
+// середина цифр шрифта по высоте (строки глифа «0», где есть покрытие): полоса громкости — посреди
+// строки текста, как бы ни был нарисован шрифт
+int digit_middle(int font)
+{
+  const auto& f = pui_font::fonts[font];
+  const auto& g = glyph(font, '0');
+  int top = -1, bottom = 0;
+  for (int yy = 0; yy < g.height; yy++)
+    for (int xx = 0; xx < g.width; xx++) {
+      const int i = yy * g.width + xx;
+      const uint8_t packed = f.pixels[g.offset + i / 2];
+      if ((i & 1) ? packed & 15 : packed >> 4) {
+        if (top < 0) top = yy;
+        bottom = yy;
+      }
+    }
+  return top < 0 ? g.height / 2 : (top + bottom + 1) / 2;
+}
 
 void draw_panel(const PanelView& v)
 {
@@ -251,9 +273,23 @@ void draw_panel(const PanelView& v)
                     v.audio == 2 ? (v.audio_tag == 0x55 ? "MP3 ESP DAC" : "PCM ESP DAC") :
                     v.audio == 3 ? "ESP DAC: no decoder" : "ESP DAC";
   right(c, F16, c.w - BAR_X, ROW2, snd, P_GRAY);
+  if (v.volume >= 0) {
+    // громкость — слева во второй строке: «Volume», полоса (как полоса хода) и проценты, как у плеера
+    const int x = text(c, F16, BAR_X, ROW2, "Volume ", P_GRAY, c.w);
+    const int y = ROW2 + digit_middle(F16) - VOL_H / 2;
+    pill(c, x, y, VOL_W, VOL_H, P_TRACK);
+    const int fill = VOL_W * v.volume / 255;
+    if (fill >= VOL_H) pill(c, x, y, fill, VOL_H, P_BAR);
+    char t2[8];
+    char* p = put_num(t2, (uint32_t)(v.volume * 100 + 127) / 255);
+    *p++ = '%';
+    *p = 0;
+    left(c, F16, x + VOL_W + VOL_GAP, ROW2, t2, P_TXT);
+  }
+  // в окне 4:3 90 % (панель 864) длинная подсказка (695 точек) ещё не задевает время ч:мм:сс по краям
   center(c, F16, c.w / 2, ROW1, v.busy[0] ? v.busy :
-                                v.paused ? "Paused: Space play | Left/Right seek | Enter list | Esc exit"
-                                         : "Space pause | Left/Right seek | Home restart | Enter list | Esc exit",
+                                v.paused ? "Paused: Space play | Left/Right seek | Up/Down volume | Enter list | Esc exit"
+                                         : "Space pause | Left/Right seek | Up/Down volume | Home restart | Enter list | Esc exit",
          P_TXT);
 }
 
@@ -434,6 +470,7 @@ extern "C" void hud_task(void* arg)
       const uint32_t shown = frame + 1 > st.total_frames ? st.total_frames : frame + 1;
       v.bar = st.total_frames ? (int)((uint64_t)bar_width(panel.w) * shown / st.total_frames) : 0;
       v.w = panel.w;
+      v.volume = core->volume ? core->volume() : -1;
       if (st.flags & VS_BUSY) {
         size_t n = 0;
         while (n < sizeof v.busy - 1 && st.name[n]) { v.busy[n] = st.name[n]; ++n; }

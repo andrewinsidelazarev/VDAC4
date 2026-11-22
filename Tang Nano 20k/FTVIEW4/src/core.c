@@ -37,7 +37,7 @@
 #include "avi_list.h"
 
 // --- обмен с ESP (esp_link.asm) ------------------------------------------------------------
-#define ESP_LINK 0xB680     // = esp_link в build.py
+#define ESP_LINK 0xB6E0     // = esp_link в build.py
 typedef struct
 {
   u8 *buf;            // ProtoBuf: принятый ответ
@@ -98,6 +98,8 @@ bool esp_call(u8 cmd, void *data, u16 len, u8 repeat, u16 polls)
 #define VS_PANEL 2
 #define VS_SEEKING 8
 #define VS_BUSY 16          // достраивается таблица перемотки: в панели ESP — текст имени
+#define VS_VOL_UP 32        // с прошлого STATUS держали «вверх» — громкость (VIDEO.ELF 0.13)
+#define VS_VOL_DOWN 64      // … «вниз»
 
 // --- ядро видео (SPI FT812) ----------------------------------------------------------------
 #define CORE_FIFO 0xE0000UL
@@ -269,6 +271,8 @@ bool fifo_room(u16 count)
 
 // --- ролик ---------------------------------------------------------------------------------
 u8 paused, keys, edges, key_tick, ended;
+u8 vol_keys;                 // VS_VOL_UP/VS_VOL_DOWN: клавиши громкости с прошлого STATUS
+u8 vol_hold;                 // нажатая стрелка громкости, пока _ANYK видит клавишу
 u16 panel_left;              // тики WC, пока видна панель (15 с после клавиши)
 #define PANEL_TICKS 750
 u32 cr_base;                 // кадр ролика, с которого идёт поток
@@ -292,7 +296,9 @@ bool core_status(bool body)
   if (body)
   {
     *p++ = 1;
-    *p++ = (paused ? VS_PAUSED : 0) | (paused || panel_left ? VS_PANEL : 0) | (bg_busy ? VS_BUSY : 0);
+    *p++ = (paused ? VS_PAUSED : 0) | (paused || panel_left ? VS_PANEL : 0) | (bg_busy ? VS_BUSY : 0) |
+           vol_keys;
+    vol_keys = 0;
     memcpy(p, &cr_base, 4); p += 4;
     memcpy(p, &avi.total, 4); p += 4;
     memcpy(p, &avi.period, 4); p += 4;
@@ -441,7 +447,17 @@ void keys_poll()
   u8 k;
   if (*(volatile u8*)_TMN == key_tick) return;
   key_tick = *(volatile u8*)_TMN;
+  // Вверх/вниз — громкость ЦАП ESP (пользователь, 22.11.2026), как Mp3_Keys MP3-плеера: событие
+  // нажатия у WC одно на всех (счётчик автоповтора #76CB, PS2P.ASM: новое нажатие — #FF, его забирает
+  // первая спросившая проверка своей клавиши), а _ANYK при любой нажатой клавише ставит счётчик в 25.
+  // В ee49 стрелки спрашивались после play_keys с _ANYK — и всегда были «не нажаты» (на плате
+  // индикатор не менялся). Поэтому они — первыми. Удержание — пока _ANYK видит клавишу (автоповтор WC
+  // тот же _ANYK и сбивает); шаг, автоповтор и показ в панели — VIDEO.ELF 0.13 по флагам STATUS.
+  if (wc_api__bool(_UPPP)) vol_hold = VS_VOL_UP;
+  if (wc_api__bool(_DWWW)) vol_hold = VS_VOL_DOWN;
   k = keys_read(play_keys);
+  if (!(k & 128)) vol_hold = 0;
+  vol_keys |= vol_hold;
   edges |= k & ~keys;
   keys = k;
 }

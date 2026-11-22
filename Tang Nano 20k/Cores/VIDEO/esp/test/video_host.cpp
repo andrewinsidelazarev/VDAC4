@@ -510,6 +510,23 @@ int c_link_write(uint32_t a, const uint32_t* w, uint32_t n)
 int c_ui_available() { return 0; }
 void c_app_done() {}
 
+// громкость ЦАП ESP (0.13): что ставит приложение — с временем от начала потока
+std::mutex vol_m;
+int host_volume = 200;                                 // как kDefaultVolume прошивки
+double vol_t0 = 0;
+std::vector<std::pair<double, int>> vol_log;
+void c_set_volume(uint8_t v)
+{
+  std::lock_guard<std::mutex> g(vol_m);
+  host_volume = v;
+  vol_log.push_back({now_ms() - vol_t0, v});
+}
+uint8_t c_volume()
+{
+  std::lock_guard<std::mutex> g(vol_m);
+  return (uint8_t)host_volume;
+}
+
 bool old_firmware = false;   // --old-firmware 1: прошивка до 0.1.129 (pcm_low_latency нет)
 uint32_t c_pcm_low_latency(int on)
 {
@@ -533,6 +550,7 @@ zm_core_t make_core()
   c.reply = c_reply;
   c.pcm_open = pcm_open; c.pcm_write = pcm_write; c.pcm_queued_ms = pcm_queued_ms;
   c.pcm_flush = pcm_flush; c.pcm_close = pcm_close; c.pcm_pause = pcm_pause;
+  c.set_volume = c_set_volume; c.volume = c_volume;
   c.module_open = c_module_open; c.module_close = c_module_close;
   c.core_load = c_core_load; c.core_back = c_core_back; c.link_read = c_link_read; c.link_write = c_link_write;
   c.ui_available = c_ui_available; c.app_done = c_app_done;
@@ -677,6 +695,7 @@ int main(int argc, char** argv)
   uint32_t seek_frame = 0;
   std::string shots, feed;
   uint32_t feed_base = 0;
+  int volume_start = -1;     // --volume-start N: громкость N, затем клавиши громкости (0.13)
   for (int i = 2; i + 1 < argc; i += 2) {
     const std::string k = argv[i];
     const char* v = argv[i + 1];
@@ -692,7 +711,9 @@ int main(int argc, char** argv)
     else if (k == "--feed-base") feed_base = (uint32_t)std::strtoul(v, nullptr, 0);
     else if (k == "--drain") sd2.drain = std::atof(v);
     else if (k == "--old-firmware") old_firmware = std::atoi(v) != 0;
+    else if (k == "--volume-start") volume_start = std::atoi(v);
   }
+  if (volume_start >= 0) host_volume = volume_start;
   Avi avi;
   if (!load_avi(argv[1], avi)) { std::fprintf(stderr, "нет AVI %s\n", argv[1]); return 2; }
   tang.per_us = avi.us_frame;
@@ -800,7 +821,9 @@ int main(int argc, char** argv)
   // поток с начала
   tang.reset_stream(avi.chunks, 0);
   const double t_stream = now_ms();
+  vol_t0 = t_stream;
   say("поток с начала");
+  bool vol_tap1 = false, vol_tap2 = false, vol_shot = false;
 
   bool list_done = false, paused_done = false, seek_done = false, shot1 = false;
   double pause_until = -1;
@@ -810,7 +833,17 @@ int main(int argc, char** argv)
     const double t = now_ms() - t_stream;
     // панель: первые 3 с и на паузе
     pl.flags = (uint8_t)((pl.flags & ~VS_PANEL) | ((t < 3000 || (pl.flags & VS_PAUSED)) ? VS_PANEL : 0));
+    // клавиши громкости, как их шлёт FTVIEW4: нажатие — бит в одном STATUS, удержание — в каждом;
+    // «вверх» дважды (с 245 — до 255, не выше), затем «вниз» держат с 1,7 до 2,7 с
+    pl.flags &= (uint8_t)~(VS_VOL_UP | VS_VOL_DOWN);
+    if (volume_start >= 0) {
+      if (!vol_tap1 && t >= 1300) { vol_tap1 = true; pl.flags |= VS_VOL_UP; }
+      else if (!vol_tap2 && t >= 1500) { vol_tap2 = true; pl.flags |= VS_VOL_UP; }
+      else if (t >= 1700 && t < 2700) pl.flags |= VS_VOL_DOWN;
+    }
     r = pl.status();
+    pl.flags &= (uint8_t)~(VS_VOL_UP | VS_VOL_DOWN);
+    if (volume_start >= 0 && !vol_shot && t > 2850) { vol_shot = true; sleep_ms(100); shot(shots, "volume"); }
     if (r.size() > 11) audio_state_max = std::max<uint32_t>(audio_state_max, r[11]);
     if (!shot1 && t > 1200) { shot1 = true; shot(shots, "panel"); }
     if (!list_done && t > 3200) {
@@ -958,5 +991,15 @@ int main(int argc, char** argv)
     ev += b;
   }
   std::printf("events=%s\n", ev.c_str());
+  {
+    std::lock_guard<std::mutex> g(vol_m);
+    std::string vl;
+    for (const auto& e : vol_log) {
+      char b[32];
+      std::snprintf(b, sizeof b, "%s%.0f:%d", vl.empty() ? "" : ",", e.first, e.second);
+      vl += b;
+    }
+    std::printf("volume_log=%s\nvolume_final=%d\n", vl.c_str(), host_volume);
+  }
   return 0;
 }

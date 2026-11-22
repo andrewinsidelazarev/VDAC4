@@ -48,6 +48,8 @@ except ImportError:  # нет проекта VDAC4 рядом
     EspSide = None
 
 API_SPKE, API_RGGG, API_ENKE, API_ESC, API_DWWW = 0x10, 0x14, 0x16, 0x17, 0x12
+API_UPPP = 0x11
+VS_VOL_UP, VS_VOL_DOWN = 32, 64                              # STATUS: клавиши громкости (VIDEO.ELF 0.13)
 
 
 ELF_FILE = bytes(range(256)) * 5 + b'VIDEO.ELF end'   # 1293 байта: три сектора, последний неполный
@@ -328,7 +330,12 @@ class CoreMachine(Machine):
     """Банк ядра видео: ESP — за портами #57/#77 (выбор #13), ядро видео — chip модели FT812.
 
     script — шаги [(условие(машина), действие)]: действие — набор кодов клавиш WC, которые держатся
-    два тика, или функция. Шаг ждёт своего условия; следующий — после конца предыдущего."""
+    два тика (Hold — сколько задано), или функция. Шаг ждёт своего условия; следующий — после конца
+    предыдущего.
+
+    Клавиши — как PS2P WC: проверка клавиши отвечает «нажата», только если она нажата последней и
+    счётчик автоповтора #76CB — #FF (новое нажатие; проверка ставит 25) или 0 (автоповтор); тик
+    уменьшает счётчик, _ANYK при любой нажатой ставит 25. Событие нажатия — одно на всех."""
     list_model = True
 
     def __init__(self, data, *, elf=None, esp=True, script=(), bank='core', fifo=None, drain=None,
@@ -356,7 +363,8 @@ class CoreMachine(Machine):
             self.link.die()
             self.slave.buffer[:] = bytes(len(self.slave.buffer))
         self.script = list(script)
-        self.held, self.held_from, self.ready = (), 0, None
+        self.held, self.held_from, self.ready, self.held_ticks = (), 0, None, 2
+        self.kb_last, self.kb_count = None, 0        # последняя нажатая клавиша и счётчик #76CB
         self.wc_calls = []
         self.page_log = []                 # A' каждого вызова API (страница у API 0 и 79)
         self.tick_freeze = None            # функция(машина) -> True: тик WC потерян (прерывания закрыты)
@@ -398,7 +406,7 @@ class CoreMachine(Machine):
         return super().input(port)
 
     def step_script(self):
-        if self.held and (self.ticks() - self.held_from) & 255 >= 2:
+        if self.held and (self.ticks() - self.held_from) & 255 >= self.held_ticks:
             self.held = ()
             self.script.pop(0)
         if not self.held and self.script:
@@ -414,13 +422,22 @@ class CoreMachine(Machine):
                     self.script.pop(0)
                 else:
                     self.held, self.held_from = tuple(action), self.ticks()
+                    self.held_ticks = getattr(action, 'ticks', 2)
+                    self.kb_last, self.kb_count = self.held[-1], 0xFF     # KFF: новое нажатие
 
     def api(self):
         m = self.cpu
         a = m.a
         if 0x10 <= a <= 0x1C or a == 0x2D:
             self.step_script()
-            pressed = a in self.held or (a == 0x2D and bool(self.held))
+            if a == 0x2D:                  # ANYK: любая нажатая — счётчик автоповтора 25
+                pressed = bool(self.held)
+                if pressed:
+                    self.kb_count = 25
+            else:                          # L7143_89: своя, последняя, счётчик #FF или 0
+                pressed = a in self.held and a == self.kb_last and self.kb_count in (0, 0xFF)
+                if pressed and self.kb_count == 0xFF:
+                    self.kb_count = 25
             m.a, m.f = 0, 0 if pressed else 0x40
             self.api_calls.append(a)
             self.page_log.append(None)
@@ -510,6 +527,8 @@ class CoreMachine(Machine):
             event = m.run()
             if event & 8 and not (self.tick_freeze and self.tick_freeze(self)):
                 m.memory[0x6009] = (m.memory[0x6009] + 1) & 255
+                if self.kb_count not in (0, 0xFF):           # прерывание WC: задержка автоповтора
+                    self.kb_count -= 1
             if m.pc == 0x7000:
                 return
             if event & 1:
@@ -518,6 +537,14 @@ class CoreMachine(Machine):
                 elif m.pc in self.stubs:
                     self.stub(self.stubs[m.pc])
         raise AssertionError(('Execution limit', name, hex(m.pc)))
+
+
+class Hold(tuple):
+    """Клавиши сценария, которые держат ticks тиков (простой набор — два)."""
+    def __new__(cls, keys, ticks):
+        hold = super().__new__(cls, keys)
+        hold.ticks = ticks
+        return hold
 
 
 def avi_file(frames=40, **kw):
@@ -904,6 +931,34 @@ class CoreTests(unittest.TestCase):
         self.assertIn(3, flags, 'пауза и панель в STATUS')
         self.check_exit(m)
 
+    def test_volume_keys_go_to_esp_in_status(self):
+        """Вверх/вниз во время ролика — биты громкости в STATUS (шаг, автоповтор и панель — в
+        VIDEO.ELF 0.13): нажатие доходит, удержание — бит в каждом STATUS, отпущенная клавиша битов
+        больше не даёт. Модель клавиатуры — с общим счётчиком автоповтора WC: в ee49 стрелки
+        спрашивались после _ANYK и не доходили никогда (на плате 22.11.2026 индикатор стоял).
+        Esc — до 12-го STATUS: модель ядра к нему доигрывает ролик, и окно списка забрало бы Esc."""
+        data, info = avi_file(200)
+        script = [
+            (lambda m: len(m.elf.status) >= 2, (API_UPPP,)),
+            (lambda m: len(m.elf.status) >= 4, Hold((API_DWWW,), 16)),      # ~3 STATUS
+            (lambda m: len(m.elf.status) >= 10, lambda m: m.cpu.memory.__setitem__(0x6004, 1)),
+        ]
+        m = CoreMachine(data, script=script)
+        list_volume(m)                     # длинный ролик: фоновая таблица перемотки читает файл
+        self.run_core(m)
+        flags = [body[1] for _, _, body in m.elf.status]
+        up = [i for i, f in enumerate(flags) if f & VS_VOL_UP]
+        down = [i for i, f in enumerate(flags) if f & VS_VOL_DOWN]
+        self.assertTrue(up, 'вверх — в STATUS')
+        self.assertTrue(down, 'вниз — в STATUS')
+        self.assertLess(max(up), min(down), 'сначала вверх, потом вниз')
+        self.assertLessEqual(len(up), 2, f'нажатие на 2 тика — один-два STATUS: {flags}')
+        self.assertGreaterEqual(len(down), 3, f'держат 16 тиков — бит в каждом STATUS: {flags}')
+        self.assertEqual(down, list(range(down[0], down[-1] + 1)), f'удержание — без пропусков: {flags}')
+        self.assertFalse(any(f & (VS_VOL_UP | VS_VOL_DOWN) for f in flags[max(down) + 1:]),
+                         f'клавиши отпущены — битов нет: {flags}')
+        self.check_exit(m)
+
     def test_seek_streams_from_index_entry(self):
         frames = 300                       # 12 с: Right — на 10 с вперёд
         data, info = avi_file(frames)
@@ -1085,6 +1140,8 @@ class CoreTests(unittest.TestCase):
         hdr_len = len(e.hdrs[1])
         self.assertEqual(bytes(e.hdrs[1]), other[:hdr_len])
         self.assertTrue(bytes(m.core.streams[-1]).startswith(other[:64]))
+        # «вниз» в окне списка — выбор строки, не громкость
+        self.assertFalse(any(body[1] & (VS_VOL_UP | VS_VOL_DOWN) for _, _, body in e.status))
         self.check_exit(m)
 
 

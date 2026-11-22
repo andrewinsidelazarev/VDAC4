@@ -232,6 +232,22 @@ class VideoHostTest(unittest.TestCase):
             gaps = [u for u in map(float, filter(None, res['pcm_underruns'].split(','))) if u < end - 250]   # хвост: звук кончается чуть раньше последнего кадра
             self.assertEqual(gaps, [], f'ЦАП опустел посреди звука: {res["pcm_underruns"]}')
 
+    def check_volume(self, res):
+        """Громкость (0.13): с 245 «вверх» — 255 и не выше; «вниз» держат 1,7…2,7 с — шаг 16 сразу,
+        следующий через 0,4 с, дальше не чаще раза в 0,15 с; после отпускания шагов нет."""
+        log = [(float(t), int(v)) for t, v in (x.split(':') for x in res['volume_log'].split(',') if x)]
+        self.assertEqual([v for _, v in log[:2]], [255, 255], res['volume_log'])
+        down = log[2:]
+        self.assertTrue(3 <= len(down) <= 7, res['volume_log'])
+        self.assertEqual([v for _, v in down], [255 - 16 * (i + 1) for i in range(len(down))], res['volume_log'])
+        times = [t for t, _ in down]
+        self.assertTrue(1690 <= times[0] <= 1850, res['volume_log'])
+        self.assertTrue(400 <= times[1] - times[0] <= 520, res['volume_log'])
+        for a, b in zip(times[1:], times[2:]):
+            self.assertTrue(150 <= b - a <= 280, res['volume_log'])
+        self.assertLessEqual(times[-1], 2750, res['volume_log'])
+        self.assertEqual(int(res['volume_final']), down[-1][1])
+
     def check_sync(self, res, first: int, last: int, lo: float, hi: float, skip=(), rate: int = 0,
                    dma: int = DMA_FRAMES):
         if rate:
@@ -252,9 +268,10 @@ class VideoHostTest(unittest.TestCase):
         shots = BUILD / 'shots_pcm16'
         shots.mkdir(exist_ok=True)
         res = run(avi, '--pause-at', '4000', '--pause-ms', '1500', '--seek-at', '6500', '--seek-frame', '250',
-                  '--shots', str(shots))
+                  '--shots', str(shots), '--volume-start', '245')
         to_png(shots)
         self.common(res, rate, 1)
+        self.check_volume(res)
         # перемотка с ~5 с ролика на 10 с: пропущены кадры до 249, остальные показаны
         missing = res['frames_missing'].split(',')
         self.assertEqual(len(missing), 1, res['frames_missing'])

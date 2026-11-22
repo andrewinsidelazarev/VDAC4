@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define APP_VERSION "0.12"
+#define APP_VERSION "0.13"
 #define VIDEO_PERSONALITY 0x05u
 
 /* --- регистры LINK ядра видео (байтовые адреса; ts_fb_core, HAS_VIDEO) ------------------------ */
@@ -45,6 +45,8 @@ enum {
   VS_END    = 4,        /* ролик кончился */
   VS_SEEKING = 8,       /* идёт перемотка (поток перезапускается) */
   VS_BUSY   = 16,       /* плагин занят (достраивает таблицу перемотки): в панели — текст name */
+  VS_VOL_UP = 32,       /* (0.13, FTVIEW4 ee49+) с прошлого STATUS держали «вверх» — громкость */
+  VS_VOL_DOWN = 64,     /* … «вниз» */
 };
 
 typedef struct {

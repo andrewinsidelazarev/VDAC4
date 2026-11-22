@@ -128,7 +128,9 @@ def build(out):
     # плагинов VDAC4 (vendor/vdac4), sjasmplus, с адреса ESP_LINK до DATA; код C банка —
     # ниже этого адреса. Ячейки EspArgs (+10) повторяет core.c.
     # Ответы VIDEO.ELF плагину короче 80 байтов: приём — до 256 (PROTO_MAX), передача — любая.
-    esp_link, esp_end = 0xB680, 0xBD00
+    # Блок — 1562 байта, вплотную под DATA (#B6E0…#BCFA): коду C банка ядра — на 96 байтов больше
+    # (22.11.2026: до клавиш громкости в нём оставалось 4 свободных байта, ESP_LINK был #B680).
+    esp_link, esp_end = 0xB6E0, 0xBD00
     sjasm = os.environ.get('SJASMPLUS') or shutil.which('sjasmplus') or r'E:\zx\z80\zuma\sjasmplus.exe'
     (out/'core').mkdir(exist_ok=True)
     run([sjasm, '-DZIFI_SPI', '-DPROTO_MAX=256', '-DLINK_ORG=0x%04X' % esp_link, '-DLINK_LIMIT=0x%04X' % esp_end,
