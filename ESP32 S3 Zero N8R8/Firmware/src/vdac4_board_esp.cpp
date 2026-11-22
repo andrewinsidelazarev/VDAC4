@@ -84,6 +84,21 @@ bool pushWrite(void*, uint32_t address, const uint32_t* words, size_t count) {
   return tang::write(address, words, count);
 }
 
+// Передышка долгой работы через LINK (0.1.163). Слот flash Tang (мегабайт кусками по 64 байта),
+// файлы карты Tang, хэш своего раздела ESP идут активным ожиданием SPI и ядро не отдают: на плате
+// 22.11.2026 сверка слота 3 продержала ядро 0 больше 5 с, задача IDLE0 не работала, и сторож задач
+// перезапустил ESP посреди проверки — плагин написал «list not refreshed» (журнал: «Task watchdog …
+// task vdac4-update», трасса — checkSlot → tang_flash::read → опрос LINK). Раз в 100 мс — тик сна:
+// IDLE0 и задачи ниже приоритетом успевают, скорость теряется на ~1 %.
+void breathe() {
+  static TickType_t last = 0;
+  const TickType_t now = xTaskGetTickCount();
+  if (now - last >= pdMS_TO_TICKS(100)) {
+    vTaskDelay(1);
+    last = xTaskGetTickCount();
+  }
+}
+
 void pushSleep(void*, uint32_t ms) {
   const TickType_t ticks = pdMS_TO_TICKS(ms);
   vTaskDelay(ticks > 0 ? ticks : 1);
@@ -178,6 +193,7 @@ bool Vdac4BoardEsp::espImageSha256(uint32_t size, uint8_t digest[32]) {
   bool ok = sha.begin();
   for (uint32_t done = 0; ok && done < size;) {
     const uint32_t part = (size - done) < kChunk ? (size - done) : kChunk;
+    breathe();
     ok = esp_partition_read(running, done, chunk, part) == ESP_OK && sha.update(chunk, part);
     done += part;
   }
@@ -239,6 +255,7 @@ const char* Vdac4BoardEsp::flashReady() {
 }
 
 bool Vdac4BoardEsp::flashRead(uint32_t address, uint8_t* data, size_t length) {
+  breathe();
   return tang_flash::read(address, data, length);
 }
 
@@ -271,6 +288,7 @@ bool Vdac4BoardEsp::flashWriteSlot(uint32_t base, const uint8_t* image, size_t s
   bool ok = true;
   const uint32_t blocks = (size + tang_flash::kBlockBytes - 1) / tang_flash::kBlockBytes;
   for (uint32_t block = 0; ok && block < blocks; ++block) {
+    breathe();
     ok = tang_flash::eraseBlock(base + block * tang_flash::kBlockBytes);
     if (!ok) {
       snprintf(error, errorSize, "erase at %06lX failed",
@@ -282,6 +300,7 @@ bool Vdac4BoardEsp::flashWriteSlot(uint32_t base, const uint8_t* image, size_t s
   }
   for (size_t done = 0; ok && done < size;) {
     const size_t part = (size - done) < kChunk ? (size - done) : kChunk;
+    breathe();
     ok = tang_flash::program(base + done, image + done, part);
     if (!ok) {
       snprintf(error, errorSize, "write at %06lX failed", static_cast<unsigned long>(base + done));
@@ -293,6 +312,7 @@ bool Vdac4BoardEsp::flashWriteSlot(uint32_t base, const uint8_t* image, size_t s
   }
   for (size_t done = 0; ok && done < size;) {
     const size_t part = (size - done) < kChunk ? (size - done) : kChunk;
+    breathe();
     if (!tang_flash::read(base + done, back, part)) {
       snprintf(error, errorSize, "read back at %06lX failed", static_cast<unsigned long>(base + done));
       ok = false;
@@ -408,6 +428,7 @@ bool Vdac4BoardEsp::tangSdRead(const char* path, uint8_t* data, uint32_t size) {
   bool ok = true;
   for (uint32_t done = 0; ok && done < size;) {
     const size_t want = (size - done) < kChunk ? (size - done) : kChunk;
+    breathe();
     ok = fread(data + done, 1, want, f) == want;
     done += want;
   }
@@ -444,6 +465,7 @@ bool Vdac4BoardEsp::tangSdWrite(const char* path, const uint8_t* data, uint32_t 
       } else {
         for (uint32_t done = 0; done < size && problem == nullptr;) {
           const size_t want = (size - done) < kChunk ? (size - done) : kChunk;
+          breathe();
           if (fwrite(data + done, 1, want, f) != want) {
             problem = "write failed";
           }
