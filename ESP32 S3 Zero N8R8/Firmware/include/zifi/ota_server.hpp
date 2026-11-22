@@ -20,6 +20,8 @@ class OtaServer {
   void stop();
   void poll();
   bool running() const { return running_; }
+  // К порту подключён ПК (от приёма до BEGIN; сама заливка идёт внутри poll).
+  bool clientActive() const { return clientActive_; }
   uint16_t port() const { return port_; }
 
  private:

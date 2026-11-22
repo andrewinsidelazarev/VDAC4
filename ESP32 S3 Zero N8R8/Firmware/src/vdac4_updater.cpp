@@ -108,14 +108,61 @@ void sizeText(uint32_t size, char* output, size_t capacity) {
   }
 }
 
-bool treeFilter(void*, const char* path, bool directory) {
+// Папки репозитория, в которых лежат файлы правил (kEspRepo, kBl616Repo, kSlots, kFileRules). Дерево
+// берётся только их — GET trees/{commit}:{папка}?recursive=1, — а не всего репозитория: то 22.11.2026
+// было уже 981 КБ (3626 записей) и росло с каждым пушем Amiga и стендов, и на плате в Украине его
+// загрузка обрывалась «GitHub tree: body timeout» (30 с без байта посреди ответа). Эти папки — ~95 КБ
+// (почти всё — Network, 89 КБ), запросов API — 10 на проверку вместо 2 (без входа GitHub даёт 60 в час).
+// Новое правило — сюда и его папку; test_vdac4_update_host сверяет, что каждое правило покрыто.
+// kEspSums, kBl616Main и kTangReadme берутся с raw.githubusercontent.com по пути — дерево им не нужно.
+constexpr const char* kTreeDirs[] = {
+    "ESP32 S3 Zero N8R8/Firmware/firmware/vdac4",
+    "Tang Nano 20k/BL616/firmware",
+    "Tang Nano 20k/Firmware/firmware",
+    "Tang Nano 20k/Cores/SD/CORES",
+    "ESP32 S3 Zero N8R8/Network",
+    "ESP32 S3 Zero N8R8/Sound/MP3 Player/build",
+    "ESP32 S3 Zero N8R8/Sound/modules/out",
+    "Tang Nano 20k/FTVIEW4/build",
+    "Tang Nano 20k/Cores/VIDEO/esp/dist",
+};
+
+// Путь в URL: пробел и прочее — %XX, '/' остаётся (как WcUpdater::urlEncodePath).
+bool encodePath(const char* path, char* output, size_t capacity) {
+  static const char kDigits[] = "0123456789ABCDEF";
+  size_t used = 0;
+  for (const unsigned char* p = reinterpret_cast<const unsigned char*>(path); *p != 0; ++p) {
+    const bool plain = (*p >= '0' && *p <= '9') || (*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+                       *p == '-' || *p == '_' || *p == '.' || *p == '~' || *p == '/';
+    if (used + (plain ? 1 : 3) >= capacity) {
+      return false;
+    }
+    if (plain) {
+      output[used++] = static_cast<char>(*p);
+    } else {
+      output[used++] = '%';
+      output[used++] = kDigits[*p >> 4];
+      output[used++] = kDigits[*p & 0x0F];
+    }
+  }
+  output[used] = 0;
+  return true;
+}
+
+// Отбор записей поддерева: context — его папка, путь в ответе — от неё.
+bool treeFilter(void* context, const char* path, bool directory) {
   if (directory) {
     return false;
+  }
+  char full[GitTreeEntry::kPathSize];
+  const int written = snprintf(full, sizeof(full), "%s/%s", static_cast<const char*>(context), path);
+  if (written <= 0 || static_cast<size_t>(written) >= sizeof(full)) {
+    return false;                              // правил на такие длинные пути нет
   }
   VupKind kind;
   char target[GitTreeEntry::kPathSize];
   uint8_t slot = 0;
-  return Vdac4Updater::classify(path, kind, target, sizeof(target), slot);
+  return Vdac4Updater::classify(full, kind, target, sizeof(target), slot);
 }
 
 int kindOrder(const VupRow& row) {
@@ -553,15 +600,30 @@ bool Vdac4Updater::fetchText(const char* repoPath, char* buffer, size_t capacity
   return true;
 }
 
+// Запрос API GitHub в json_. Обрыв связи («body timeout», «recv failed», нет соединения) — ещё раз, до
+// kApiAttempts (0.1.161); ответ HTTP любой — как есть, его разбирает вызывающий.
+bool Vdac4Updater::apiGet(const char* path, size_t& length, uint16_t& status, char* problem,
+                          size_t problemSize) {
+  for (unsigned attempt = 1;; ++attempt) {
+    if (fetcher_.get(kApiHost, path, reinterpret_cast<uint8_t*>(json_), kMaxTreeJson, length, status,
+                     problem, problemSize)) {
+      return true;
+    }
+    if (stop_ || attempt >= kApiAttempts || strcmp(problem, "stopped") == 0 ||
+        strcmp(problem, "body too long") == 0) {
+      return false;
+    }
+  }
+}
+
 bool Vdac4Updater::fetchTree() {
   sendState(kPhaseGithub, 0, 0, "GitHub: %s", kRepo);
-  char path[160];
+  char path[256];
   snprintf(path, sizeof(path), "/repos/%s/git/ref/heads/%s", kRepo, kBranch);
   size_t length = 0;
   uint16_t status = 0;
   char problem[64] = {};
-  if (!fetcher_.get(kApiHost, path, reinterpret_cast<uint8_t*>(json_), kMaxTreeJson, length,
-                    status, problem, sizeof(problem))) {
+  if (!apiGet(path, length, status, problem, sizeof(problem))) {
     fail("GitHub: %s", problem);
     return false;
   }
@@ -578,28 +640,53 @@ bool Vdac4Updater::fetchTree() {
     return false;
   }
   sendState(kPhaseGithub, 0, 0, "GitHub: commit %.7s", commit_);
-  snprintf(path, sizeof(path), "/repos/%s/git/trees/%s?recursive=1", kRepo, commit_);
-  if (!fetcher_.get(kApiHost, path, reinterpret_cast<uint8_t*>(json_), kMaxTreeJson, length,
-                    status, problem, sizeof(problem))) {
-    fail("GitHub tree: %s", problem);
-    return false;
+  treeCount_ = 0;
+  for (const char* dir : kTreeDirs) {
+    if (stop_) {
+      fail("stopped");
+      return false;
+    }
+    char encoded[128];
+    if (!encodePath(dir, encoded, sizeof(encoded))) {
+      fail("GitHub tree: folder name too long");
+      return false;
+    }
+    snprintf(path, sizeof(path), "/repos/%s/git/trees/%s:%s?recursive=1", kRepo, commit_, encoded);
+    if (!apiGet(path, length, status, problem, sizeof(problem))) {
+      fail("GitHub tree: %s", problem);
+      return false;
+    }
+    if (status == 403 || status == 429) {
+      fail("GitHub API limit - try again in an hour");
+      return false;
+    }
+    if (status == 404) {
+      continue;                                // папки в этом коммите нет — нет и её файлов
+    }
+    bool truncated = false;
+    size_t count = 0;
+    if (status != 200 || !parseGitTree(json_, length, tree_ + treeCount_, kMaxTreeEntries - treeCount_,
+                                       count, truncated, treeFilter, const_cast<char*>(dir))) {
+      fail("GitHub tree: bad answer (http %u)", static_cast<unsigned>(status));
+      return false;
+    }
+    if (truncated) {
+      fail("GitHub tree: truncated");
+      return false;
+    }
+    // пути поддерева — от его папки: в таблице — от корня репозитория, как правила
+    for (size_t i = 0; i < count; ++i) {
+      GitTreeEntry& entry = tree_[treeCount_ + i];
+      char full[GitTreeEntry::kPathSize];
+      const int written = snprintf(full, sizeof(full), "%s/%s", dir, entry.path);
+      if (written <= 0 || static_cast<size_t>(written) >= sizeof(full)) {
+        fail("GitHub tree: path too long");
+        return false;
+      }
+      memcpy(entry.path, full, static_cast<size_t>(written) + 1);
+    }
+    treeCount_ += count;
   }
-  if (status == 403 || status == 429) {
-    fail("GitHub API limit - try again in an hour");
-    return false;
-  }
-  bool truncated = false;
-  size_t count = 0;
-  if (status != 200 ||
-      !parseGitTree(json_, length, tree_, kMaxTreeEntries, count, truncated, treeFilter, nullptr)) {
-    fail("GitHub tree: bad answer (http %u)", static_cast<unsigned>(status));
-    return false;
-  }
-  if (truncated) {
-    fail("GitHub tree: truncated");
-    return false;
-  }
-  treeCount_ = count;
   return true;
 }
 

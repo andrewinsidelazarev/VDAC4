@@ -125,6 +125,7 @@ class Vdac4Updater {
   static constexpr size_t kMaxFile = 2U * 1024U * 1024U;
   static constexpr size_t kMaxTreeEntries = 128;   // отобранных правилами записей
   static constexpr unsigned kDownloadAttempts = 3;
+  static constexpr unsigned kApiAttempts = 3;      // запрос API: повтор при обрыве связи (0.1.161)
   static constexpr uint32_t kProgressIntervalMs = 250;
   static constexpr const char* kRepo = "andrewinsidelazarev/VDAC4";
   static constexpr const char* kBranch = "main";
@@ -184,6 +185,7 @@ class Vdac4Updater {
 
  private:
   bool fetchTree();
+  bool apiGet(const char* path, size_t& length, uint16_t& status, char* problem, size_t problemSize);
   bool buildRows();
   bool addRow(const GitTreeEntry& entry, VupKind kind, const char* target, uint8_t slot);
   bool fetchText(const char* repoPath, char* buffer, size_t capacity, size_t& length);

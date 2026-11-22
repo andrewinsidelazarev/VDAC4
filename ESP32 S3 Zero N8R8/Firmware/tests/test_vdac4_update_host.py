@@ -131,6 +131,17 @@ class Stand:
         (self.github / '_tree.json').write_text(json.dumps(
             {'sha': 'f' * 40, 'url': 'https://api.github.com/x', 'tree': tree,
              'truncated': self.truncated}, indent=1), encoding='utf-8')
+        # поддеревья (0.1.161: прошивка берёт trees/{commit}:{папка}): пути — от папки; нет папки — 404
+        trees = self.github / '_trees'
+        if trees.exists():
+            shutil.rmtree(trees)
+        trees.mkdir()
+        for folder in (entry['path'] for entry in tree if entry['type'] == 'tree'):
+            sub = [dict(entry, path=entry['path'][len(folder) + 1:]) for entry in tree
+                   if entry['path'].startswith(folder + '/')]
+            (trees / (folder.replace('/', '#') + '.json')).write_text(json.dumps(
+                {'sha': 'e' * 40, 'url': 'https://api.github.com/x', 'tree': sub,
+                 'truncated': self.truncated}, indent=1), encoding='utf-8')
 
     # --- плата ---
     def esp_running(self, image: bytes) -> None:
@@ -320,9 +331,11 @@ class Vdac4UpdateHostTest(unittest.TestCase):
         phase, can, total, percent, text = run.last_state()
         self.assertEqual((phase, total, percent), (4, 14, 100))
         self.assertEqual(text, '10 to update - mark and press Enter')
-        # два запроса API и файлы описей — с того же коммита
+        # запросы API: ссылка на ветку и девять деревьев папок правил (0.1.161; прежде — одно дерево
+        # всего репозитория); файлы описей — с того же коммита
         api = [line for line in run.lines if line.startswith('HTTP api.github.com')]
-        self.assertEqual(len(api), 2)
+        self.assertEqual(len(api), 10)
+        self.assertTrue(all(f'/git/trees/{COMMIT}:' in line for line in api[1:]), api)
         self.assertIn(f'/andrewinsidelazarev/VDAC4/{COMMIT}/ESP32%20S3%20Zero%20N8R8/Firmware/'
                       'firmware/vdac4/firmware.sha256', run.output)
 
@@ -495,6 +508,45 @@ class Vdac4UpdateHostTest(unittest.TestCase):
         run = self.stand.run('check')
         self.assertEqual(run.code, 1)
         self.assertEqual(run.last_state(), (255, 0, 0, 0, 'GitHub tree: truncated'))
+
+    def test_tree_only_of_needed_folders(self) -> None:
+        """0.1.161: дерево — по папкам правил (trees/{commit}:{папка}), а не всего репозитория (981 КБ
+        22.11.2026, «GitHub tree: body timeout» на плате в Украине); чужая папка рядом не запрашивается."""
+        self.scenario()
+        self.stand.remote('Tang Nano 20k/Cores/AMIGA/sim/big.bin', payload(9, 5000))
+        self.stand.publish()
+        run = self.stand.run('check')
+        trees = [line for line in run.lines if line.startswith('HTTP api.github.com') and '/git/trees/' in line]
+        self.assertTrue(trees)
+        self.assertTrue(all(':' in line.split('/git/trees/', 1)[1] for line in trees), trees)
+        self.assertLessEqual(len(trees), 9, trees)
+        self.assertFalse([line for line in trees if 'AMIGA' in line or '%3A' in line], trees)
+        self.assertNotEqual(run.last_state()[0], 255, run.last_state())
+        self.assertEqual(run.row('WC/COREMENU.WMF')['status'], DIFFERENT)      # плагин из папки Network
+        self.assertEqual(run.row('Tang SD: CORES/NES.BIN')['status'], SAME)
+
+    def test_api_drop_is_retried(self) -> None:
+        """Обрыв связи посреди ответа API — повтор (до 3 раз), проверка доходит до конца."""
+        self.scenario()
+        run = self.stand.run('check', {'ZIFI_VUP_DROP': 'Network', 'ZIFI_VUP_DROP_TIMES': '2'})
+        drops = [line for line in run.lines if line.startswith('HTTP api.github.com') and 'Network' in line]
+        self.assertEqual(len(drops), 3, drops)
+        self.assertNotEqual(run.last_state()[0], 255, run.last_state())
+        run = self.stand.run('check', {'ZIFI_VUP_DROP': 'Network', 'ZIFI_VUP_DROP_TIMES': '3'})
+        self.assertEqual(run.last_state()[0], 255)
+        self.assertIn('GitHub tree: body timeout', run.last_state()[4])
+
+    def test_rules_covered_by_tree_folders(self) -> None:
+        """Каждое правило (ESP, BL616, слоты, файлы) лежит в одной из папок kTreeDirs."""
+        source = (ROOT / 'src' / 'vdac4_updater.cpp').read_text(encoding='utf-8')
+        block = source[source.index('constexpr const char* kTreeDirs[] = {'):]
+        dirs = [line.strip().strip(',').strip('"') for line in block[:block.index('};')].splitlines()[1:]]
+        rules = [ESP_BIN, BL616_BIN, *SLOTS.values()]
+        start = source.index('constexpr FileRule kFileRules[] = {')
+        for line in source[start:source.index('};', start)].splitlines()[1:]:
+            rules.append(line.strip().split('"')[1])
+        for rule in rules:
+            self.assertTrue(any(rule.startswith(folder + '/') for folder in dirs), rule)
 
     def test_stop_during_check(self) -> None:
         self.scenario()

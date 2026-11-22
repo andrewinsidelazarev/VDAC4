@@ -53,8 +53,9 @@ class AppHost {
   virtual const IniConfig& config() const = 0;
   // Ядро 0: TCP-клиент, общий с командами NET_*.
   virtual NetClient& netClient() = 0;
-  // Ядро 0: идёт ли приём прошивки по сети (тогда сеть и карту не трогать).
-  virtual bool otaRunning() const = 0;
+  // Ядро 0: занят ли порт обновления (тогда сеть и карту не трогать). Открытый, но свободный порт
+  // (ПК не подключён) закрывается здесь же, и ответ — false (0.1.161).
+  virtual bool otaBusy() = 0;
   // Ядро 0: остановить FTP и SMB. false — сервер не остановился.
   virtual bool stopFileServers() = 0;
   // Ядро 0: событие для Z80. waitMs — сколько ждать места в очереди (0 —

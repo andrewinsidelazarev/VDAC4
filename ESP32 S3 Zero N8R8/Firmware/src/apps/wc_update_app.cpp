@@ -46,7 +46,7 @@ void WcUpdateApp::processNetwork(IntercoreExchange& exchange) {
   switch (exchange.requestCommand) {
     case kWcuStart: {
       exchange.responseCommand = kRespWcuStart;
-      if (host_.otaRunning()) {
+      if (host_.otaBusy()) {
         exchange.setError("wcu:ota active");
         return;
       }

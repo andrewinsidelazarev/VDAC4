@@ -261,6 +261,11 @@ class FolderFetcher : public zifi::WcFetcher {
     corruptTimes_ = times == nullptr ? 1 : std::atoi(times);
     const char* api = std::getenv("ZIFI_VUP_API_STATUS");
     apiStatus_ = api == nullptr ? 0 : static_cast<uint16_t>(std::atoi(api));
+    // обрыв связи (как «body timeout» NetClient) на первых N запросах, где в пути есть подстрока
+    const char* drop = std::getenv("ZIFI_VUP_DROP");
+    drop_ = drop == nullptr ? "" : drop;
+    const char* dropTimes = std::getenv("ZIFI_VUP_DROP_TIMES");
+    dropTimes_ = dropTimes == nullptr ? 1 : std::atoi(dropTimes);
   }
 
   const std::string& root() const { return root_; }
@@ -269,6 +274,11 @@ class FolderFetcher : public zifi::WcFetcher {
            uint16_t& status, char* error, size_t errorSize) override {
     printLine(std::string("HTTP ") + host + " " + path);
     length = 0;
+    if (!drop_.empty() && dropTimes_ > 0 && std::strstr(path, drop_.c_str()) != nullptr) {
+      --dropTimes_;
+      std::snprintf(error, errorSize, "body timeout");
+      return false;
+    }
     std::string file;
     if (std::strcmp(host, "api.github.com") == 0) {
       if (apiStatus_ != 0) {
@@ -278,7 +288,23 @@ class FolderFetcher : public zifi::WcFetcher {
       if (std::strstr(path, "/git/ref/heads/") != nullptr) {
         file = root_ + "/_ref.json";
       } else if (std::strstr(path, "/git/trees/") != nullptr) {
-        file = root_ + "/_tree.json";
+        // trees/{commit}:{папка}?recursive=1 — поддерево (0.1.161): файл _trees/<папка, '/' -> '#'>.json
+        const char* colon = std::strchr(std::strstr(path, "/git/trees/"), ':');
+        if (colon == nullptr) {
+          file = root_ + "/_tree.json";
+        } else {
+          std::string dir;
+          for (const char* p = colon + 1; *p != 0 && *p != '?'; ++p) {
+            if (*p == '%' && p[1] != 0 && p[2] != 0) {
+              const char hex[3] = {p[1], p[2], 0};
+              dir += static_cast<char>(std::strtol(hex, nullptr, 16));
+              p += 2;
+            } else {
+              dir += *p == '/' ? '#' : *p;
+            }
+          }
+          file = root_ + "/_trees/" + dir + ".json";
+        }
       }
     } else if (std::strcmp(host, "raw.githubusercontent.com") == 0) {
       file = rawFile(root_, path);
@@ -308,6 +334,8 @@ class FolderFetcher : public zifi::WcFetcher {
   std::string root_;
   std::string corrupt_;
   int corruptTimes_ = 1;
+  std::string drop_;
+  int dropTimes_ = 1;
   uint16_t apiStatus_ = 0;
 };
 

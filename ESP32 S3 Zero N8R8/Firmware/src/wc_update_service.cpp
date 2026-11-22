@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+#include "zifi/json_end.hpp"
+
 #include <new>
 #include <stdio.h>
 #include <string.h>
@@ -33,6 +35,11 @@ bool NetWcFetcher::get(const char* host, const char* path, uint8_t* buffer,
     return false;
   }
   const uint32_t started = millis();
+  // Ответ API GitHub — один JSON: чтение кончается на его последней скобке (0.1.162), не ожидая
+  // закрытия соединения — свежий большой ответ приходит без Content-Length (json_end.hpp). Файлы с
+  // raw.githubusercontent.com — как прежде, по длине или до закрытия.
+  const bool api = strcmp(host, "api.github.com") == 0;
+  JsonEnd jsonEnd;
   bool eof = false;
   while (!eof) {
     if (cancelled()) {
@@ -52,6 +59,11 @@ bool NetWcFetcher::get(const char* host, const char* path, uint8_t* buffer,
       return false;
     }
     length += received;
+    size_t used = 0;
+    if (api && received != 0 && jsonEnd.feed(buffer + length - received, received, used)) {
+      length = length - received + used;
+      break;
+    }
     if (received == 0 && !eof) {
       if (static_cast<uint32_t>(millis() - started) >= kHttpTimeoutMs) {
         client_.close();

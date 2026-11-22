@@ -26,7 +26,7 @@ void TimeApp::processNetwork(IntercoreExchange& exchange) {
   char result[15] = {};
   char error[64];
   bool ok = false;
-  if (host_.otaRunning()) {
+  if (host_.otaBusy()) {
     memset(result, '0', 14);
     snprintf(error, sizeof(error), "ota active");
   } else {
@@ -55,7 +55,7 @@ void WeatherApp::processNetwork(IntercoreExchange& exchange) {
   char error[64] = {};
   exchange.responseCommand = kRespWeatherGet;
   bool ok = false;
-  if (host_.otaRunning()) {
+  if (host_.otaBusy()) {
     snprintf(error, sizeof(error), "ota active");
   } else {
     ok = weather_.get(host_.config(), exchange.response, error, sizeof(error));

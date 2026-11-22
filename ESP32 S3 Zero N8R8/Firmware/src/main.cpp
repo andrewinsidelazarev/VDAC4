@@ -213,7 +213,8 @@ class Application : private AppHost {
   Z80Transport& transport() override { return transport_; }
   const IniConfig& config() const override { return config_; }
   NetClient& netClient() override { return netClient_; }
-  bool otaRunning() const override { return ota_.running(); }
+  bool otaBusy() override { return otaHoldsNetwork("app"); }
+  bool otaHoldsNetwork(const char* who);
   bool stopFileServers() override;
   bool sendEvent(uint8_t command, const uint8_t* data, uint16_t length,
                  uint32_t waitMs) override;
@@ -939,7 +940,7 @@ void Application::processWifiConnect() {
   char password[64];
   size_t next = 0;
   size_t ignored = 0;
-  if (ota_.running()) {
+  if (otaHoldsNetwork("wifi")) {
     setNetworkError("ota active");
     prepareWifiResponse(kRespWifiConnect, false);
     return;
@@ -961,7 +962,7 @@ void Application::processWifiConnect() {
 
 void Application::processWifiIni() {
   char error[64];
-  if (ota_.running()) {
+  if (otaHoldsNetwork("wifi")) {
     setNetworkError("ota active");
     prepareWifiResponse(kRespWifiIni, false);
     return;
@@ -1017,7 +1018,7 @@ void Application::processFtpStart() {
   exchange_->responseCommand = kRespFtpStart;
   exchange_->responseLength = 3;
   memset(exchange_->response, 0, 3);
-  if (ota_.running()) {
+  if (otaHoldsNetwork("ftp")) {
     setNetworkError("ftp:ota active");
     return;
   }
@@ -1072,7 +1073,7 @@ void Application::processSmbStart() {
   exchange_->responseCommand = kRespSmbStart;
   exchange_->responseLength = 5;
   memset(exchange_->response, 0, 5);
-  if (ota_.running()) {
+  if (otaHoldsNetwork("smb")) {
     setNetworkError("smb:ota active");
     return;
   }
@@ -1157,6 +1158,25 @@ void Application::processUpdateStart() {
   writeLe16(exchange_->response + 5, ota_.port());
 }
 
+// Порт обновления 8267 открывает update_vdac4 (UPDATE_START) и закрывает по клавише (UPDATE_STOP) или
+// перезагрузка после заливки. Сброс Evo или запуск другой программы оставляли его открытым, и до
+// перезапуска ESP любая сетевая команда получала «ota active» (22.11.2026, плата в Украине: ZiFi —
+// «get:ota active»). Теперь свободный порт — ПК не подключён — закрывается, как только сеть просит
+// другая программа (0.1.161); занятый — ПК подключён, ждёт BEGIN — по-прежнему отказ. Сама заливка
+// идёт внутри ota_.poll() этой же задачи, и команды Z80 в это время сюда не доходят.
+bool Application::otaHoldsNetwork(const char* who) {
+  if (!ota_.running()) {
+    return false;
+  }
+  if (ota_.clientActive()) {
+    return true;
+  }
+  const uint16_t port = ota_.port();
+  ota_.stop();
+  bringupLog("zifi-ota", "update port %u closed: %s from another program", static_cast<unsigned>(port), who);
+  return false;
+}
+
 void Application::processUpdateStop() {
   ota_.stop();
   exchange_->responseCommand = kRespUpdateStop;
@@ -1177,7 +1197,7 @@ void Application::processOnlineUpdateCheck() {
     setNetworkError("update-check:no wifi");
     return;
   }
-  if (ota_.running()) {
+  if (otaHoldsNetwork("update-check")) {
     setNetworkError("update-check:ota listener active");
     return;
   }
@@ -1213,7 +1233,7 @@ void Application::processOnlineUpdate() {
     setNetworkError("update:no wifi");
     return;
   }
-  if (ota_.running()) {
+  if (otaHoldsNetwork("update")) {
     setNetworkError("update:ota listener active");
     return;
   }
@@ -1248,7 +1268,7 @@ void Application::processNetOpen() {
   exchange_->responseCommand = kRespNetOpen;
   exchange_->responseLength = 1;
   exchange_->response[0] = 0;
-  if (ota_.running()) {
+  if (otaHoldsNetwork("open")) {
     setNetworkError("open:ota active");
     return;
   }
@@ -1339,7 +1359,7 @@ void Application::processHttpGet() {
   exchange_->responseCommand = kRespNetHttpGet;
   exchange_->responseLength = 7;
   memset(exchange_->response, 0, 7);
-  if (ota_.running()) {
+  if (otaHoldsNetwork("get")) {
     setNetworkError("get:ota active");
     return;
   }
@@ -1376,7 +1396,7 @@ void Application::processNetProbe() {
   exchange_->responseCommand = kRespNetPing;
   exchange_->responseLength = 3;
   memset(exchange_->response, 0, 3);
-  if (ota_.running()) {
+  if (otaHoldsNetwork("ping")) {
     setNetworkError("ping:ota active");
     return;
   }

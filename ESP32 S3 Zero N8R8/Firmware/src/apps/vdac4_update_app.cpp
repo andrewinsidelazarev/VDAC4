@@ -48,7 +48,7 @@ void Vdac4UpdateApp::processNetwork(IntercoreExchange& exchange) {
   switch (exchange.requestCommand) {
     case kVupStart: {
       exchange.responseCommand = kRespVupStart;
-      if (host_.otaRunning()) {
+      if (host_.otaBusy()) {
         exchange.setError("vup:ota active");
         return;
       }
