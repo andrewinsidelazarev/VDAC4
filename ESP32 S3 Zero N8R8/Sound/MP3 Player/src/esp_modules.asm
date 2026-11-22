@@ -850,6 +850,19 @@ Esp_StopApp:
         ld (EspWhy),a
         ret
 
+; Ответ на AUDIO_OPEN (плагин 1.33): по кадрам, до ESP_OPEN_FRAMES. Открывая файл, PLAYER грузит
+; декодер (ELF), а с флешки USB это долго: 22.11.2026 IT после MP3 — TRACKER.ELF с флешки 640 мс,
+; весь AUDIO_OPEN 965 мс, а 12000 опросов MP3_WAIT — около 0,6 с. Плагин 1.32 писал «ESP does not
+; answer» и бросал файл, а PLAYER 30 с ждал модуль и отказывался от него. Выход — как у
+; Esp_WaitLong: CF=0 — ответ в ProtoBuf; CF=1 — нет ответа, отказ ESP (ProtoErr=1) или Esc
+; (EspWhy=WHY_ESC).
+Mp3_WaitOpen:
+        xor a
+        ld (EspWhy),a                    ; WHY_OTHER: по нему Esc отличается от тишины
+        ld a,RESP_AUDIO_OPEN
+        ld hl,ESP_OPEN_FRAMES
+        jp Esp_WaitLong
+
 ; Ответ ESP с кодом A, на который ей нужно время (место под доставку, запись
 ; модуля во flash, запуск приложения): опрос каждый кадр, не дольше HL кадров;
 ; Esc — бросить

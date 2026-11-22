@@ -13,7 +13,8 @@
 ;   окно;
 ; - каждый AUDIO_STATUS (Ui_Track): экран показан (SCREEN_F_SHOWN) — окна нет; окна нет, а
 ;   экрана нет UI_TANG_WAIT кадров (PLAYER не нашёл памяти, Tang ушёл) — окно;
-; - ошибка (Mp3_Fatal) — окно. Передача модуля в ESP (Esp_Prepare) окна не открывает: без Tang
+; - ошибка (Mp3_Fatal): с плагина 1.33 при живом экране Tang — на нём (Ui_TangError), окно — только
+;   без экрана; прежде — всегда окно. Передача модуля в ESP (Esp_Prepare) окна не открывает: без Tang
 ;   оно уже открыто (Ui_Probe), с Tang — его нет и тут (плагин 1.22).
 ; Код — во второй странице (MODULE P1): из страницы 0 — через Page1_Call.
 
@@ -245,6 +246,58 @@ Mp3_Alive:
 .quiet:
         xor a
         ld (ProtoErr),a                  ; молчание тут — не ошибка: ответит следующая команда
+        ret
+
+; Ошибка плагина при экране Tang (плагин 1.33, Mp3_Fatal). Строку состояния «ERROR…» из тела
+; AUDIO_STATUS PLAYER (1.26+) рисует на экране Tang сам — пока плагин спрашивает состояние (молчит
+; дольше UI_ALIVE_MS — экран уходит). Окно на Evo — только если экрана нет: окно уже открыто
+; (нет Tang, экран не пришёл), ESP на AUDIO_STATUS не ответила, прежний PLAYER (байта экрана нет)
+; или экрана нет UI_TANG_WAIT кадров (Ui_Track). Ответила — на выходе экран уходит сразу (Mp3_Leave), хотя
+; перед этим ESP молчала (Mp3Silent).
+; Вход: A=0 — спросить сразу; иначе — не чаще раза в MP3_ALIVE_FRAMES кадров.
+; Выход: CF=1 — окно на Evo открыто только что (его нарисовать).
+Ui_TangError:
+        ld c,a
+        ld a,(UiHidden)
+        or a
+        ret z                            ; окно уже открыто; CF=0
+        ld a,c
+        or a
+        jr z,.now
+        ld a,(WC_FRAMES)
+        ld hl,Mp3AliveFrame
+        sub (hl)
+        cp MP3_ALIVE_FRAMES
+        jr nc,.now
+        or a                             ; ещё рано; CF=0
+        ret
+.now:
+        ld a,(WC_FRAMES)
+        ld (Mp3AliveFrame),a
+        call Ui_PackBlock
+        ld a,CMD_AUDIO_STATUS
+        call Proto_Send
+        jr c,.window
+        ld a,RESP_AUDIO_STATUS
+        ld de,MP3_WAIT
+        call Mp3_Wait
+        jr c,.window
+        xor a
+        ld (Mp3Silent),a
+        ld hl,(ProtoRxLen)
+        ld de,ST_SCREEN+1
+        or a
+        sbc hl,de
+        jr c,.window                     ; прежний PLAYER: байта экрана нет
+        ld a,(ProtoBuf+ST_SCREEN)
+        ld (Mp3Status+ST_SCREEN),a
+        call Ui_Track                    ; экрана нет UI_TANG_WAIT кадров — окно
+        ld a,(UiHidden)
+        sub 1                            ; окно открыла Ui_Track (UiHidden=0) — CF=1
+        ret
+.window:
+        call Ui_Show
+        scf
         ret
 
 UiTangQuery:    db #04,#00,1            ; VERSION, одно слово

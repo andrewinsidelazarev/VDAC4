@@ -1184,7 +1184,7 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertEqual(data[63], 0, "и Enter, и F3")
         self.assertEqual(data[64:161], bytes(97), "старое поле 32 расширений у #11 пустое")
         self.assertEqual(data[161:165], b"\xFF" * 4, "размер файла не ограничен")
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.32")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.33")
         self.assertEqual((data[34], data[35]), (2, 0), "две страницы, запуск — страница 0")
         self.assertEqual(data[38], 1, "второй блок файла — в страницу 1")
         self.assertEqual(data[197], 4, "меню выбора просмотрщика, в F10 плеера нет")
@@ -1806,6 +1806,50 @@ class TangScreenTest(unittest.TestCase):
         self.assertEqual(bytes(h.audio.received), content)
         self.assertEqual(h.machine.a, EXIT_NEXT, 'в конце песни — следующий файл')
 
+    def test_error_with_the_screen_stays_on_the_screen(self) -> None:
+        # Плагин 1.33: ESP не отвечает на данные, но на AUDIO_STATUS отвечает — ошибка на экране
+        # Tang (строка «ERROR…» в теле AUDIO_STATUS, PLAYER рисует её сам), окна на Evo нет.
+        # 22.11.2026 на плате плагин 1.32 открыл текстовое окно под живым экраном Tang.
+        h = self.harness(random.Random(8).randbytes(200_000), tang_version=self.TANG,
+                         screen=SCREEN_F_TANG | SCREEN_F_SHOWN)
+        audio = h.audio
+        blocks = 0
+
+        def app(command: int, payload: bytes) -> bytes:
+            nonlocal blocks
+            if command == AUDIO_DATA:
+                blocks += 1
+                if blocks > 5:
+                    return b""              # данные — без ответа
+            return audio(command, payload)
+        h.app = app
+        h.esc_after = 300
+        h.start()
+        self.assert_no_window(h)
+        error = "ERROR: ESP does not answer"
+        statuses = [b['status'] for b in audio.ui_blocks if b and not b['flags'] & UI_F_LEAVING]
+        self.assertEqual(statuses[-1], error)
+        self.assertGreater(statuses.count(error), 3, 'экран Tang жив, пока плагин ждёт Esc')
+        self.assertEqual(audio.ui_blocks[-1]['flags'], UI_F_OPEN | UI_F_LEAVING,
+                         'на выходе экран Tang уходит сразу')
+
+    def test_error_with_a_silent_esp_opens_the_window(self) -> None:
+        # ESP молчит совсем — экрану Tang ошибку не показать: окно на Evo, как прежде.
+        h = self.harness(random.Random(9).randbytes(200_000), tang_version=self.TANG,
+                         screen=SCREEN_F_TANG | SCREEN_F_SHOWN)
+        audio = h.audio
+        calls = 0
+
+        def app(command: int, payload: bytes) -> bytes:
+            nonlocal calls
+            calls += 1
+            return b"" if calls > 14 else audio(command, payload)
+        h.app = app
+        h.esc_after = 300
+        h.start()
+        self.assertIn(FN_PRWOW, h.calls, 'окно открыто')
+        self.assertEqual(h.at(STATUS_ROW, TEXT_MP3), "ERROR: ESP does not answer")
+
     def test_screen_that_never_appears_gives_the_window(self) -> None:
         # Tang есть, а экран не показался (PLAYER не нашёл памяти): через 5 с (250 кадров) — окно,
         # и метки для него спрошены.
@@ -1949,6 +1993,73 @@ class TangScreenTest(unittest.TestCase):
         h.start()
         self.assertIn(FN_PRWOW, h.calls)
         self.assertIn(AUDIO_VIEW, h.audio.commands, 'окну — спектр')
+
+
+class SlowOpenTest(unittest.TestCase):
+    """Плагин 1.33: ответ на AUDIO_OPEN ждётся по кадрам до 15 с (ESP_OPEN_FRAMES). 22.11.2026 на
+    плате IT после MP3: PLAYER грузил TRACKER.ELF с флешки, AUDIO_OPEN шёл 965 мс, а плагин ждал
+    ~0,6 с (MP3_WAIT) — «ESP does not answer», модуль в ESP не пришёл."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        need(WMF, SYM)
+
+    def slow(self, h: Mp3Harness, frames: int | None) -> dict:
+        """Ответ на первый AUDIO_OPEN — через frames кадров (None — никогда)."""
+        state: dict = {'at': None, 'reply': b''}
+
+        def app(command: int, payload: bytes) -> bytes:
+            if command == AUDIO_OPEN and state['at'] is None:
+                state['at'] = h.interrupts
+                state['reply'] = h.audio(command, payload)
+                return b""
+            return h.audio(command, payload)
+        h.app = app
+        frame = h.next_frame
+
+        def delayed() -> None:
+            frame()
+            if (frames is not None and state['at'] is not None and state['reply']
+                    and h.interrupts - state['at'] >= frames):
+                h.rx += state['reply']
+                state['reply'] = b""
+        h.next_frame = delayed
+        return state
+
+    def test_slow_open_is_waited_for(self) -> None:
+        for name in (b"Song.mp3", b"TUNE.XM"):
+            with self.subTest(name=name):
+                content = random.Random(5).randbytes(30001)
+                h = Mp3Harness(content, name=name)
+                self.slow(h, 60)            # 1,2 с — вдвое дольше прежнего ожидания
+                h.start()
+                self.assertEqual(bytes(h.audio.received), content)
+                self.assertNotIn("ERROR", h.text(STATUS_ROW))
+
+    def test_escape_while_the_open_is_awaited(self) -> None:
+        h = Mp3Harness(random.Random(6).randbytes(30001))
+        self.slow(h, None)
+        h.esc_after = 100
+        h.start()
+        self.assertEqual(h.audio.received, b"")
+        self.assertNotIn("ERROR", h.text(STATUS_ROW), 'Esc — не ошибка')
+        self.assertEqual(h.machine.a, 0)
+
+    def test_open_that_never_comes_is_an_error_after_15_s(self) -> None:
+        h = Mp3Harness(random.Random(7).randbytes(30001))
+        state = self.slow(h, None)
+        seen: dict = {}
+        frame = h.next_frame
+
+        def watch() -> None:
+            frame()
+            if 'error' not in seen and "ERROR" in h.text(STATUS_ROW):
+                seen['error'] = h.interrupts
+        h.next_frame = watch
+        h.esc_after = 900
+        h.start()
+        self.assertEqual(h.at(STATUS_ROW, TEXT_MP3), "ERROR: ESP does not answer")
+        self.assertGreaterEqual(seen['error'] - state['at'], 750, '15 с ожидания')
 
 
 class TrackNumberTest(unittest.TestCase):

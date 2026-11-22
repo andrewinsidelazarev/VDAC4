@@ -419,10 +419,8 @@ Mp3_Play:
         ld bc,9
         call Proto_Send
 .open_sent:
-        ld a,RESP_AUDIO_OPEN
-        ld de,MP3_WAIT
-        call Mp3_Wait
-        jp c,Mp3_NoAnswer
+        call Mp3_WaitOpen                ; до 15 с: PLAYER может грузить декодер с флешки (1.33)
+        jp c,Mp3_OpenFailed
         ld a,(ProtoBuf)
         or a
         ld hl,UiErrorAudioOff
@@ -864,10 +862,8 @@ Mod_Play:
         ld bc,8
         call Proto_Send
         jp c,Mp3_NoAnswer
-        ld a,RESP_AUDIO_OPEN
-        ld de,MP3_WAIT
-        call Mp3_Wait
-        jp c,Mp3_NoAnswer
+        call Mp3_WaitOpen                ; до 15 с: TRACKER.ELF с флешки — около секунды (1.33)
+        jp c,Mp3_OpenFailed
         call Ui_Screen                   ; окно или экран Tang — по ответу
         ld a,(ProtoBuf)
         or a
@@ -1543,6 +1539,16 @@ Mp3_CardError:
         ld hl,UiErrorCard
         jr Mp3_Fatal
 
+; Нет ответа на AUDIO_OPEN (Mp3_WaitOpen, плагин 1.33): Esc в ожидании — выход, как Esc при
+; игре; иначе — как всякое молчание ESP.
+Mp3_OpenFailed:
+        ld a,(EspWhy)
+        cp WHY_ESC
+        jp nz,Mp3_NoAnswer
+        xor a
+        call Mp3_Close
+        jp Mp3_Exit
+
 ; ESP не ответила на команду. Если она успела прислать причину (#EE) —
 ; например, прошивка без звука отвечает "unsupported:30", — показать её.
 Mp3_NoAnswer:
@@ -1564,15 +1570,24 @@ Mp3_Fatal:
         xor a
         call Mp3_Close
 .show:
-        call Ui_Show                     ; ошибка — в окне на Evo
         pop hl
         call Ui_SetState
-        call Ui_Draw
+        ; Плагин 1.33: при живом экране Tang ошибка — на нём (строку «ERROR…» из тела AUDIO_STATUS
+        ; PLAYER рисует сам), окно на Evo — только без экрана (Ui_TangError, screen.asm). Прежде
+        ; окно открывалось всегда: 22.11.2026 «ERROR: ESP does not answer» после IT встало
+        ; текстовым окном под живым экраном Tang.
+        xor a
+        call Ui_TangError
+        call Ui_Draw                     ; окна нет — переходники WC ничего не рисуют
 .wait:
         ei
         halt
         call WC_ESC
-        jr z,.wait
+        jr nz,Mp3_Exit
+        ld a,1
+        call Ui_TangError                ; экран Tang жив, пока плагин спрашивает состояние
+        call c,Ui_Draw                   ; окно открылось только что
+        jr .wait
 Mp3_Exit:
         call Ui_Close                    ; окно поверх — прочь
         call Ui_Flush                    ; окно — как есть на выходе

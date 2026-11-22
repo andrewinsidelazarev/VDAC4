@@ -13,6 +13,9 @@ ESP_SHOW_EVERY  equ 8                   ; секторов между показ
 ; не дождался); APP_START — смена приложения и загрузка его ELF из кэша.
 ESP_STORE_FRAMES equ 60*50
 ESP_START_FRAMES equ 15*50
+; AUDIO_OPEN (плагин 1.33): PLAYER при открытии грузит декодер — с флешки USB это около секунды
+; (TRACKER.ELF 22.11.2026 — 640 мс, весь ответ — 965 мс), а MP3_WAIT — около 0,6 с.
+ESP_OPEN_FRAMES equ 15*50
 ; MOD_QUERY: места под банк MIDI или ПЗУ OPL4 нет — ESP (0.1.35) освобождает его
 ; сама: перезапуск приложения, ресурсы прочь, ожидание временных буферов — до 3 с.
 ; С флешкой в разъёме USB модуля (прошивка 0.1.43) ресурс ESP до ответа грузит с
@@ -60,6 +63,12 @@ Ui_PackBlock:
 Mp3_Alive:
         call Page1_Call
         dw P1.Mp3_Alive
+Mp3_WaitOpen:
+        call Page1_Call
+        dw P1.Mp3_WaitOpen
+Ui_TangError:
+        call Page1_Call
+        dw P1.Ui_TangError
 
 ; Полоса загрузки — снова у файла плеера (Mod_Play).
 Esp_LoadDone:
