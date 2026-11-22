@@ -54,11 +54,16 @@ class ModuleApp : public App {
   // ZM_NOT_FOUND — приложения нет или экрана у него нет.
   static int uiModel(zm_ui_model_t* model);
   static int uiCover(uint16_t* pixels, uint16_t side);
+  // Резерв исполняемого ОЗУ под code_ram (0.1.158): звать первым делом при старте прошивки (setup),
+  // пока внутреннее ОЗУ SRAM1 не раздроблено, — до Wi-Fi, USB и канала.
+  static void reserveCodeRam();
 
  private:
   static constexpr size_t kMaxTasks = 8;
   static constexpr size_t kMaxSync = 16;
-  static constexpr size_t kMaxModules = 4;
+  // Модулей, открытых приложением сразу (0.1.159: было 4 — Metal Slug открывает 4 больших модуля
+  // и MSCODE4 для code_ram). Места — в PSRAM (modules_).
+  static constexpr size_t kMaxModules = 8;
   static constexpr size_t kMaxResources = 4;
   static constexpr size_t kMaxStreams = 2;
   static constexpr size_t kMaxSockets = 5;
@@ -74,6 +79,7 @@ class ModuleApp : public App {
   struct LoadedModule {
     bool used;
     char name[13];
+    bool inCodeRam;          // код (.text) — в куске code_ram (ABI 1.19)
     void* elf;               // esp_elf_t* в PSRAM
   };
   struct Resource {
@@ -180,6 +186,24 @@ class ModuleApp : public App {
   static void coreSd2Close(void*);
   static int coreLinkBurst(uint32_t, const uint32_t*, uint32_t);
   static uint32_t corePcmLowLatency(int on);
+  // ABI 1.19: исполняемое внутреннее ОЗУ для кода модулей (code_ram, module_open_ex)
+  static int coreCodeRam(uint32_t bytes, uint32_t* granted);
+  static int coreModuleOpenEx(const char* name, uint32_t flags, void* arg1, void* arg2,
+                              void** handle, int* entryResult, uint32_t* placed);
+  static int openModule(const char* name, bool internal, void* arg1, void* arg2, void** handle,
+                        int* entryResult, uint32_t* placed);
+  // Кусок code_ram приложения: статический — у Application бюджет статической RAM.
+  struct CodeRam {
+    uint8_t* data;           // адрес шины данных (через него пишет загрузчик)
+    uint32_t size;
+    uint32_t used;           // занято модулями подряд от начала
+    uint32_t modules;        // модулей, чей код лежит в куске
+    bool execOpen;           // исполнение во внутреннем ОЗУ данных разрешено (PMS)
+  };
+  static CodeRam codeRam_;
+  static uint8_t* codeReserve_;     // резерв под code_ram (куча с низшим приоритетом), nullptr — нет
+  static void logCodeRamReserve();  // из begin: журнал уже работает, а reserveCodeRam был раньше
+  void releaseCodeRam();    // выгрузка приложения: кусок — в кучу, исполнение — запретить
   bool coreLoaded_ = false;               // приложение загрузило ядро из кэша: при выгрузке — слот 0
   int sockets_[kMaxSockets] = {-1, -1, -1, -1, -1};
   // Сокет с TLS (ABI 1.12): его соединение esp_tls; nullptr — обычный сокет или место свободно.
@@ -209,7 +233,9 @@ class ModuleApp : public App {
   // Приложение из прошивки, без ELF (общий слой ядра): как startApp
   int startBuiltin(const zm_app_t* app, const char* name);
   void replyApp(uint8_t response, int result, const char* fallbackText);
-  int loadElf(const char* name, void* arg1, void* arg2, void** elfOut, int* entryResult);
+  // internal: .text — в остаток куска code_ram, если помещается (*inCodeRam — легло ли туда).
+  int loadElf(const char* name, void* arg1, void* arg2, void** elfOut, int* entryResult,
+              bool internal = false, bool* inCodeRam = nullptr);
   void unloadElf(void* elf);
   int startApp(const char* name);
   bool moduleInUse(const char* name) const;   // само приложение или загруженный им модуль
@@ -255,7 +281,16 @@ class ModuleApp : public App {
   char handoffFrom_[13] = {};
   TaskSlot tasks_[kMaxTasks] = {};
   SemaphoreHandle_t sync_[kMaxSync] = {};
-  LoadedModule modules_[kMaxModules] = {};
+  // Места модулей: kMaxModules штук в PSRAM, выделяет begin (0.1.159). В статической RAM их держать
+  // нельзя: бюджет Application на пределе (static_assert в main.cpp), а нужны они только при
+  // открытии и закрытии модулей. Обход — for (LoadedModule& m : moduleSlots()); нет мест — пусто.
+  LoadedModule* modules_ = nullptr;
+  struct ModuleSlots {
+    LoadedModule* first;
+    LoadedModule* begin() const { return first; }
+    LoadedModule* end() const { return first != nullptr ? first + kMaxModules : first; }
+  };
+  ModuleSlots moduleSlots() const { return ModuleSlots{modules_}; }
   Resource resources_[kMaxResources] = {};
   // Потоки HTTP(S) приложения (net_*): объекты живут до перезапуска ESP, занятость —
   // до net_close или выгрузки приложения.

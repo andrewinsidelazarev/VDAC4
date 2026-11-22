@@ -2034,6 +2034,8 @@ Application application;
 }  // namespace zifi
 
 void setup() {
+  // Первым делом, пока SRAM1 не раздроблена (до Wi-Fi, USB и канала): резерв под код модулей.
+  zifi::ModuleApp::reserveCodeRam();
   zifi::application.begin();
 }
 

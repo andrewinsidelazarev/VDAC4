@@ -261,6 +261,15 @@ typedef struct esp_elf {
     uint16_t        num;                /*!< number of symbols in the dynamic object */
     esp_symtab_t    *symtab;            /*!< symbol table of dynamic object pointer */
 #endif
+
+    /* VDAC4 (0.1.157): .text во внутреннем ОЗУ, мимо кэша команд. Вызывающий до esp_elf_relocate
+       даёт место (адрес шины данных), его размер и смещение шины команд; если .text в него
+       помещается, загрузчик кладёт код туда и не освобождает его, иначе — в PSRAM, как всегда. */
+    unsigned char   *text_room;         /*!< свободное место под .text (шина данных) или NULL */
+    uint32_t        text_room_size;     /*!< его размер */
+    uintptr_t       text_room_bus_off;  /*!< шина команд = шина данных + это (у места) */
+    uintptr_t       text_bus_off;       /*!< то же у загруженного .text; 0 — PSRAM (OFFSET_TEXT_VALUE) */
+    uint8_t         text_borrowed;      /*!< .text лежит в чужом месте: не освобождать */
 } esp_elf_t;
 
 #ifdef __cplusplus

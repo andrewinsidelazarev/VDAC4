@@ -56,7 +56,7 @@ class AppTasksTest(unittest.TestCase):
         self.assertIn('#define ZM_TASK_STACK_PSRAM_FIRST 0x40000000u', self.sdk)
 
     def test_abi_minor_17(self) -> None:
-        self.assertRegex(self.sdk, r'#define ZM_APP_ABI_MINOR 1[78]\b')
+        self.assertRegex(self.sdk, r'#define ZM_APP_ABI_MINOR (1[789]|[2-9]\d)\b')
         self.assertIn('17: задачу со стеком в PSRAM', self.sdk)
         self.assertIn('volatile bool finished;', self.header)
 

@@ -31,6 +31,23 @@ constexpr uint32_t kMagic = 0x48535243;   // "CRSH"
 // Код модулей лежит в PSRAM: шина данных видит его с 0x3C000000, шина команд
 // (PC, адреса возврата) — с 0x42000000.
 constexpr uint32_t kCodeBusOffset = 0x42000000 - 0x3C000000;
+// (0.1.157) Код модуля во внутреннем ОЗУ (code_ram, ABI 1.19): шина команд SRAM1 — тот же байт
+// шины данных + это смещение (ESP32-S3: SOC_DIRAM_IRAM_LOW − SOC_DIRAM_DRAM_LOW).
+constexpr uint32_t kDiramIramLow = 0x40378000;
+constexpr uint32_t kDiramIramHigh = 0x403E0000;
+constexpr uint32_t kDiramBusOffset = 0x40378000 - 0x3FC88000;
+
+// Адрес шины команд (PC, адрес возврата) — в адрес шины данных, где лежит копия модуля; 0 — не код
+// модуля ни в PSRAM, ни во внутреннем ОЗУ.
+IRAM_ATTR uint32_t codeToData(uint32_t address) {
+  if (address >= 0x42000000 && address < 0x44000000) {
+    return address - kCodeBusOffset;
+  }
+  if (address >= kDiramIramLow && address < kDiramIramHigh) {
+    return address - kDiramBusOffset;
+  }
+  return 0;
+}
 constexpr size_t kCodeBytes = 16;
 constexpr size_t kModules = 6;
 constexpr size_t kDepth = 12;
@@ -90,8 +107,8 @@ void IRAM_ATTR copyText(char* out, size_t size, const char* text) {
 }
 
 const ModuleRange* moduleOf(const CrashRecord& record, uint32_t address) {
-  if (address >= 0x42000000 && address < 0x44000000) {
-    address -= kCodeBusOffset;           // PC и адреса возврата — шина команд
+  if (const uint32_t data = codeToData(address)) {
+    address = data;                      // PC и адреса возврата — шина команд
   }
   for (const ModuleRange& range : record.modules) {
     if (range.base != 0 && address >= range.base && address - range.base < range.size) {
@@ -126,9 +143,7 @@ void IRAM_ATTR onPanic(arduino_panic_info_t* info, void*) {
   // Код у PC, если PC в модуле: что в памяти и что было при загрузке. У сторожа
   // задач PC — просто где задача была: байты не нужны.
   record.codeState = 0;
-  const uint32_t pc = record.pc >= 0x42000000 && record.pc < 0x44000000 && !g_twdt_isr
-                          ? record.pc - kCodeBusOffset
-                          : 0;
+  const uint32_t pc = !g_twdt_isr ? codeToData(record.pc) : 0;
   for (size_t index = 0; index < kModules && pc != 0 && spi_flash_cache_enabled(); ++index) {
     const ModuleRange& range = record.modules[index];
     if (range.base == 0 || pc < range.base || pc - range.base >= range.size) {
@@ -152,7 +167,9 @@ void IRAM_ATTR onPanic(arduino_panic_info_t* info, void*) {
     // модуля чужих несохранённых данных не держат).
     record.freshValid = 0;
     const uint32_t line = at & ~31u;
-    if (line >= range.base + 32 && line + 64 <= range.base + range.size - 32) {
+    // Во внутреннем ОЗУ кэша нет: прочитанное выше — уже то, что в памяти.
+    const bool cached = range.base >= 0x3C000000 && range.base < 0x3E000000;
+    if (cached && line >= range.base + 32 && line + 64 <= range.base + range.size - 32) {
       Cache_Invalidate_Addr(line, 64);
       for (size_t byte = 0; byte < kCodeBytes; ++byte) {
         record.fresh[byte] = code[byte];
@@ -236,9 +253,8 @@ void crashRecordReport() {
     const uint32_t address = index == 0 ? record.pc : record.backtrace[index - 1];
     const ModuleRange* range = moduleOf(record, address);
     if (range != nullptr) {
-      const uint32_t data = address >= 0x42000000 && address < 0x44000000
-                                ? address - kCodeBusOffset
-                                : address;
+      const uint32_t mapped = codeToData(address);
+      const uint32_t data = mapped != 0 ? mapped : address;
       bringupLog(kTag, "%08X = %s+%X", static_cast<unsigned>(address), range->name,
                  static_cast<unsigned>(data - range->base + range->vaddr));
     }

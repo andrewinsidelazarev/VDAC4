@@ -56,5 +56,19 @@ int main() {
   expect("gap_is_zero", relocate(elf, data, 5, 0xa000), 0);
   if (failures) return 1;
   printf("ok relative_section_end\n");
+
+  // 0.1.157: .text во внутреннем ОЗУ (code_ram) — у него своё смещение шины команд.
+  constexpr uint32_t kInternalText = 0x3FCA1000;
+  constexpr uint32_t kDiram = 0x40378000 - 0x3FC88000;   // SOC_DIRAM_IRAM_LOW − SOC_DIRAM_DRAM_LOW
+  uint32_t data2[2] = {};
+  esp_elf_t inner = {};
+  inner.sec[ELF_SEC_TEXT] = {0x8c4, 0, kInternalText, 0x900a};
+  inner.sec[ELF_SEC_DATA] = {0xa0a4, 0, reinterpret_cast<uintptr_t>(data2), sizeof(data2)};
+  inner.text_bus_off = kDiram;
+  expect("internal_text_bus", relocate(inner, data2, 0, 0x8c8), kInternalText + 4 + kDiram);
+  expect("internal_text_end_bus", relocate(inner, data2, 1, 0x8c4 + 0x900a),
+         kInternalText + 0x900a + kDiram);
+  if (failures) return 1;
+  printf("ok internal_text\n");
   return 0;
 }

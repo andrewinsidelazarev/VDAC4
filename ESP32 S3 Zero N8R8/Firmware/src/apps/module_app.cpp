@@ -5,6 +5,7 @@
 #include <driver/temperature_sensor.h>
 #include <esp_cache.h>
 #include <esp_heap_caps.h>
+#include <esp_heap_caps_init.h>
 #include <esp_littlefs.h>
 #include <esp_partition.h>
 #include <esp_timer.h>
@@ -19,6 +20,12 @@
 #include <dirent.h>
 
 #include <soc/soc.h>
+#include <esp_memory_utils.h>
+#include <sdkconfig.h>
+#if CONFIG_ESP_SYSTEM_MEMPROT
+#include <esp_memprot.h>
+#include <esp_private/esp_memprot_internal.h>
+#endif
 
 #include "esp_elf.h"
 #include "zifi/audio_player.hpp"
@@ -198,6 +205,8 @@ volatile int16_t g_temperature = ZM_TEMPERATURE_UNKNOWN;
 zm_core_t ModuleApp::core_ = {};
 ModuleApp* ModuleApp::instance_ = nullptr;
 ModuleApp::CoreJob ModuleApp::coreJob_ = {};
+ModuleApp::CodeRam ModuleApp::codeRam_ = {};
+uint8_t* ModuleApp::codeReserve_ = nullptr;
 SemaphoreHandle_t ModuleApp::coreJobGo_ = nullptr;
 SemaphoreHandle_t ModuleApp::coreJobDone_ = nullptr;
 TaskHandle_t ModuleApp::coreLoader_ = nullptr;
@@ -277,10 +286,18 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.sd2_close = coreSd2Close;
   core_.link_burst = coreLinkBurst;
   core_.pcm_low_latency = corePcmLowLatency;
+  core_.code_ram = coreCodeRam;
+  core_.module_open_ex = coreModuleOpenEx;
 }
 
 void ModuleApp::begin() {
   registerModuleSymbols();
+  logCodeRamReserve();
+  modules_ = static_cast<LoadedModule*>(
+      heap_caps_calloc(kMaxModules, sizeof(LoadedModule), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (modules_ == nullptr) {
+    bringupLog(kTag, "module slots not allocated: module_open will refuse");
+  }
   appLock_ = xSemaphoreCreateMutex();
 #if ZIFI_HAS_SPI_LINK
   coreJobGo_ = xSemaphoreCreateBinary();
@@ -1075,8 +1092,11 @@ void ModuleApp::handleStart(const PacketView& packet) {
 // --- загрузка ELF --------------------------------------------------------------
 
 int ModuleApp::loadElf(const char* name, void* arg1, void* arg2, void** elfOut,
-                       int* entryResult) {
+                       int* entryResult, bool internal, bool* inCodeRam) {
   *elfOut = nullptr;
+  if (inCodeRam != nullptr) {
+    *inCodeRam = false;
+  }
   // Отмеченный «с флешки» (0.1.146) — оттуда: его нет в кэше ESP или там другая версия.
   uint32_t driveSize = 0;
   const bool fromDrive = driveModuleSize(name, &driveSize);
@@ -1126,12 +1146,23 @@ int ModuleApp::loadElf(const char* name, void* arg1, void* arg2, void** elfOut,
 #endif
     return ZM_ERROR;
   }
-  esp_elf_t* elf = static_cast<esp_elf_t*>(heap_caps_calloc(1, sizeof(esp_elf_t), MALLOC_CAP_8BIT));
+  // Запись загрузчика о модуле — в PSRAM (0.1.160): с одним MALLOC_CAP_8BIT куча отдавала её из
+  // внутреннего ОЗУ (116 байт на модуль, у Metal Slug ~0,7 КБ). Читают её только загрузка и
+  // выгрузка; запись о панике держит свою копию адресов (crashRecordModule).
+  esp_elf_t* elf = static_cast<esp_elf_t*>(
+      heap_caps_calloc(1, sizeof(esp_elf_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   if (elf == nullptr) {
     heap_caps_free(file);
     return ZM_NO_MEMORY;
   }
   int result = esp_elf_init(elf);
+  if (result == 0 && internal && codeRam_.data != nullptr && codeRam_.used < codeRam_.size) {
+    // ABI 1.19: остаток куска code_ram. Шина команд внутреннего ОЗУ — тот же байт со смещением
+    // SOC_DIRAM_IRAM_LOW − SOC_DIRAM_DRAM_LOW (у ESP32-S3 зеркало прямое).
+    elf->text_room = codeRam_.data + codeRam_.used;
+    elf->text_room_size = codeRam_.size - codeRam_.used;
+    elf->text_room_bus_off = SOC_DIRAM_IRAM_LOW - SOC_DIRAM_DRAM_LOW;
+  }
   if (result == 0) {
     result = esp_elf_relocate(elf, file);
   }
@@ -1142,13 +1173,28 @@ int ModuleApp::loadElf(const char* name, void* arg1, void* arg2, void** elfOut,
     heap_caps_free(elf);
     return ZM_ERROR;
   }
-  // Где код модуля — для записи о панике; кэш команд над ним — сбросить.
+  // Где код модуля — для записи о панике; кэш команд над ним — сбросить (во внутреннем ОЗУ кэша нет).
   const esp_elf_sec_t& text = elf->sec[ELF_SEC_TEXT];
   uint8_t* code = reinterpret_cast<uint8_t*>(text.addr);
-  forgetStaleCode(code, text.size);
+  if (elf->text_borrowed) {
+    codeRam_.used += (static_cast<uint32_t>(text.size) + 3u) & ~3u;
+    ++codeRam_.modules;
+    if (inCodeRam != nullptr) {
+      *inCodeRam = true;
+    }
+  } else {
+    forgetStaleCode(code, text.size);
+  }
   crashRecordModule(name, code, text.size, text.v_addr);
-  bringupLog(kTag, "%s: code at %08X, %u bytes, ELF %X", name, static_cast<unsigned>(text.addr),
-             static_cast<unsigned>(text.size), static_cast<unsigned>(text.v_addr));
+  if (elf->text_borrowed) {
+    bringupLog(kTag, "%s: code at %08X (bus %08X), %u bytes, ELF %X, internal RAM", name,
+               static_cast<unsigned>(text.addr), static_cast<unsigned>(text.addr + elf->text_bus_off),
+               static_cast<unsigned>(text.size), static_cast<unsigned>(text.v_addr));
+  } else {
+    bringupLog(kTag, "%s: code at %08X, %u bytes, ELF %X%s", name, static_cast<unsigned>(text.addr),
+               static_cast<unsigned>(text.size), static_cast<unsigned>(text.v_addr),
+               internal ? ", in PSRAM: no room in code RAM" : "");
+  }
   char program[13];
   strncpy(program, name, sizeof(program) - 1);
   program[sizeof(program) - 1] = 0;
@@ -1174,7 +1220,7 @@ bool ModuleApp::moduleInUse(const char* name) const {
   if (app_ != nullptr && strcmp(appName_, name) == 0) {
     return true;
   }
-  for (const LoadedModule& module : modules_) {
+  for (const LoadedModule& module : moduleSlots()) {
     if (module.used && strcmp(module.name, name) == 0) {
       return true;
     }
@@ -1320,12 +1366,13 @@ void ModuleApp::stopApp() {
     }
   }
   closeStreams();
-  for (LoadedModule& module : modules_) {
+  for (LoadedModule& module : moduleSlots()) {
     if (module.used) {
       unloadElf(module.elf);
       module = LoadedModule{};
     }
   }
+  releaseCodeRam();                       // код модулей уже снят: кусок и исполнение — закрыть
   player_.pcmLowLatency(false);           // короткий DMA — только этому приложению
   player_.pcmClose();
   freeAllocations();
@@ -2512,29 +2559,49 @@ void ModuleApp::closeStreams() {
 
 int ModuleApp::coreModuleOpen(const char* name, void* arg1, void* arg2, void** handle,
                               int* entryResult) {
+  return openModule(name, false, arg1, arg2, handle, entryResult, nullptr);
+}
+
+int ModuleApp::coreModuleOpenEx(const char* name, uint32_t flags, void* arg1, void* arg2,
+                                void** handle, int* entryResult, uint32_t* placed) {
+  return openModule(name, (flags & ZM_MODULE_TEXT_INTERNAL) != 0, arg1, arg2, handle, entryResult,
+                    placed);
+}
+
+int ModuleApp::openModule(const char* name, bool internal, void* arg1, void* arg2, void** handle,
+                          int* entryResult, uint32_t* placed) {
+  if (placed != nullptr) {
+    *placed = 0;
+  }
   if (name == nullptr || handle == nullptr) {
     return ZM_ERROR;
   }
   *handle = nullptr;
-  for (LoadedModule& module : instance_->modules_) {
+  for (LoadedModule& module : instance_->moduleSlots()) {
     if (module.used) {
       continue;
     }
     int result = 0;
     void* elf = nullptr;
-    const int loaded = instance_->loadElf(name, arg1, arg2, &elf, &result);
+    bool inCodeRam = false;
+    const int loaded = instance_->loadElf(name, arg1, arg2, &elf, &result, internal, &inCodeRam);
     if (loaded != ZM_OK) {
       return loaded;
     }
     module.used = true;
     strncpy(module.name, name, sizeof(module.name) - 1);
+    module.inCodeRam = inCodeRam;
     module.elf = elf;
     *handle = &module;
     if (entryResult != nullptr) {
       *entryResult = result;
     }
+    if (placed != nullptr && inCodeRam) {
+      *placed = ZM_MODULE_TEXT_INTERNAL;
+    }
     return ZM_OK;
   }
+  bringupLog(kTag, "module %s: all %u module slots are open", name, static_cast<unsigned>(kMaxModules));
   return ZM_BUSY;
 }
 
@@ -2543,8 +2610,178 @@ void ModuleApp::coreModuleClose(void* handle) {
   if (module == nullptr || !module->used) {
     return;
   }
+  const bool inCodeRam = module->inCodeRam;
   instance_->unloadElf(module->elf);
   *module = LoadedModule{};
+  // Последний модуль из куска code_ram закрыт: место — снова с начала.
+  if (inCodeRam && codeRam_.modules != 0 && --codeRam_.modules == 0) {
+    codeRam_.used = 0;
+  }
+}
+
+// --- ABI 1.19: исполняемое внутреннее ОЗУ для кода модулей ----------------------------------------
+//
+// Защита памяти ESP32-S3 (PMS) делит внутреннее ОЗУ (SRAM1) чертой: ниже — код прошивки (шина
+// команд: чтение и исполнение; шина данных: только чтение), выше — данные (шина данных: чтение и
+// запись; шина команд — ничего, область IRAM0_3). Замок защиты снят (sdkconfig, 0.1.157), и на время
+// работы приложения, попросившего code_ram, прошивка даёт области IRAM0_3 чтение и исполнение: код
+// модуля, записанный загрузчиком через шину данных, исполняется через шину команд по тому же
+// адресу + (SOC_DIRAM_IRAM_LOW − SOC_DIRAM_DRAM_LOW). Запись в код прошивки (DRAM0_0) запрещена
+// всегда. При выгрузке приложения — снова «ничего».
+
+namespace {
+
+// После куска во внутреннем ОЗУ должно остаться столько: Wi-Fi, обмен с Evo, DMA (19.11 плеер жил при
+// ~9 КБ свободных, но стек 6 КБ туда уже не помещался).
+constexpr uint32_t kCodeRamKeep = 12 * 1024;
+
+// Резерв под код (0.1.158). Куча ESP-IDF отдаёт внутреннюю память сначала из SRAM1 (у неё высший
+// приоритет), потом из пула для DMA и SRAM2. К старту приложения SRAM1 раздроблена: 21.11 Metal Slug
+// не получил 13568 байт при 37527 свободных — самый большой кусок (21504) лежал в SRAM2 (0x3FCF0000+,
+// там только данные, зеркала на шине команд нет). Поэтому при старте, пока SRAM1 цела, прошивка
+// берёт из неё kCodeRamReserve и делает из него отдельную кучу с последним приоритетом: обычные
+// выделения идут туда, только когда остальное внутреннее ОЗУ занято, — память остаётся общей и
+// в свободной считается. code_ram берёт кусок оттуда первым — по метке kCodeRamReserveCap.
+// Цена для всех — служебная таблица этой кучи (TLSF ~0,7 КБ), она лежит в самом резерве.
+// 17 КБ: свободный блок кучи — 17408 − 20 (multi_heap) − 716 (TLSF) − 8 = 16664 ≥ ZM_CODE_RAM_RESERVED.
+constexpr uint32_t kCodeRamReserve = 17 * 1024;
+// Метка резерва: PID-метки ESP-IDF не использует, у других куч их нет.
+constexpr uint32_t kCodeRamReserveCap = MALLOC_CAP_PID7;
+// Свойства обычной SRAM1 при включённой защите памяти (MALLOC_DIRAM_BASE_CAPS | SIMD) плюс метка.
+constexpr uint32_t kCodeRamReserveCaps = MALLOC_CAP_DEFAULT | MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT |
+                                         MALLOC_CAP_32BIT | MALLOC_CAP_DMA | MALLOC_CAP_RETENTION |
+                                         MALLOC_CAP_SIMD | kCodeRamReserveCap;
+// Внутреннее ОЗУ с зеркалом на шине команд: MALLOC_CAP_RETENTION есть только у обычной SRAM1 и у
+// резерва; у пула для DMA (CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL), SRAM2 и RTC её нет.
+constexpr uint32_t kCodeRamSram1Caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_RETENTION;
+
+bool inSram1(const uint8_t* data, uint32_t size) {
+  return esp_ptr_in_diram_dram(data) && esp_ptr_in_diram_dram(data + size - 1);
+}
+
+// Исполнение в области данных внутреннего ОЗУ: true — права стали такими, как просили.
+bool setDataExec(bool on) {
+#if CONFIG_ESP_SYSTEM_MEMPROT
+  const uint32_t flags = on ? (MEMPROT_OP_READ | MEMPROT_OP_EXEC) : MEMPROT_OP_NONE;
+  if (esp_mprot_set_pms_area(MEMPROT_PMS_AREA_IRAM0_3, flags, DEFAULT_CPU_NUM) != ESP_OK) {
+    return false;
+  }
+  uint32_t now = 0;
+  if (esp_mprot_get_pms_area(MEMPROT_PMS_AREA_IRAM0_3, &now, DEFAULT_CPU_NUM) != ESP_OK) {
+    return false;
+  }
+  return ((now & MEMPROT_OP_EXEC) != 0) == on;   // запертая защита запись молча не примет
+#else
+  (void)on;
+  return true;                                   // защиты нет: исполнять можно и так
+#endif
+}
+
+}  // namespace
+
+int ModuleApp::coreCodeRam(uint32_t bytes, uint32_t* granted) {
+  if (granted != nullptr) {
+    *granted = 0;
+  }
+  if (bytes == 0 || bytes > ZM_CODE_RAM_MAX) {
+    return ZM_ERROR;
+  }
+  if (codeRam_.data != nullptr) {
+    return ZM_BUSY;
+  }
+  const uint32_t size = (bytes + 3u) & ~3u;
+  const char* app = instance_ != nullptr ? instance_->appName_ : "?";
+  const uint32_t freeBefore =
+      static_cast<uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  uint8_t* data = nullptr;
+  bool fromReserve = false;
+  if (freeBefore >= size + kCodeRamKeep) {
+    // Сначала — резерв (его метка только у него), потом — любая SRAM1 (без пула DMA и SRAM2).
+    data = static_cast<uint8_t*>(heap_caps_malloc(size, kCodeRamReserveCap));
+    fromReserve = data != nullptr;
+    if (data == nullptr) {
+      data = static_cast<uint8_t*>(heap_caps_malloc(size, kCodeRamSram1Caps));
+    }
+  }
+  // Кусок должен лежать в SRAM1 с зеркалом на шине команд: последние 32 КБ DRAM (0x3FCF0000) у
+  // ESP32-S3 — только данные.
+  if (data != nullptr && (!esp_ptr_in_diram_dram(data) || !esp_ptr_in_diram_dram(data + size - 1))) {
+    heap_caps_free(data);
+    data = nullptr;
+  }
+  if (data == nullptr) {
+    bringupLog(kTag, "app %s: code RAM %u bytes refused; reserve %u, SRAM1 %u largest; internal %u free, %u largest",
+               app, static_cast<unsigned>(size),
+               static_cast<unsigned>(heap_caps_get_largest_free_block(kCodeRamReserveCap)),
+               static_cast<unsigned>(heap_caps_get_largest_free_block(kCodeRamSram1Caps)),
+               static_cast<unsigned>(freeBefore),
+               static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    return ZM_NO_MEMORY;
+  }
+  if (!setDataExec(true)) {
+    setDataExec(false);
+    heap_caps_free(data);
+    bringupLog(kTag, "app %s: code RAM refused: memory protection is locked", app);
+    return ZM_ERROR;
+  }
+  codeRam_ = CodeRam{data, size, 0, 0, true};
+  bringupLog(kTag, "app %s: code RAM %u bytes at %08X (bus %08X), %s; internal %u free, %u largest", app,
+             static_cast<unsigned>(size), static_cast<unsigned>(reinterpret_cast<uintptr_t>(data)),
+             static_cast<unsigned>(reinterpret_cast<uintptr_t>(data) + (SOC_DIRAM_IRAM_LOW - SOC_DIRAM_DRAM_LOW)),
+             fromReserve ? "reserve" : "SRAM1",
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+  if (granted != nullptr) {
+    *granted = size;
+  }
+  return ZM_OK;
+}
+
+void ModuleApp::reserveCodeRam() {
+  if (codeReserve_ != nullptr) {
+    return;
+  }
+  uint8_t* block = static_cast<uint8_t*>(heap_caps_malloc(kCodeRamReserve, kCodeRamSram1Caps));
+  if (block != nullptr && !inSram1(block, kCodeRamReserve)) {
+    heap_caps_free(block);
+    block = nullptr;
+  }
+  if (block == nullptr) {
+    return;                                      // logCodeRamReserve напишет об этом в журнал
+  }
+  // Свойства по столбцам приоритета (SOC_MEMORY_TYPE_NO_PRIOS = 3): только в последнем — туда
+  // обычные выделения идут, когда остальная внутренняя память занята. Куча внутри занятого блока
+  // SRAM1 — так же ESP-IDF делает пул для DMA (esp_psram_extram_reserve_dma_pool).
+  const uint32_t caps[3] = {0, 0, kCodeRamReserveCaps};
+  const intptr_t start = reinterpret_cast<intptr_t>(block);
+  if (heap_caps_add_region_with_caps(caps, start, start + kCodeRamReserve) != ESP_OK) {
+    heap_caps_free(block);
+    return;
+  }
+  codeReserve_ = block;
+}
+
+void ModuleApp::logCodeRamReserve() {
+  if (codeReserve_ == nullptr) {
+    bringupLog(kTag, "code RAM reserve NOT made: no %u bytes in SRAM1 at start",
+               static_cast<unsigned>(kCodeRamReserve));
+    return;
+  }
+  bringupLog(kTag, "code RAM reserve %u bytes at %08X: %u for code_ram", static_cast<unsigned>(kCodeRamReserve),
+             static_cast<unsigned>(reinterpret_cast<uintptr_t>(codeReserve_)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(kCodeRamReserveCap)));
+}
+
+void ModuleApp::releaseCodeRam() {
+  if (codeRam_.data == nullptr) {
+    return;
+  }
+  // Код модулей снят раньше (stopApp выгружает их до этого): исполнять там уже некому.
+  if (codeRam_.execOpen && !setDataExec(false)) {
+    bringupLog(kTag, "code RAM: memory protection was NOT closed again");
+  }
+  heap_caps_free(codeRam_.data);
+  codeRam_ = CodeRam{};
 }
 
 int ModuleApp::coreResource(const char* name, const uint8_t** data, size_t* size) {

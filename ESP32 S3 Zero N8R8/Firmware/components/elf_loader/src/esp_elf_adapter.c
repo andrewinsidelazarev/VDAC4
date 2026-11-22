@@ -89,7 +89,8 @@ uintptr_t elf_remap_text(esp_elf_t *elf, uintptr_t sym)
 #ifdef CONFIG_ELF_LOADER_SET_MMU
         mapped_sym = sym + elf->text_off;
 #else
-        mapped_sym = sym + OFFSET_TEXT_VALUE;
+        /* VDAC4 (0.1.157): у .text во внутреннем ОЗУ своё смещение шины команд. */
+        mapped_sym = sym + (elf->text_bus_off ? elf->text_bus_off : OFFSET_TEXT_VALUE);
 #endif
     } else {
         mapped_sym = sym;

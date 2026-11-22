@@ -46,7 +46,7 @@ class ElfRelocateHostTest(unittest.TestCase):
             self.skipTest('нет MSVC (vcvars64.bat): стенд загрузчика ELF пропущен')
         result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.split(), ['ok', 'relative_section_end'])
+        self.assertEqual(result.stdout.split(), ['ok', 'relative_section_end', 'ok', 'internal_text'])
 
     def test_weak_undefined(self) -> None:
         """0.1.122: слабый неопределённый символ без адреса в прошивке — 0, а не ошибка

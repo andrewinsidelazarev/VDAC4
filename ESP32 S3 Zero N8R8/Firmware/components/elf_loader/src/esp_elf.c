@@ -253,7 +253,16 @@ static int esp_elf_load_section(esp_elf_t *elf, const uint8_t *pbuf)
         return -EINVAL;
     }
 
-    elf->ptext = esp_elf_malloc(elf->sec[ELF_SEC_TEXT].size, true);
+    /* VDAC4 (0.1.157): место во внутреннем ОЗУ, если вызывающий его дал и код помещается. */
+    elf->text_borrowed = 0;
+    elf->text_bus_off = 0;
+    if (elf->text_room && elf->sec[ELF_SEC_TEXT].size <= elf->text_room_size) {
+        elf->ptext = elf->text_room;
+        elf->text_bus_off = elf->text_room_bus_off;
+        elf->text_borrowed = 1;
+    } else {
+        elf->ptext = esp_elf_malloc(elf->sec[ELF_SEC_TEXT].size, true);
+    }
     if (!elf->ptext) {
         ESP_LOGE(TAG, "Failed to malloc %"PRIu32" bytes for text section",
                  (uint32_t)elf->sec[ELF_SEC_TEXT].size);
@@ -269,7 +278,9 @@ static int esp_elf_load_section(esp_elf_t *elf, const uint8_t *pbuf)
         if (!elf->pdata) {
             ESP_LOGE(TAG, "Failed to malloc %"PRIu32" bytes for data section", size);
             /* ZiFi: указатель обнуляется — иначе esp_elf_deinit() освобождал .text второй раз */
-            esp_elf_free(elf->ptext);
+            if (!elf->text_borrowed) {
+                esp_elf_free(elf->ptext);
+            }
             elf->ptext = NULL;
             return -ENOMEM;
         }
@@ -703,7 +714,13 @@ int esp_elf_relocate(esp_elf_t *elf, const uint8_t *pbuf)
     /* VDAC4: только записанное загрузчиком (esp_elf_arch_flush_range); строки
      * кэша команд над текстом сбрасывает сам ModuleApp. */
     if (elf->ptext) {
-        esp_elf_arch_flush_range(elf->ptext, elf->sec[ELF_SEC_TEXT].size);
+        if (elf->text_borrowed) {
+            /* Внутреннее ОЗУ кэша нет: код уже в памяти, команды выборки увидят его после
+               барьера записи. */
+            __asm__ __volatile__("memw" ::: "memory");
+        } else {
+            esp_elf_arch_flush_range(elf->ptext, elf->sec[ELF_SEC_TEXT].size);
+        }
         esp_elf_arch_flush_range(elf->pdata, elf->sec[ELF_SEC_DATA].size +
                                  elf->sec[ELF_SEC_RODATA].size + elf->sec[ELF_SEC_DRLRO].size +
                                  elf->sec[ELF_SEC_BSS].size);
@@ -762,7 +779,9 @@ void esp_elf_deinit(esp_elf_t *elf)
     }
 
     if (elf->ptext) {
-        esp_elf_free(elf->ptext);
+        if (!elf->text_borrowed) {      /* VDAC4: место во внутреннем ОЗУ — не наше */
+            esp_elf_free(elf->ptext);
+        }
         elf->ptext = NULL;
     }
 #else
