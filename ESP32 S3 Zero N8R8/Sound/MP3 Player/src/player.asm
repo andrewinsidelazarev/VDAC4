@@ -1626,6 +1626,8 @@ FastMedia:      db 0                    ; link version 2: raw media DMA
 FastSectors:    db 0
 FastControlLen: db 0
 FastWaitLeft:   db 0
+FastCommand:    db 0                    ; команда блока: SpiTxBuf+0 затирается (Fast_Send)
+FastTries:      db 0                    ; попыток блока осталось (FAST_PUT_TRIES)
 EspFastTransfer: db 0
 EspTransferSize: dw ESP_CHUNK
 Mp3Blocks:      db 0                    ; счётчик блоков для редкого запроса состояния

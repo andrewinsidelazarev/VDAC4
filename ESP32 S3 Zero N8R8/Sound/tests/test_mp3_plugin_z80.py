@@ -1184,7 +1184,7 @@ class Mp3PluginTest(unittest.TestCase):
         self.assertEqual(data[63], 0, "и Enter, и F3")
         self.assertEqual(data[64:161], bytes(97), "старое поле 32 расширений у #11 пустое")
         self.assertEqual(data[161:165], b"\xFF" * 4, "размер файла не ограничен")
-        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.31")
+        self.assertEqual(data[165:197].rstrip(b" "), b"VDAC4 Media Player v1.32")
         self.assertEqual((data[34], data[35]), (2, 0), "две страницы, запуск — страница 0")
         self.assertEqual(data[38], 1, "второй блок файла — в страницу 1")
         self.assertEqual(data[197], 4, "меню выбора просмотрщика, в F10 плеера нет")
@@ -3513,6 +3513,35 @@ class FastMediaTest(unittest.TestCase):
                 self.assertIn((0,8192),audio.puts)
                 self.assertEqual(bytes(audio.received),bytes(20001))
                 self.assertEqual(h.link.core.put_bad,0)
+
+    def test_block_refused_by_the_esp_is_sent_again(self):
+        # 22.11.2026 на плате: ESP получила от блока 8 КБ только хвост (1045 байт) и отвергла его;
+        # плагин 1.31 писал «ESP does not answer» и обрывал песню. 1.32 шлёт тот же блок снова.
+        for ext in ('mp3', 'mid'):
+            with self.subTest(ext=ext):
+                data = random.Random(77).randbytes(40001)
+                h = self.enable(Mp3Harness(data, name=('Song.' + ext).encode()))
+                if ext == 'mid':
+                    helper = ModuleDeliveryTest()
+                    helper.card(h, PLAYER_ELF=helper.elf(1024, 1),
+                                MIDI_ELF=helper.elf(1024, 2), MIDI_SF2=data)
+                h.link.late_puts = 2         # два отказа подряд — на первом же блоке
+                h.start()
+                self.assertEqual(bytes(h.audio.received), data)
+                if ext == 'mid':
+                    self.assertEqual(h.audio.stored[b'MIDI.SF2'], data)
+                self.assertEqual(h.link.core.put_bad, 2)
+                self.assertNotEqual(h.at(STATUS_ROW, TEXT_MP3), "ERROR: ESP does not answer")
+
+    def test_block_refused_three_times_is_an_error(self):
+        data = random.Random(78).randbytes(40001)
+        h = self.enable(Mp3Harness(data))
+        h.esc_after = 200                # Esc — уже после сообщения об ошибке
+        h.link.late_puts = 1000
+        h.start()
+        self.assertEqual(h.link.core.put_bad, 3, 'три попытки, не больше')
+        self.assertEqual(h.audio.received, b'')
+        self.assertEqual(h.at(STATUS_ROW, TEXT_MP3), "ERROR: ESP does not answer")
 
     def test_raw_payload_has_no_xor_retry(self):
         data=random.Random(39).randbytes(20000)

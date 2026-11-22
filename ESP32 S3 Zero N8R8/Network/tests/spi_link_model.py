@@ -384,6 +384,9 @@ class EspSide:
         self.put = True                 # прошивка принимает блоки от Z80
         self.put_data: bytes | None = None   # пришедший блок от Z80
         self.corrupt_puts = 0           # столько блоков от Z80 придут с ошибкой
+        # столько блоков от Z80 придут без начала: приём открылся, когда Z80 уже слала
+        # (22.11.2026 на плате — хвост 1045 байт из 8192)
+        self.late_puts = 0
         # Окно наружу сырым DMA: выложенное окно и где Z80 в нём (как g_raw* в spi_link.cpp).
         self.raw_data = b""
         self.raw_generation = self.raw_seen = 0
@@ -525,6 +528,9 @@ class EspSide:
                         broken = bytearray(received)
                         broken[100] ^= 0x04
                         received = bytes(broken)
+                    if self.late_puts:
+                        self.late_puts -= 1
+                        received = received[-1045:] if len(received) > 1045 else b''
                     self.put_data = received
                 else:
                     self.echo_good = received == self.core.bulk_data

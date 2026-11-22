@@ -1,4 +1,6 @@
 ; Page 1. Raw media DMA supported by SPI link version 2 (VDAC4 0.1.42).
+; Сколько раз блок, отвергнутый ESP (PUT_BAD), уходит заново (плагин 1.32).
+FAST_PUT_TRIES  equ 3
 ; Request control bytes: [command][valid data length LE16][optional offset LE32].
 ; One DMA transfer, padded to 512 bytes; ESP discards padding. No data XOR/CRC.
 Fast_Probe:
@@ -44,6 +46,7 @@ Fast_Resource:
 Fast_Send:
         ld (SpiBulkBuf),hl
         ld (SpiTxBuf),a
+        ld (FastCommand),a               ; для повтора: см. .refused
         ld (SpiTxBuf+1),bc
         ld hl,3
         cp CMD_MOD_PUT
@@ -64,6 +67,8 @@ Fast_Send:
         ld (FastSectors),a
         ld a,100                        ; bounded wait for ESP input-ring space
         ld (FastWaitLeft),a
+        ld a,FAST_PUT_TRIES
+        ld (FastTries),a
 .ask:
         ld a,(FastControlLen)            ; Turn consumes only the control length
         ld (SpiTxLen),a
@@ -101,6 +106,19 @@ Fast_Send:
         ld a,(SpiRsp)
         and LINK_S_PUT_OK
         ret nz
+        ; Блок не принят (PUT_BAD). 22.11.2026 на плате ESP получила от блока 8 КБ только хвост —
+        ; 1045 байт (19.11 — 4908 и 2510): приём DMA ESP открылся, когда Z80 уже слала блок. ESP
+        ; из такого блока ничего в очередь не кладёт, а блок лежит в памяти Evo по (SpiBulkBuf):
+        ; его можно просто послать снова. Плагин до 1.31 сразу писал «ESP does not answer» и
+        ; обрывал песню.
+        ld hl,FastTries
+        dec (hl)
+        jr z,.fail
+        ; Запрос «блок записан» шёл без данных, и его контрольная сумма легла на первый байт
+        ; SpiTxBuf — на команду; длина и смещение за ней целы.
+        ld a,(FastCommand)
+        ld (SpiTxBuf),a
+        jr .ask
 .fail:
         scf
         ret
