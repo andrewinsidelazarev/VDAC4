@@ -132,7 +132,11 @@ namespace FlasherTests
 
             v4 = args.Length > 0 ? args[0] : @"E:\zx\Tang Nano 20k VDAC\VDAC4";
             tmp = Path.Combine(Environment.GetEnvironmentVariable("TEMP") ?? ".", "flasher_tests");
-            if (Directory.Exists(tmp)) Directory.Delete(tmp, true);
+            if (Directory.Exists(tmp)) {
+                // копии образов из рабочей копии наследуют «только чтение» (так помечен ts_fb_video.bin) — снять, иначе не удалить
+                foreach (string f in Directory.GetFiles(tmp, "*", SearchOption.AllDirectories)) File.SetAttributes(f, FileAttributes.Normal);
+                Directory.Delete(tmp, true);
+            }
             Directory.CreateDirectory(tmp);
             try {
                 var fw = TestFirmware();
@@ -213,12 +217,33 @@ namespace FlasherTests
             File.Copy(Path.Combine(v4, @"Tang Nano 20k\Firmware\firmware\ts_fb_hdmi_top.fs"), Path.Combine(folder, @"tang\ts_fb_hdmi_top.fs"));
             File.Copy(Path.Combine(v4, @"Tang Nano 20k\Firmware\firmware\ts_fb_slot1.fs"), Path.Combine(folder, @"tang\ts_fb_slot1.fs"));
             File.Copy(Path.Combine(v4, @"Tang Nano 20k\Firmware\firmware\ts_fb_video.bin"), Path.Combine(folder, @"tang\ts_fb_video.bin"));
+            File.Copy(Path.Combine(v4, @"Tang Nano 20k\Firmware\firmware\romfonts.bin"), Path.Combine(folder, @"tang\romfonts.bin"));
             File.WriteAllText(Path.Combine(folder, "firmware.ini"), made, new UTF8Encoding(false));
+            Check(Ini.Parse(made).Get("tang", "sha256_fonts", "").Length == 64 &&
+                  Ini.Parse(made).Get("tang", "repo_fonts", "") == Manifest.FontsRepo, "опись: шрифты с путём в репозитории и суммой");
             var set = FirmwareSet.Load(folder);
             Check(set.Problems.Count == 0, "комплект из репозитория без замечаний" + (set.Problems.Count > 0 ? ": " + string.Join("; ", set.Problems) : ""));
             Check(set.Esp != null && set.Esp.Address == 0 && set.Esp.Data[0] == 0xE9 && set.EspFlashSize == 8u << 20, "ESP: образ с 0x0, flash 8 МБ");
             Check(set.Bl616 != null && set.Bl616.Address == 0x40000, "BL616: с 0x40000");
-            Check(set.Tang.Count == 3 && set.Tang[0].Address == 0 && set.Tang[1].Address == 0x100000 && set.Tang[2].Address == 0x300000, "ПЛИС: слоты 0, 1 и 3");
+            Check(set.Tang.Count == 3 && set.Tang[0].Address == 0 && set.Tang[1].Address == 0x100000 && set.Tang[2].Address == 0x300000,
+                  "ПЛИС: слоты 0, 1 и 3");
+            Check(set.Fonts.Count == 2 && set.Fonts[0].Address == 0x201EE0 && set.Fonts[1].Address == 0x2BAC3C &&
+                  set.Fonts[1].Address + set.Fonts[1].Data.Length == 0x300000,
+                  "шрифты FT812 (свой шаг): два куска в слоте 2 — 0x201EE0 (таблица шрифтов) и 0x2BAC3C…0x2FFFFF (глифы, ROM_FONTROOT)");
+
+            // шрифты: испорченный файл — по сумме описи, нет файла — замечание (шрифты обязательны)
+            byte[] rf = File.ReadAllBytes(Path.Combine(folder, @"tang\romfonts.bin"));
+            rf[rf.Length / 2] ^= 1;
+            File.WriteAllBytes(Path.Combine(folder, @"tang\romfonts.bin"), rf);
+            var badF = FirmwareSet.Load(folder);
+            Check(badF.Fonts.Count == 0 && badF.Tang.Count == 3 && badF.Problems.Any(p => p.Contains("romfonts.bin") && p.Contains("SHA-256")),
+                  "испорченные шрифты не приняты (SHA-256), ядра — на месте");
+            File.Delete(Path.Combine(folder, @"tang\romfonts.bin"));
+            var noF = FirmwareSet.Load(folder);
+            Check(noF.Fonts.Count == 0 && noF.Tang.Count == 3 && noF.Problems.Any(p => p.Contains("нет файла") && p.Contains("romfonts.bin")),
+                  "нет шрифтов — замечание");
+            rf[rf.Length / 2] ^= 1;
+            File.WriteAllBytes(Path.Combine(folder, @"tang\romfonts.bin"), rf);
             Console.WriteLine("    версии: ESP " + set.EspVersion + ", BL616 " + set.Bl616Version + ", ПЛИС " + set.TangVersion);
             uint? j0 = FirmwareSet.JumpAddress(set.Tang[0].Data), j1 = FirmwareSet.JumpAddress(set.Tang[1].Data);
             Check(j0 == 0x100000, "слот 0 переходит в 0x100000 (" + (j0.HasValue ? "0x" + j0.Value.ToString("X") : "нет") + ")");
@@ -260,8 +285,9 @@ namespace FlasherTests
             Console.WriteLine("== загрузка с GitHub (подмена: файлы репозитория, текст — с LF, как в git; описи на GitHub нет)");
             string folder = Path.Combine(tmp, "dl", "firmware");
             Directory.CreateDirectory(Path.Combine(folder, "tang"));
-            byte[] ownFont = MakeFont(0x200000);
-            File.WriteAllBytes(Path.Combine(folder, @"tang\romfonts.bin"), ownFont);     // свой файл шрифтов
+            byte[] oldFont = MakeFont(0x200000);
+            File.WriteAllBytes(Path.Combine(folder, @"tang\romfonts.bin"), oldFont);     // прежний файл шрифтов — заменится,
+            File.SetAttributes(Path.Combine(folder, @"tang\romfonts.bin"), FileAttributes.ReadOnly);   // даже «только чтение»
             File.WriteAllText(Path.Combine(folder, "firmware.ini"), "; старая опись\r\n");
 
             var gh = new FakeGithub(v4);
@@ -269,19 +295,21 @@ namespace FlasherTests
             var res = Downloader.Download(gh, folder, r);
             var set = FirmwareSet.Load(folder);
             var repoIni = Ini.Parse(Manifest.MakeFromRepo(v4));
-            Check(res.Commit == FakeGithub.Commit && res.GitChecked && res.Files == 5,
-                  "скачано 5 образов с одного коммита " + res.Commit.Substring(0, 7) + ", каждый сверен с хэшем git (" + Util.Size(res.Bytes) + ")");
+            Check(res.Commit == FakeGithub.Commit && res.GitChecked && res.Files == 6,
+                  "скачано 6 образов (с шрифтами) с одного коммита " + res.Commit.Substring(0, 7) + ", каждый сверен с хэшем git (" + Util.Size(res.Bytes) + ")");
             Check(gh.Urls.Skip(1).All(u => u.Contains("/" + FakeGithub.Commit + "/") || u.EndsWith("?ref=" + FakeGithub.Commit)),
                   "списки каталогов, версии и образы — по номеру коммита, не по ветке");
             Check(gh.Urls.Count(u => u.Contains("/contents/")) == 3, "три списка каталогов (ESP, BL616, ПЛИС)");
             Check(!gh.Urls.Any(u => u.Contains("Flasher/")), "описи с GitHub не берётся");
             Check(gh.Urls.Any(u => u.Contains("ESP32%20S3%20Zero%20N8R8/Firmware/firmware/vdac4/firmware.factory.bin")), "пробелы в пути — %20");
-            Check(set.Problems.Count == 0 && set.Esp != null && set.Bl616 != null && set.Tang.Count == 4,
-                  "скачанный комплект без замечаний: слоты 0, 1, 3 и свои шрифты" + (set.Problems.Count > 0 ? ": " + string.Join("; ", set.Problems) : ""));
+            Check(set.Problems.Count == 0 && set.Esp != null && set.Bl616 != null && set.Tang.Count == 3 && set.Fonts.Count == 2,
+                  "скачанный комплект без замечаний: слоты 0, 1, 3 и шрифты (2 куска)" + (set.Problems.Count > 0 ? ": " + string.Join("; ", set.Problems) : ""));
             Check(set.EspVersion == repoIni.Get("esp", "version", "-") && set.Bl616Version == repoIni.Get("bl616", "version", "-") &&
                   set.TangVersion == repoIni.Get("tang", "version", "-"), "версии — те же, что в файлах репозитория");
             Check(set.Commit == FakeGithub.Commit && set.Downloaded.Length > 0, "в описи отмечено, откуда и когда скачано");
-            Check(File.ReadAllBytes(Path.Combine(folder, @"tang\romfonts.bin")).SequenceEqual(ownFont), "свой файл шрифтов цел");
+            Check(File.ReadAllBytes(Path.Combine(folder, @"tang\romfonts.bin")).SequenceEqual(
+                      File.ReadAllBytes(Path.Combine(v4, @"Tang Nano 20k\Firmware\firmware\romfonts.bin"))),
+                  "шрифты с GitHub заменили прежний файл (у него был флаг «только чтение»)");
             Check(!Directory.Exists(folder + ".download"), "временная папка убрана");
             Check(r.LastPercent == 100, "ход загрузки до 100 %");
 
@@ -297,12 +325,16 @@ namespace FlasherTests
             Throws(() => Downloader.Download(gh, folder, new ConsoleReport { Quiet = true }), "не совпадает с git", "хэш git в списке другой");
             gh = new FakeGithub(v4) { MissingRepo = Manifest.SlotRepo[1] };
             Throws(() => Downloader.Download(gh, folder, new ConsoleReport { Quiet = true }), "на GitHub нет файла", "образа нет в коммите");
+            gh = new FakeGithub(v4) { CorruptRepo = Manifest.FontsRepo };
+            Throws(() => Downloader.Download(gh, folder, new ConsoleReport { Quiet = true }), "не совпадает с git", "испорченные шрифты с GitHub");
+            gh = new FakeGithub(v4) { MissingRepo = Manifest.FontsRepo };
+            Throws(() => Downloader.Download(gh, folder, new ConsoleReport { Quiet = true }), "на GitHub нет файла", "шрифтов нет в коммите");
 
             // списки каталогов не пришли (предел запросов API): SHA-256 ESP по firmware.sha256 и форматы
             gh = new FakeGithub(v4) { ListingDown = true };
             r = new ConsoleReport { Quiet = true };
             res = Downloader.Download(gh, folder, r);
-            Check(res.Commit == FakeGithub.Commit && !res.GitChecked && res.Files == 5 && r.Lines.Any(l => l.Contains("хэши git не получены")),
+            Check(res.Commit == FakeGithub.Commit && !res.GitChecked && res.Files == 6 && r.Lines.Any(l => l.Contains("хэши git не получены")),
                   "без списков каталогов — скачано, в журнале: хэши git не получены");
             gh = new FakeGithub(v4) { ListingDown = true, CorruptRepo = Manifest.EspRepo };
             Throws(() => Downloader.Download(gh, folder, new ConsoleReport { Quiet = true }), "не совпадает с firmware.sha256",
@@ -451,7 +483,7 @@ namespace FlasherTests
                 string file = bk.Files.FirstOrDefault(f => f.EndsWith("_tang_slot" + s + ".bin")) ?? "";
                 Check(file.Length > 0 && File.ReadAllBytes(file).SequenceEqual(old.Skip(s << 20).Take(1 << 20)), "бэкап слота " + s + " (1 МБ) байт в байт");
             }
-            Check(bk.Files.Count == 3, "слот 2 (шрифты) без бэкапа — его не пишем");
+            Check(bk.Files.Count == 3, "шаг 3: бэкапов три, слот 2 (шрифты — свой шаг) без бэкапа");
             Check(g.FlashId == 0x0B4017, "JEDEC flash 0B4017 через мост 0x16 (MISO на бит позже)");
             int[] slotOf = { 0, 1, 3 };
             for (int i = 0; i < 3; i++) {
@@ -459,7 +491,7 @@ namespace FlasherTests
                 Check(m.Flash.Mem.Skip(s << 20).Take(len).SequenceEqual(fw.Tang[i].Data), "слот " + s + " лёг с 0x" + (s << 20).ToString("X6"));
                 Check(m.Flash.Mem.Skip((s << 20) + len).Take((1 << 20) - len).All(x => x == 0xFF), "  …за образом до конца слота — стёрто");
             }
-            Check(m.Flash.Mem.Skip(0x200000).Take(0x100000).SequenceEqual(old.Skip(0x200000).Take(0x100000)), "слот 2 не тронут");
+            Check(m.Flash.Mem.Skip(0x200000).Take(0x100000).SequenceEqual(old.Skip(0x200000).Take(0x100000)), "шаг 3: слот 2 не тронут");
             Check(m.Flash.Mem.Skip(0x400000).SequenceEqual(old.Skip(0x400000)), "с 0x400000 до конца (слоты 4–6, настройки Tang) не тронуто");
             Check((m.Flash.Sr & 0x7C) == 0, "защита flash снята");
             Check(m.Reloads == 1 && (m.Status & 1u << 13) != 0, "RELOAD — ПЛИС загрузилась (Done)");
@@ -480,6 +512,23 @@ namespace FlasherTests
                   mf.Flash.Mem.Skip(0x200080).Take(0x100000 - 0x80).All(x => x == 0xFF), "шрифты: слот 2 стёрт целиком, кусок лёг с 0x200040");
             Check(mf.Flash.Mem.Take(0x200000).SequenceEqual(oldF.Take(0x200000)) &&
                   mf.Flash.Mem.Skip(0x300000).SequenceEqual(oldF.Skip(0x300000)), "шрифты: слоты 0, 1, 3 и дальше не тронуты");
+
+            // шаг 4 — настоящие шрифты FT812: куски с середины страницы flash (0x201EE0), слот 2 стёрт целиком
+            var ms = new GowinTapModel();
+            Array.Copy(fw.Tang[0].Data, ms.Flash.Mem, fw.Tang[0].Data.Length);     // в слоте 0 стоит TS-Config: RELOAD с него
+            byte[] oldS = (byte[])ms.Flash.Mem.Clone();
+            var bks = new Backup(Path.Combine(tmp, "bk_fonts"));
+            var rs = new ConsoleReport { Quiet = true };
+            new Gowin(new Jtag(ms), rs).Program(fw.Fonts, bks);
+            var slot2 = new byte[0x100000];
+            for (int i = 0; i < slot2.Length; i++) slot2[i] = 0xFF;
+            foreach (var p in fw.Fonts) Array.Copy(p.Data, 0, slot2, p.Address - 0x200000, p.Data.Length);
+            Check(bks.Files.Count == 1 && bks.Files[0].EndsWith("_tang_slot2.bin") &&
+                  File.ReadAllBytes(bks.Files[0]).SequenceEqual(oldS.Skip(0x200000).Take(0x100000)), "шаг 4: бэкап только слота 2, байт в байт");
+            Check(ms.Flash.Mem.Skip(0x200000).Take(0x100000).SequenceEqual(slot2), "шаг 4: шрифты легли по своим адресам, остальное в слоте 2 стёрто");
+            Check(ms.Flash.Mem.Take(0x200000).SequenceEqual(oldS.Take(0x200000)) &&
+                  ms.Flash.Mem.Skip(0x300000).SequenceEqual(oldS.Skip(0x300000)), "шаг 4: слоты 0, 1, 3 и настройки Tang не тронуты");
+            Check(ms.Reloads == 1 && rs.LastPercent == 100, "шаг 4: RELOAD, ход до 100 %");
 
             var m2 = new GowinTapModel();
             m2.Flash.Jedec = 0xFFFFFF;

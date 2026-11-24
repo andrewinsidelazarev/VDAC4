@@ -5,7 +5,8 @@
 //   [esp]    file = esp\firmware.factory.bin   repo = …   address = 0x0   flash_size = 8M   version = …   sha256 = …
 //   [bl616]  file = bl616\vdac4_copro_bl616.bin repo = …  address = 0x40000  version = …   sha256 = …
 //   [tang]   slot0 = tang\ts_fb_hdmi_top.fs   slot1 = tang\ts_fb_slot1.fs   slot3 = tang\ts_fb_video.bin
-//            repo_slot0 / 1 / 3 = …   fonts = tang\romfonts.bin   version = …   sha256_slot0 / 1 / 3 = …
+//            repo_slot0 / 1 / 3 = …   version = …   sha256_slot0 / 1 / 3 = …
+//            fonts = tang\romfonts.bin   repo_fonts = …   sha256_fonts = …   — шрифты ПЗУ FT812, слот 2
 //   [source] commit = …   downloaded = …  — откуда скачан комплект
 // Опись пишет сама программа, скачав комплект с GitHub (Manifest.Make, Downloader); в выпуске — по рабочей копии.
 // Сумма sha256 у битстрима .fs — по его байтам (после разбора строк 0/1), а не по тексту файла: git хранит
@@ -36,7 +37,8 @@ namespace Vdac4Flasher
         public string EspVersion = "";
         public FlashPart Bl616;          // прошивка BL616 модуля Tang (с 0x40000, FPGA Partner Sipeed с 0x0 не трогается)
         public string Bl616Version = "";
-        public List<FlashPart> Tang = new List<FlashPart>();   // слоты flash ПЛИС и шрифты FT812
+        public List<FlashPart> Tang = new List<FlashPart>();   // ядра в слотах flash ПЛИС 0, 1, 3 (шаг 3)
+        public List<FlashPart> Fonts = new List<FlashPart>();  // куски шрифтов FT812 в слоте 2 (отдельный шаг 4)
         public string TangVersion = "";
         public List<string> Problems = new List<string>();     // что не так с файлами (окно покажет)
         public string Commit = "";       // коммит VDAC4 на GitHub, с которого скачан комплект ([source])
@@ -77,7 +79,7 @@ namespace Vdac4Flasher
                                      ini.Get("bl616", "address", "0x40000"), ini.Get("bl616", "sha256", ""), CheckBl616);
 
             set.TangVersion = ini.Get("tang", "version", "");
-            // Постоянные ядра: слот 0 — TS-Config, 1 — FT812, 3 — видео; слот 2 — шрифты
+            // Постоянные ядра: слот 0 — TS-Config, 1 — FT812, 3 — видео; слот 2 — шрифты (ниже)
             foreach (int slot in new[] { 0, 1, 3 }) {
                 var part = set.LoadPart(Lang.T("ПЛИС, слот ", "FPGA, slot ") + slot,
                                         ini.Get("tang", "slot" + slot, DefaultSlotFile(slot)), "0x" + (slot * TangSlotBytes).ToString("X"),
@@ -89,16 +91,14 @@ namespace Vdac4Flasher
                         set.Tang.Add(part);
                 }
             }
-            // шрифты ПЗУ FT812 (слот 2, VD4FONT1): данные Bridgetek, в комплект не входят — только свой файл
-            string fonts = ini.Get("tang", "fonts", @"tang\romfonts.bin");
-            if (File.Exists(Path.Combine(folder, fonts))) {
-                byte[] img = File.ReadAllBytes(Path.Combine(folder, fonts));
-                try {
-                    set.Tang.AddRange(FontSpans(img, fonts));
-                } catch (FlashException e) {
-                    set.Problems.Add(fonts + ": " + e.Message);
-                }
-            }
+            // Шрифты ПЗУ FT812 (слот 2, VD4FONT1) — часть комплекта (24.11.2026): без них ядро FT812 на новой плате
+            // не рисует текст. Пишет их отдельный шаг мастера (его можно пропустить). Файл сверяется по сумме описи и
+            // по заголовку; во flash идут его куски (FontSpans), слот 2 Gowin.Program стирает целиком.
+            var fonts = set.LoadPart(Lang.T("шрифты FT812", "FT812 fonts"), ini.Get("tang", "fonts", Manifest.FontsLocal),
+                                     "0x" + TangFontBase.ToString("X"), ini.Get("tang", "sha256_fonts", ""),
+                                     d => FontSpans(d, "romfonts.bin"));
+            if (fonts != null)
+                set.Fonts.AddRange(FontSpans(fonts.Data, fonts.File));
             return set;
         }
 

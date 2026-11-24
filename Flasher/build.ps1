@@ -41,6 +41,9 @@ if ($Release) {
     Copy-Item "$v4\Tang Nano 20k\Firmware\firmware\ts_fb_hdmi_top.fs" "$rel\firmware\tang\"
     Copy-Item "$v4\Tang Nano 20k\Firmware\firmware\ts_fb_slot1.fs" "$rel\firmware\tang\"
     Copy-Item "$v4\Tang Nano 20k\Firmware\firmware\ts_fb_video.bin" "$rel\firmware\tang\"
+    Copy-Item "$v4\Tang Nano 20k\Firmware\firmware\romfonts.bin" "$rel\firmware\tang\"   # FT812 ROM fonts, slot 2
+    # copies keep the read-only flag of the working copy (ts_fb_video.bin has it): the download must be able to replace them
+    Get-ChildItem "$rel\firmware" -Recurse -File | ForEach-Object { $_.IsReadOnly = $false }
     & "$Out\FlasherTests.exe" --make-ini $v4 "$rel\firmware\firmware.ini"     # manifest for these images
     if ($LASTEXITCODE) { throw 'firmware.ini for the release failed' }
     Copy-Item "$here\README.txt" $rel

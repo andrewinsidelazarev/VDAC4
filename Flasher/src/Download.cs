@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Прошивки — с GitHub перед прошивкой: образы ESP, BL616 и слотов ПЛИС из репозитория VDAC4 (ветка main) по путям,
+// Прошивки — с GitHub перед прошивкой: образы ESP, BL616, слотов ПЛИС и шрифтов FT812 из репозитория VDAC4 (ветка main) по путям,
 // которые знает программа (Manifest). Всё качается с одного коммита: номер последнего коммита ветки даёт API
 // GitHub, файлы идут с raw.githubusercontent.com по этому номеру — образы и версии не разойдутся, даже если кто-то
 // запушит посреди загрузки.
@@ -10,8 +10,8 @@
 // До 10.11.2026 программа брала с GitHub опись Flasher/firmware.ini с суммами; её надо было обновлять при каждом
 // пуше образов, она отставала — и загрузка падала («GitHub ответил 404»). Теперь описи на GitHub нет.
 // Файлы сначала ложатся в папку firmware.download, и только когда все пришли и сошлись — переносятся в папку
-// firmware вместе с описью firmware.ini (Manifest.Make). Ошибка загрузки прежний комплект не портит. Свои файлы
-// (шрифты romfonts.bin) остаются.
+// firmware вместе с описью firmware.ini (Manifest.Make). Ошибка загрузки прежний комплект не портит. Шрифты
+// romfonts.bin с 24.11.2026 тоже качаются (раньше их клал сам пользователь) и заменяют прежний файл.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -246,6 +246,7 @@ namespace Vdac4Flasher
                         byte[] content = e.Local.EndsWith(".fs", StringComparison.OrdinalIgnoreCase) ? FirmwareSet.ParseFs(data, name) : data;
                         if (i == 0) FirmwareSet.CheckEsp(content);
                         else if (i == 1) FirmwareSet.CheckBl616(content);
+                        else if (e.Repo == Manifest.FontsRepo) FirmwareSet.FontSpans(content, name);   // заголовок и куски VD4FONT1
                         else FirmwareSet.CheckGowin(content);
                     } catch (FlashException ex) {
                         throw new FlashException(Lang.T("файл с GitHub испорчен: ", "the file from GitHub is damaged: ") + ex.Message);
@@ -272,14 +273,24 @@ namespace Vdac4Flasher
                 foreach (var e in entries) {
                     string dst = Path.Combine(folder, e.Local);
                     Directory.CreateDirectory(Path.GetDirectoryName(dst));
+                    Replaceable(dst);
                     File.Copy(Path.Combine(stage, e.Local), dst, true);
                 }
+                Replaceable(Path.Combine(folder, "firmware.ini"));
                 File.Copy(Path.Combine(stage, "firmware.ini"), Path.Combine(folder, "firmware.ini"), true);
             } finally {
                 try { Directory.Delete(stage, true); } catch (Exception) { }
             }
             report.Progress(100, Lang.T("Скачано", "Downloaded"));
             return result;
+        }
+
+        /// <summary>Прежний файл комплекта с флагом «только чтение» (бывает у файлов, скопированных из рабочей копии
+        /// репозитория) File.Copy поверх не заменит — флаг снимается.</summary>
+        static void Replaceable(string path)
+        {
+            if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReadOnly) != 0)
+                File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);
         }
 
         static bool IsHex(string s)

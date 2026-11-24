@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Окно «Первая прошивка VDAC4»: мастер по шагам. Начало (прошивки скачиваются с GitHub сразу при запуске;
-// что будет записано, предупреждение о питании) → 1 ESP32-S3 Zero → 2 BL616 модуля Tang → 3 flash ПЛИС Tang →
-// готово. На каждом шаге — что подключить, найдено ли устройство (проверка раз в секунду), кнопка «Прошить»,
-// ход и журнал. Шаг сначала сохраняет прежнюю прошивку в папку Backup, потом стирает и пишет.
+// что будет записано, предупреждение о питании) → 1 ESP32-S3 Zero → 2 BL616 модуля Tang → 3 flash ПЛИС Tang (ядра,
+// слоты 0, 1, 3) → 4 шрифты FT812 (слот 2 flash Tang) → готово. На каждом шаге — что подключить, найдено ли
+// устройство (проверка раз в секунду), кнопка «Прошить», «Пропустить шаг», ход и журнал. Шаг сначала сохраняет
+// прежнюю прошивку в папку Backup, потом стирает и пишет.
+// Шрифты — отдельный шаг (24.11.2026, пользователь: «в рамках алгоритма программы — с возможностью пропуска этого
+// шага»): на новой плате их надо записать, а на плате, где они уже есть, шаг можно пропустить.
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -17,7 +20,7 @@ namespace Vdac4Flasher
     {
         enum Mark { Pending, Current, Done, Skipped, Failed }
 
-        const int Welcome = 0, StepEsp = 1, StepBl616 = 2, StepTang = 3, Finish = 4;
+        const int Welcome = 0, StepEsp = 1, StepBl616 = 2, StepTang = 3, StepFonts = 4, Finish = 5;
         static readonly Color Accent = Color.FromArgb(37, 99, 235), Good = Color.FromArgb(22, 128, 61),
                               Bad = Color.FromArgb(185, 28, 28), Muted = Color.FromArgb(100, 100, 110),
                               WarnBack = Color.FromArgb(254, 243, 199), WarnText = Color.FromArgb(120, 70, 0),
@@ -26,8 +29,8 @@ namespace Vdac4Flasher
         readonly string folder;
         FirmwareSet fw;
         int page;
-        readonly Mark[] marks = new Mark[5];
-        readonly string[] results = new string[5];
+        readonly Mark[] marks = new Mark[Finish + 1];
+        readonly string[] results = new string[Finish + 1];
 
         Label header, subheader, pageTitle, pageText, warn, device, stage, message;
         LinkLabel langLink, logLink;
@@ -37,7 +40,7 @@ namespace Vdac4Flasher
         Button main, skip, back, stop, fetchAgain;
         TextBox log;
         System.Windows.Forms.Timer timer;
-        CheckBox tangSlot0, tangSlot1, tangSlot3, tangFonts;
+        CheckBox tangSlot0, tangSlot1, tangSlot3;
         bool busy, detecting, found;
         UiReport report;
 
@@ -96,11 +99,12 @@ namespace Vdac4Flasher
 
         void ShowSnapshotPage(int p)
         {
-            for (int i = 0; i < p; i++) { marks[i] = Mark.Done; results[i] = Lang.T("записан и сверен", "written and verified"); }
+            for (int i = 0; i < p; i++) { marks[i] = Mark.Done; results[i] = Written(i); }
             ShowPage(p);
-            if (p >= StepEsp && p <= StepTang) {
+            if (p >= StepEsp && p <= StepFonts) {
                 string[] dev = { "", Lang.T("Найден ESP32-S3: COM5", "ESP32-S3 found: COM5"),
                                  Lang.T("Найден BL616 в режиме прошивки: COM14", "BL616 in flashing mode found: COM14"),
+                                 Lang.T("Найден USB-JTAG Tang: JTAG Debugger A", "Tang USB-JTAG found: JTAG Debugger A"),
                                  Lang.T("Найден USB-JTAG Tang: JTAG Debugger A", "Tang USB-JTAG found: JTAG Debugger A") };
                 found = true;
                 device.ForeColor = Good;
@@ -252,7 +256,7 @@ namespace Vdac4Flasher
             langLink.Location = new Point(langLink.Parent.ClientSize.Width - langLink.PreferredWidth - 18, 14);
             rail.Titles = new[] {
                 Lang.T("Начало", "Start"), "ESP32-S3 Zero", Lang.T("BL616 модуля Tang", "Tang BL616"),
-                Lang.T("ПЛИС Tang", "Tang FPGA"), Lang.T("Готово", "Done")
+                Lang.T("ПЛИС Tang", "Tang FPGA"), Lang.T("Шрифты FT812", "FT812 fonts"), Lang.T("Готово", "Done")
             };
             rail.Invalidate();
             ApplyLogLink();
@@ -265,12 +269,13 @@ namespace Vdac4Flasher
                 bar.Value = 0;
                 stage.Text = "";
             }
-            bar.Visible = stage.Visible = (p >= StepEsp && p <= StepTang) || (p == Welcome && downloading);
+            bar.Visible = stage.Visible = (p >= StepEsp && p <= StepFonts) || (p == Welcome && downloading);
             switch (p) {
             case Welcome: PageWelcome(); break;
             case StepEsp: PageEsp(); break;
             case StepBl616: PageBl616(); break;
             case StepTang: PageTang(); break;
+            case StepFonts: PageFonts(); break;
             default: PageFinish(); break;
             }
             UpdateButtons();
@@ -281,8 +286,8 @@ namespace Vdac4Flasher
         {
             pageTitle.Text = Lang.T("Что будет записано", "What will be written");
             var sb = new StringBuilder();
-            sb.AppendLine(Lang.T("Программа по шагам прошьёт три части платы VDAC4. Каждый шаг можно пропустить.",
-                                 "The wizard flashes the three parts of the VDAC4 board step by step. Any step can be skipped."));
+            sb.AppendLine(Lang.T("Программа по шагам прошьёт три части платы VDAC4 и запишет шрифты FT812. Каждый шаг можно пропустить.",
+                                 "The wizard flashes the three parts of the VDAC4 board step by step and writes the FT812 fonts. Any step can be skipped."));
             sb.AppendLine(Lang.T("Перед записью шаг сохраняет прежнюю прошивку в папку Backup рядом с программой, затем стирает то, что запишет.",
                                  "Before writing, each step saves the old firmware into the Backup folder next to the program, then erases what it writes."));
             sb.AppendLine();
@@ -308,6 +313,10 @@ namespace Vdac4Flasher
                                          : (nt == 1 ? " image, " : " images, ");
             tang.Append(nt == 0 ? Lang.T(" — нет файлов", " — no files") : " — " + nt + images + Util.Size(bytes));
             sb.AppendLine(tang.ToString());
+            sb.AppendLine(Lang.T("4. Шрифты FT812", "4. FT812 fonts") +
+                          (fw.Fonts.Count == 0 ? Lang.T(" — нет файла", " — no file")
+                                               : " — " + Path.GetFileName(fw.Fonts[0].File) + ", " + Util.Size(FontBytes()) +
+                                                 Lang.T(", слот 2 flash Tang", ", Tang flash slot 2")));
             pageText.Text = sb.ToString();
             warn.Visible = true;
             warn.Text = Lang.T(
@@ -342,7 +351,14 @@ namespace Vdac4Flasher
             }
         }
 
-        bool HasAnyImage() { return fw.Esp != null || fw.Bl616 != null || fw.Tang.Count > 0; }
+        bool HasAnyImage() { return fw.Esp != null || fw.Bl616 != null || fw.Tang.Count > 0 || fw.Fonts.Count > 0; }
+
+        int FontBytes()
+        {
+            int n = 0;
+            foreach (var p in fw.Fonts) n += p.Data.Length;
+            return n;
+        }
 
         // ---- загрузка с GitHub ---------------------------------------------------------------------
 
@@ -444,7 +460,7 @@ namespace Vdac4Flasher
             warn.Text = Lang.T(
                 "Перед записью программа сохраняет отмеченные слоты flash целиком (по 1 МБ) в папку Backup и стирает их. Прочие слоты не трогаются.",
                 "Before writing, the program saves the checked flash slots whole (1 MB each) into the Backup folder and erases them. Other slots stay.");
-            tangSlot0 = tangSlot1 = tangSlot3 = tangFonts = null;
+            tangSlot0 = tangSlot1 = tangSlot3 = null;
             foreach (var t in fw.Tang) {
                 var cb = new CheckBox { AutoSize = true, Checked = true, Tag = t,
                                         Text = t.Name + " — " + Path.GetFileName(t.File) + ", " + Util.Size(t.Data.Length) + ", 0x" + t.Address.ToString("X6") };
@@ -458,20 +474,45 @@ namespace Vdac4Flasher
                 } else if (t.Address == 3 * FirmwareSet.TangSlotBytes) {
                     tangSlot3 = cb;
                     cb.Text += Lang.T(" (ядро видео)", " (video core)");
-                } else {
-                    tangFonts = cb;
                 }
                 options.Controls.Add(cb);
             }
             if (fw.Tang.Count == 0) { message.ForeColor = Bad; message.Text = Lang.T("Нет образов ПЛИС в папке firmware.", "No FPGA images in the firmware folder."); }
         }
 
+        void PageFonts()
+        {
+            pageTitle.Text = Lang.T("Шаг 4. Шрифты FT812", "Step 4. FT812 fonts");
+            pageText.Text = Lang.T(
+                "Шрифты ПЗУ FT812 лежат в слоте 2 flash Tang. Без них ядро FT812 не рисует встроенный текст программ для FT812 " +
+                "(строки и надписи кнопок). На новой плате их нет — запишите. Если на плате они уже есть, шаг можно пропустить.\n" +
+                "1. USB к модулю Tang — как на шаге 3, без кнопки.\n" +
+                "2. Когда программа найдёт USB-JTAG, нажмите «Прошить». Запись и сверка — меньше минуты; ПЛИС затем загрузится с flash.",
+                "The FT812 ROM fonts live in slot 2 of the Tang flash. Without them the FT812 core draws no built-in text of FT812 " +
+                "programs (strings and button labels). A new board has none — write them. If the board already has them, skip this step.\n" +
+                "1. USB to the Tang module — as in step 3, without the button.\n" +
+                "2. When the program finds the USB-JTAG, press “Flash”. Writing and the read-back check take less than a minute; the FPGA then starts from flash.");
+            warn.Visible = true;
+            warn.Text = Lang.T(
+                "Перед записью программа сохраняет слот 2 flash Tang (1 МБ) в папку Backup и стирает его целиком. Ядра в слотах 0, 1, 3 и настройки Tang не трогаются.",
+                "Before writing, the program saves slot 2 of the Tang flash (1 MB) into the Backup folder and erases it whole. The cores in slots 0, 1, 3 and the Tang settings stay.");
+            if (fw.Fonts.Count == 0) {
+                message.ForeColor = Bad;
+                message.Text = Lang.T("Нет образа шрифтов romfonts.bin в папке firmware.", "No font image romfonts.bin in the firmware folder.");
+            } else {
+                options.Controls.Add(new Label { AutoSize = true, ForeColor = Muted, Margin = new Padding(0, 2, 0, 2),
+                    Text = Path.GetFileName(fw.Fonts[0].File) + ", " + Util.Size(FontBytes()) + Lang.T(": ", ": ") +
+                           string.Join(", ", fw.Fonts.ConvertAll(f => "0x" + f.Address.ToString("X6") + "…0x" + (f.Address + (uint)f.Data.Length - 1).ToString("X6")).ToArray()) });
+            }
+        }
+
         void PageFinish()
         {
             pageTitle.Text = Lang.T("Готово", "Done");
             var sb = new StringBuilder();
-            string[] names = { "", "ESP32-S3 Zero", Lang.T("BL616 модуля Tang", "Tang BL616"), Lang.T("ПЛИС Tang", "Tang FPGA") };
-            for (int i = StepEsp; i <= StepTang; i++)
+            string[] names = { "", "ESP32-S3 Zero", Lang.T("BL616 модуля Tang", "Tang BL616"), Lang.T("ПЛИС Tang", "Tang FPGA"),
+                               Lang.T("Шрифты FT812", "FT812 fonts") };
+            for (int i = StepEsp; i <= StepFonts; i++)
                 sb.AppendLine(names[i] + ": " + (results[i] ?? Lang.T("не прошивался", "not flashed")));
             sb.AppendLine();
             if (backup.Files.Count > 0) {
@@ -491,7 +532,7 @@ namespace Vdac4Flasher
 
         void UpdateButtons()
         {
-            bool step = page >= StepEsp && page <= StepTang;
+            bool step = page >= StepEsp && page <= StepFonts;
             main.Text = page == Welcome ? Lang.T("Начать  →", "Start  →") :
                         page == Finish ? Lang.T("Закрыть", "Close") :
                         marks[page] == Mark.Done ? Lang.T("Далее  →", "Next  →") :
@@ -515,6 +556,7 @@ namespace Vdac4Flasher
             if (p == StepEsp) return fw.Esp != null;
             if (p == StepBl616) return fw.Bl616 != null;
             if (p == StepTang) return SelectedTang().Count > 0;
+            if (p == StepFonts) return fw.Fonts.Count > 0;
             return true;
         }
 
@@ -540,7 +582,7 @@ namespace Vdac4Flasher
 
         void Detect()
         {
-            if (snapshot || busy || detecting || page < StepEsp || page > StepTang) return;
+            if (snapshot || busy || detecting || page < StepEsp || page > StepFonts) return;
             detecting = true;
             int p = page;
             ThreadPool.QueueUserWorkItem(_ => {
@@ -590,7 +632,7 @@ namespace Vdac4Flasher
         void StartFlash()
         {
             int p = page;
-            var tang = SelectedTang();
+            var tang = p == StepFonts ? new List<FlashPart>(fw.Fonts) : SelectedTang();   // шаг 4 — те же JTAG и flash, слот 2
             busy = true;
             report.Reset();
             message.Text = "";
@@ -620,17 +662,28 @@ namespace Vdac4Flasher
             th.Start();
         }
 
+        /// <summary>Итог шага для страницы «Готово» — по роду и числу названия шага (ПЛИС — она, шрифты — они).</summary>
+        static string Written(int p)
+        {
+            return p == StepTang ? Lang.T("записана и сверена", "written and verified") :
+                   p == StepFonts ? Lang.T("записаны и сверены", "written and verified") :
+                   Lang.T("записан и сверен", "written and verified");
+        }
+
         void Finished(int p, string err)
         {
             busy = false;
             foreach (Control c in options.Controls) c.Enabled = true;
             if (err == null) {
                 marks[p] = Mark.Done;
-                results[p] = Lang.T("записан и сверен", "written and verified");
+                results[p] = Written(p);
                 message.ForeColor = Good;
                 message.Text = "✓  " + (p == StepEsp ? Lang.T("ESP32-S3 записан и сверен, модуль перезапущен.", "ESP32-S3 written and verified, the module restarted.")
                                       : p == StepBl616 ? Lang.T("BL616 записан и сверен. Отключите USB от Tang — дальше шаг 3.", "BL616 written and verified. Unplug the Tang USB — step 3 is next.")
-                                      : Lang.T("ПЛИС Tang записана, сверена и загрузилась с новой flash.", "Tang FPGA written, verified and started from the new flash."));
+                                      : p == StepTang ? Lang.T("ПЛИС Tang записана, сверена и загрузилась с новой flash. Дальше шаг 4 — шрифты FT812.",
+                                                               "Tang FPGA written, verified and started from the new flash. Step 4 — FT812 fonts — is next.")
+                                      : Lang.T("Шрифты FT812 записаны в слот 2 и сверены, ПЛИС загрузилась с flash.",
+                                               "FT812 fonts written to slot 2 and verified, the FPGA started from flash."));
                 report.Log("OK");
             } else {
                 marks[p] = Mark.Failed;
@@ -748,7 +801,7 @@ namespace Vdac4Flasher
                     using (var b = new SolidBrush(m == Mark.Pending ? Color.White : c))
                         g.FillEllipse(b, x, y, 2 * r, 2 * r);
                     using (var pen = new Pen(c, 2 * s)) g.DrawEllipse(pen, x, y, 2 * r, 2 * r);
-                    string sym = m == Mark.Done ? "✓" : m == Mark.Failed ? "✗" : m == Mark.Skipped ? "–" : (i == 0 ? "•" : i == 4 ? "★" : i.ToString());
+                    string sym = m == Mark.Done ? "✓" : m == Mark.Failed ? "✗" : m == Mark.Skipped ? "–" : (i == 0 ? "•" : i == Titles.Length - 1 ? "★" : i.ToString());
                     using (var f = new Font("Segoe UI Semibold", 10f))
                     using (var b = new SolidBrush(m == Mark.Pending ? c : Color.White)) {
                         var sz = g.MeasureString(sym, f);

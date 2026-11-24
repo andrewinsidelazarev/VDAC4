@@ -216,21 +216,31 @@ namespace Vdac4Flasher
             foreach (var p in parts) total += p.Data.Length;
             foreach (var p in parts) {
                 report.Log(string.Format(Lang.T("{0}: {1} с 0x{2:X6}", "{0}: {1} at 0x{2:X6}"), p.Name, Util.Size(p.Data.Length), p.Address));
-                for (int off = 0; off < p.Data.Length; off += 256) {
+                int sinceReport = 0;
+                for (int off = 0; off < p.Data.Length; ) {
                     if (report.Cancelled) throw new OperationCanceledException();
-                    int n = Math.Min(256, p.Data.Length - off);
+                    // Страница SPI flash — 256 байт, и запись 0x02, дойдя до края страницы, заворачивает в начало той же
+                    // страницы. Поэтому каждая запись кончается на краю страницы: кусок с середины страницы (шрифты
+                    // FT812 с 0x201EE0) пишется сначала хвостом страницы, дальше — целыми страницами. До 24.11.2026 запись
+                    // шла по 256 байт от начала куска — ядра (с начала слота) это не задевало, шрифты легли бы испорченными.
+                    uint at = (uint)(p.Address + off);
+                    int n = Math.Min(256 - (int)(at & 0xFF), p.Data.Length - off);
                     bool blank = true;
                     for (int k = 0; k < n && blank; k++) blank = p.Data[off + k] == 0xFF;
                     if (!blank) {
                         WriteEnable();
-                        var pp = Addr(0x02, (uint)(p.Address + off), n);
+                        var pp = Addr(0x02, at, n);
                         Array.Copy(p.Data, off, pp, 4, n);
                         Spi(pp, false);
                         WaitReady(100);
                     }
+                    off += n;
                     done += n;
-                    if ((off & 0x3FFF) == 0)
+                    sinceReport += n;
+                    if (sinceReport >= 0x4000) {
+                        sinceReport = 0;
                         report.Progress(28 + (int)(done * 44 / total), Lang.T("Запись flash ПЛИС", "Writing FPGA flash"));
+                    }
                 }
             }
             done = 0;

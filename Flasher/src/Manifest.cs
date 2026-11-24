@@ -8,6 +8,9 @@
 //   ESP   — строка VERSION в firmware.sha256 (там же SHA-256 образа firmware.factory.bin);
 //   BL616 — последний #define FW_VERSION в Tang Nano 20k/BL616/app/main.c;
 //   ПЛИС  — колонка версии в таблице слотов Tang Nano 20k/Firmware/README.md.
+// Шрифты ПЗУ FT812 (слот 2 flash Tang, образ VD4FONT1 romfonts.bin) — тоже в комплекте (24.11.2026, слово
+// пользователя: «Шрифт прошивать и стирать нужно»). До этого их в комплекте не было (данные Bridgetek), и на
+// новой плате слот 2 оставался пустым: ядро FT812 без шрифтов ПЗУ — CMD_TEXT и надписи кнопок не рисуются.
 // Скачав комплект, программа пишет firmware.ini (Make): по нему FirmwareSet.Load сверяет файлы и потом,
 // без сети.
 using System;
@@ -38,8 +41,12 @@ namespace Vdac4Flasher
             null, "Tang Nano 20k/Firmware/firmware/ts_fb_video.bin"
         };
         public static readonly int[] Slots = { 0, 1, 3 };
+        /// <summary>Шрифты ПЗУ FT812 для слота 2 — в той же папке, что образы ядер (тот же список каталога API).
+        /// Онлайн-обновление берёт файлы этой папки по точным именам ядер — этот файл оно не трогает.</summary>
+        public const string FontsRepo = "Tang Nano 20k/Firmware/firmware/romfonts.bin";
+        public const string FontsLocal = @"tang\romfonts.bin";
 
-        /// <summary>Образы комплекта по порядку: ESP, BL616, слоты ПЛИС 0, 1, 3 (шрифты — только свои, не с GitHub).</summary>
+        /// <summary>Образы комплекта по порядку: ESP, BL616, слоты ПЛИС 0, 1, 3, шрифты FT812 (слот 2).</summary>
         public static List<FirmwareEntry> Entries()
         {
             var list = new List<FirmwareEntry>();
@@ -47,6 +54,7 @@ namespace Vdac4Flasher
             list.Add(new FirmwareEntry { Local = @"bl616\vdac4_copro_bl616.bin", Repo = Bl616Repo });
             foreach (int slot in Slots)
                 list.Add(new FirmwareEntry { Local = @"tang\" + RepoName(SlotRepo[slot]), Repo = SlotRepo[slot] });
+            list.Add(new FirmwareEntry { Local = FontsLocal, Repo = FontsRepo });
             return list;
         }
 
@@ -112,9 +120,13 @@ namespace Vdac4Flasher
             for (int i = 0; i < Slots.Length; i++) sb.Append("repo_slot" + Slots[i] + " = " + entries[2 + i].Repo + "\r\n");
             sb.Append("version = " + v.Tang + "\r\n");
             for (int i = 0; i < Slots.Length; i++) sb.Append("sha256_slot" + Slots[i] + " = " + entries[2 + i].Sha256 + "\r\n");
-            sb.Append("; шрифты ПЗУ FT812 (слот 2, образ VD4FONT1 — данные Bridgetek, в комплект и на GitHub не входят):\r\n");
-            sb.Append("; свой файл положить в папку firmware — программа запишет и его\r\n");
-            sb.Append("fonts = tang\\romfonts.bin\r\n");
+            // шрифты — последний образ комплекта (Entries)
+            FirmwareEntry fonts = entries[2 + Slots.Length];
+            sb.Append("; шрифты ПЗУ FT812 — слот 2 (0x200000), образ VD4FONT1: куски по адресам ПЗУ FT812; слот стирается\r\n");
+            sb.Append("; целиком и пишется шагом 4, его можно пропустить (без шрифтов ядро FT812 не рисует текст CMD_TEXT)\r\n");
+            sb.Append("fonts = " + fonts.Local + "\r\n");
+            sb.Append("repo_fonts = " + fonts.Repo + "\r\n");
+            sb.Append("sha256_fonts = " + fonts.Sha256 + "\r\n");
             if (!string.IsNullOrEmpty(commit)) {
                 sb.Append("\r\n[source]\r\n");
                 sb.Append("; откуда и когда скачан комплект\r\n");

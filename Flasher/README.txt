@@ -16,7 +16,8 @@
 программой (папка создаётся сама). Имена файлов — с датой и временем, что где — в Backup\backup.txt:
 * ESP32-S3 — вся память 8 МБ (прошивка, настройки, файлы); чтение — около полутора минут;
 * BL616 — раздел прошивки VDAC4 (256 КБ с адреса 0x40000);
-* ПЛИС Tang — отмеченные слоты flash, по 1 МБ.
+* ПЛИС Tang — отмеченные слоты flash, по 1 МБ: 0 TS-Config, 1 FT812, 3 видео;
+* шрифты FT812 — слот 2 flash Tang, 1 МБ.
 Только когда бэкап записан и сверен, шаг стирает устройство: ESP32-S3 — целиком, BL616 — раздел
 прошивки, ПЛИС — отмеченные слоты. Затем пишет новую прошивку и сверяет её.
 
@@ -33,6 +34,8 @@
    BOOT на модуле при подключении кабеля.
 2. BL616: держать кнопку UPDATE на Tang Nano 20K, подключить USB к Tang, отпустить, «Прошить».
 3. ПЛИС Tang: переподключить USB к Tang без кнопки, «Прошить» (бэкап, запись и сверка чтением).
+4. Шрифты FT812: USB к Tang так же, «Прошить». Без шрифтов ядро FT812 не рисует встроенный текст программ
+   для FT812. На новой плате их нет; если на плате они уже есть, шаг можно пропустить.
 
 Каждый шаг можно пропустить или повторить. Журнал — в VDAC4Flasher.log рядом с программой.
 
@@ -44,5 +47,6 @@ BL616 of the Tang Nano 20K and the Tang FPGA flash. Nothing to install (no Pytho
 At start it downloads the current firmware from GitHub (andrewinsidelazarev/VDAC4) into the firmware
 folder and checks every file against git (its hash in the same commit). Before writing, each step saves what it will erase into the Backup
 folder next to the program (see Backup\backup.txt), then erases (the whole ESP32-S3 flash, the BL616
-firmware partition, the checked FPGA slots), writes and verifies.
+firmware partition, the checked FPGA slots), writes and verifies. Step 4 writes the FT812 ROM fonts into
+slot 2 of the Tang flash (without them the FT812 core draws no built-in text); skip it if the board has them.
 Take the board out of the ZX Evolution (or switch the Evo off) first: never run Evo power and USB together.

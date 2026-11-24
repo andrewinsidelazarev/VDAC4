@@ -32,10 +32,10 @@ namespace Vdac4Flasher
             Directory.CreateDirectory(outDir);
             foreach (bool ru in new[] { true, false }) {
                 Lang.Russian = ru;
-                // страницы 0…4 как есть; шаги 1…3 ещё и «тесно»: длинная ошибка и открытый журнал
-                for (int k = 0; k <= 7; k++) {
-                    int p = k <= 4 ? k : k - 4;
-                    bool crowded = k > 4;
+                // страницы 0…5 как есть; шаги 1…4 ещё и «тесно»: длинная ошибка и открытый журнал
+                for (int k = 0; k <= 9; k++) {
+                    int p = k <= 5 ? k : k - 5;
+                    bool crowded = k > 5;
                     using (var w = new Wizard(folder, true)) {
                         w.StartPosition = FormStartPosition.Manual;
                         w.Location = new Point(-20000, -20000);
