@@ -38,7 +38,7 @@ namespace Vdac4Flasher
         public FlashPart Bl616;          // прошивка BL616 модуля Tang (с 0x40000, FPGA Partner Sipeed с 0x0 не трогается)
         public string Bl616Version = "";
         public List<FlashPart> Tang = new List<FlashPart>();   // ядра в слотах flash ПЛИС 0, 1, 3 (шаг 3)
-        public List<FlashPart> Fonts = new List<FlashPart>();  // куски шрифтов FT812 в слоте 2 (отдельный шаг 4)
+        public List<FlashPart> Fonts = new List<FlashPart>();  // образ шрифтов FT812 целиком с 0x200000, слот 2 (шаг 4)
         public string TangVersion = "";
         public List<string> Problems = new List<string>();     // что не так с файлами (окно покажет)
         public string Commit = "";       // коммит VDAC4 на GitHub, с которого скачан комплект ([source])
@@ -93,12 +93,21 @@ namespace Vdac4Flasher
             }
             // Шрифты ПЗУ FT812 (слот 2, VD4FONT1) — часть комплекта (24.11.2026): без них ядро FT812 на новой плате
             // не рисует текст. Пишет их отдельный шаг мастера (его можно пропустить). Файл сверяется по сумме описи и
-            // по заголовку; во flash идут его куски (FontSpans), слот 2 Gowin.Program стирает целиком.
+            // по заголовку (FontSpans) и ложится во flash ЦЕЛИКОМ с 0x200000 — как tang_tool.py update --slot 2: ESP
+            // (Firmware/src/ft_rom.cpp) читает с 0x200000 заголовок «VD4FONT1» и таблицу кусков, копирует образ к
+            // себе и после каждой загрузки ядра FT812 раскладывает куски в SDRAM по адресам ПЗУ FT812.
+            // Ошибка 24.11.2026: первая версия шага писала во flash сами куски по адресам ПЗУ (0x201EE0, 0x2BAC3C),
+            // а 0x200000 оставляла стёртым — ESP не находил образа, и у пользователя R-Type рисовал белый квадрат
+            // вместо текста (сверка чтением сходилась: сверялось то, что программа задумала).
             var fonts = set.LoadPart(Lang.T("шрифты FT812", "FT812 fonts"), ini.Get("tang", "fonts", Manifest.FontsLocal),
                                      "0x" + TangFontBase.ToString("X"), ini.Get("tang", "sha256_fonts", ""),
                                      d => FontSpans(d, "romfonts.bin"));
-            if (fonts != null)
-                set.Fonts.AddRange(FontSpans(fonts.Data, fonts.File));
+            if (fonts != null) {
+                if (fonts.Data.Length > TangSlotBytes)
+                    set.Problems.Add(fonts.File + ": " + Lang.T("длиннее слота 1 МБ", "longer than a 1 MB slot"));
+                else
+                    set.Fonts.Add(fonts);
+            }
             return set;
         }
 
@@ -213,7 +222,9 @@ namespace Vdac4Flasher
             return -1;
         }
 
-        /// <summary>Шрифты ПЗУ FT812 VD4FONT1: куски {адрес, длина, смещение} — те же проверки, что у ESP.</summary>
+        /// <summary>Проверка образа шрифтов ПЗУ FT812 VD4FONT1: куски {адрес ПЗУ FT812, длина, смещение в образе} — те же
+        /// проверки, что у ESP. Во flash Tang пишется не это, а сам образ целиком с 0x200000: куски по адресам ПЗУ
+        /// раскладывает ESP (в SDRAM ядра FT812).</summary>
         public static List<FlashPart> FontSpans(byte[] img, string file)
         {
             if (img.Length < 12 || Encoding.ASCII.GetString(img, 0, 8) != "VD4FONT1")

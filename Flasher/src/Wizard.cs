@@ -501,8 +501,8 @@ namespace Vdac4Flasher
                 message.Text = Lang.T("Нет образа шрифтов romfonts.bin в папке firmware.", "No font image romfonts.bin in the firmware folder.");
             } else {
                 options.Controls.Add(new Label { AutoSize = true, ForeColor = Muted, Margin = new Padding(0, 2, 0, 2),
-                    Text = Path.GetFileName(fw.Fonts[0].File) + ", " + Util.Size(FontBytes()) + Lang.T(": ", ": ") +
-                           string.Join(", ", fw.Fonts.ConvertAll(f => "0x" + f.Address.ToString("X6") + "…0x" + (f.Address + (uint)f.Data.Length - 1).ToString("X6")).ToArray()) });
+                    Text = Path.GetFileName(fw.Fonts[0].File) + ", " + Util.Size(FontBytes()) + Lang.T(", с адреса 0x", ", at 0x") +
+                           fw.Fonts[0].Address.ToString("X6") + Lang.T(" (образ VD4FONT1 — шрифты из него берёт ESP)", " (VD4FONT1 image — the ESP takes the fonts from it)") });
             }
         }
 

@@ -227,9 +227,13 @@ namespace FlasherTests
             Check(set.Bl616 != null && set.Bl616.Address == 0x40000, "BL616: с 0x40000");
             Check(set.Tang.Count == 3 && set.Tang[0].Address == 0 && set.Tang[1].Address == 0x100000 && set.Tang[2].Address == 0x300000,
                   "ПЛИС: слоты 0, 1 и 3");
-            Check(set.Fonts.Count == 2 && set.Fonts[0].Address == 0x201EE0 && set.Fonts[1].Address == 0x2BAC3C &&
-                  set.Fonts[1].Address + set.Fonts[1].Data.Length == 0x300000,
-                  "шрифты FT812 (свой шаг): два куска в слоте 2 — 0x201EE0 (таблица шрифтов) и 0x2BAC3C…0x2FFFFF (глифы, ROM_FONTROOT)");
+            byte[] fontFile = File.ReadAllBytes(Path.Combine(v4, @"Tang Nano 20k\Firmware\firmware\romfonts.bin"));
+            Check(set.Fonts.Count == 1 && set.Fonts[0].Address == 0x200000 && set.Fonts[0].Data.SequenceEqual(fontFile),
+                  "шрифты FT812 (свой шаг): файл romfonts.bin целиком с 0x200000 — как tang_tool.py update --slot 2");
+            var fontSpans = FirmwareSet.FontSpans(fontFile, "romfonts.bin");
+            Check(fontSpans.Count == 2 && fontSpans[0].Address == 0x201EE0 && fontSpans[1].Address == 0x2BAC3C &&
+                  fontSpans[1].Address + fontSpans[1].Data.Length == 0x300000,
+                  "образ VD4FONT1: два куска ПЗУ FT812 — 0x201EE0 (таблица шрифтов) и 0x2BAC3C…0x2FFFFF (глифы, ROM_FONTROOT)");
 
             // шрифты: испорченный файл — по сумме описи, нет файла — замечание (шрифты обязательны)
             byte[] rf = File.ReadAllBytes(Path.Combine(folder, @"tang\romfonts.bin"));
@@ -261,7 +265,7 @@ namespace FlasherTests
             // шрифты VD4FONT1
             var font = MakeFont(0x200000);
             var spans = FirmwareSet.FontSpans(font, "romfonts.bin");
-            Check(spans.Count == 1 && spans[0].Address == 0x200000 && spans[0].Data.Length == 64 && spans[0].Data[63] == 63, "шрифты: кусок по 0x200000");
+            Check(spans.Count == 1 && spans[0].Address == 0x200000 && spans[0].Data.Length == 64 && spans[0].Data[63] == 63, "образ шрифтов: кусок ПЗУ по 0x200000 разобран");
             Util.Put32(font, 12, 0x100000);
             Throws(() => FirmwareSet.FontSpans(font, "f"), "негодный кусок", "шрифты в слот 1 не пишутся");
             return set;
@@ -302,8 +306,8 @@ namespace FlasherTests
             Check(gh.Urls.Count(u => u.Contains("/contents/")) == 3, "три списка каталогов (ESP, BL616, ПЛИС)");
             Check(!gh.Urls.Any(u => u.Contains("Flasher/")), "описи с GitHub не берётся");
             Check(gh.Urls.Any(u => u.Contains("ESP32%20S3%20Zero%20N8R8/Firmware/firmware/vdac4/firmware.factory.bin")), "пробелы в пути — %20");
-            Check(set.Problems.Count == 0 && set.Esp != null && set.Bl616 != null && set.Tang.Count == 3 && set.Fonts.Count == 2,
-                  "скачанный комплект без замечаний: слоты 0, 1, 3 и шрифты (2 куска)" + (set.Problems.Count > 0 ? ": " + string.Join("; ", set.Problems) : ""));
+            Check(set.Problems.Count == 0 && set.Esp != null && set.Bl616 != null && set.Tang.Count == 3 && set.Fonts.Count == 1,
+                  "скачанный комплект без замечаний: слоты 0, 1, 3 и шрифты" + (set.Problems.Count > 0 ? ": " + string.Join("; ", set.Problems) : ""));
             Check(set.EspVersion == repoIni.Get("esp", "version", "-") && set.Bl616Version == repoIni.Get("bl616", "version", "-") &&
                   set.TangVersion == repoIni.Get("tang", "version", "-"), "версии — те же, что в файлах репозитория");
             Check(set.Commit == FakeGithub.Commit && set.Downloaded.Length > 0, "в описи отмечено, откуда и когда скачано");
@@ -498,7 +502,7 @@ namespace FlasherTests
             Check(m.Divisor == 4, "после записи JTAG снова 6 МГц (делитель 4)");
             Check(r.LastPercent == 100, "ход до 100 %");
 
-            // только шрифты: бэкап и стирание слота 2 целиком, прочее не тронуто
+            // один кусок с середины слота 2 (запись Gowin вообще, не формат шрифтов): бэкап и стирание слота целиком
             var mf = new GowinTapModel();
             Array.Copy(fw.Tang[0].Data, mf.Flash.Mem, fw.Tang[0].Data.Length);     // в слоте 0 стоит TS-Config: RELOAD с него
             byte[] oldF = (byte[])mf.Flash.Mem.Clone();
@@ -506,12 +510,12 @@ namespace FlasherTests
             var fontParts = FirmwareSet.FontSpans(MakeFont(0x200040), "romfonts.bin");
             new Gowin(new Jtag(mf), new ConsoleReport { Quiet = true }).Program(fontParts, bkf);
             Check(bkf.Files.Count == 1 && bkf.Files[0].EndsWith("_tang_slot2.bin") &&
-                  File.ReadAllBytes(bkf.Files[0]).SequenceEqual(oldF.Skip(0x200000).Take(0x100000)), "шрифты: бэкап слота 2");
+                  File.ReadAllBytes(bkf.Files[0]).SequenceEqual(oldF.Skip(0x200000).Take(0x100000)), "кусок в слоте 2: бэкап слота 2");
             Check(mf.Flash.Mem.Skip(0x200040).Take(64).SequenceEqual(fontParts[0].Data) &&
                   mf.Flash.Mem.Skip(0x200000).Take(0x40).All(x => x == 0xFF) &&
-                  mf.Flash.Mem.Skip(0x200080).Take(0x100000 - 0x80).All(x => x == 0xFF), "шрифты: слот 2 стёрт целиком, кусок лёг с 0x200040");
+                  mf.Flash.Mem.Skip(0x200080).Take(0x100000 - 0x80).All(x => x == 0xFF), "кусок в слоте 2: слот стёрт целиком, кусок лёг с 0x200040");
             Check(mf.Flash.Mem.Take(0x200000).SequenceEqual(oldF.Take(0x200000)) &&
-                  mf.Flash.Mem.Skip(0x300000).SequenceEqual(oldF.Skip(0x300000)), "шрифты: слоты 0, 1, 3 и дальше не тронуты");
+                  mf.Flash.Mem.Skip(0x300000).SequenceEqual(oldF.Skip(0x300000)), "кусок в слоте 2: слоты 0, 1, 3 и дальше не тронуты");
 
             // шаг 4 — настоящие шрифты FT812: куски с середины страницы flash (0x201EE0), слот 2 стёрт целиком
             var ms = new GowinTapModel();
@@ -525,7 +529,14 @@ namespace FlasherTests
             foreach (var p in fw.Fonts) Array.Copy(p.Data, 0, slot2, p.Address - 0x200000, p.Data.Length);
             Check(bks.Files.Count == 1 && bks.Files[0].EndsWith("_tang_slot2.bin") &&
                   File.ReadAllBytes(bks.Files[0]).SequenceEqual(oldS.Skip(0x200000).Take(0x100000)), "шаг 4: бэкап только слота 2, байт в байт");
-            Check(ms.Flash.Mem.Skip(0x200000).Take(0x100000).SequenceEqual(slot2), "шаг 4: шрифты легли по своим адресам, остальное в слоте 2 стёрто");
+            Check(ms.Flash.Mem.Skip(0x200000).Take(0x100000).SequenceEqual(slot2), "шаг 4: romfonts.bin лёг с 0x200000, остальное в слоте 2 стёрто");
+            // слот 2 глазами ESP (Firmware/src/ft_rom.cpp readFlash): с 0x200000 — «VD4FONT1» и таблица кусков, куски — в образе
+            byte[] esp = ms.Flash.Mem.Skip(0x200000).Take(0x100000).ToArray();
+            var espSpans = FirmwareSet.FontSpans(esp, "slot2");
+            var fileSpans = FirmwareSet.FontSpans(fw.Fonts[0].Data, "romfonts.bin");
+            Check(espSpans.Count == fileSpans.Count && espSpans.Count == 2 &&
+                  Enumerable.Range(0, espSpans.Count).All(i => espSpans[i].Address == fileSpans[i].Address && espSpans[i].Data.SequenceEqual(fileSpans[i].Data)),
+                  "шаг 4: ESP найдёт в слоте 2 образ VD4FONT1 и оба куска ПЗУ FT812 (0x201EE0, 0x2BAC3C)");
             Check(ms.Flash.Mem.Take(0x200000).SequenceEqual(oldS.Take(0x200000)) &&
                   ms.Flash.Mem.Skip(0x300000).SequenceEqual(oldS.Skip(0x300000)), "шаг 4: слоты 0, 1, 3 и настройки Tang не тронуты");
             Check(ms.Reloads == 1 && rs.LastPercent == 100, "шаг 4: RELOAD, ход до 100 %");

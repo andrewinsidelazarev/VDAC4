@@ -122,8 +122,8 @@ namespace Vdac4Flasher
             for (int i = 0; i < Slots.Length; i++) sb.Append("sha256_slot" + Slots[i] + " = " + entries[2 + i].Sha256 + "\r\n");
             // шрифты — последний образ комплекта (Entries)
             FirmwareEntry fonts = entries[2 + Slots.Length];
-            sb.Append("; шрифты ПЗУ FT812 — слот 2 (0x200000), образ VD4FONT1: куски по адресам ПЗУ FT812; слот стирается\r\n");
-            sb.Append("; целиком и пишется шагом 4, его можно пропустить (без шрифтов ядро FT812 не рисует текст CMD_TEXT)\r\n");
+            sb.Append("; шрифты ПЗУ FT812 — образ VD4FONT1 целиком в слот 2 с 0x200000 (куски по адресам ПЗУ FT812 раскладывает ESP);\r\n");
+            sb.Append("; слот стирается целиком и пишется шагом 4, его можно пропустить (без шрифтов ядро FT812 не рисует текст)\r\n");
             sb.Append("fonts = " + fonts.Local + "\r\n");
             sb.Append("repo_fonts = " + fonts.Repo + "\r\n");
             sb.Append("sha256_fonts = " + fonts.Sha256 + "\r\n");
