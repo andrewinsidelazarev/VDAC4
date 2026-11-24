@@ -285,10 +285,12 @@ uint8_t openDrive(uint8_t address) {
   mkdir("/usb/SYSTEM/CACHE", 0777);
   mkdir(UsbDrive::kMusicCache, 0777);
   mkdir(UsbDrive::kElfFolder, 0777);
-  const bool folders = isDirectory(UsbDrive::kMusicCache) && isDirectory(UsbDrive::kElfFolder);
+  mkdir(UsbDrive::kCoreFolder, 0777);
+  const bool folders = isDirectory(UsbDrive::kMusicCache) && isDirectory(UsbDrive::kElfFolder) &&
+                       isDirectory(UsbDrive::kCoreFolder);
   bringupLog(kTag, "drive %04X:%04X, %u MB, %s: %s", info.idVendor, info.idProduct,
              static_cast<unsigned>(megabytes), volumeName(volume),
-             folders ? "music cache /SYSTEM/CACHE/MUSIC, ELF cache /ELF" : "cache folders NOT made");
+             folders ? "music cache /SYSTEM/CACHE/MUSIC, ELF cache /ELF, core cache /cores" : "cache folders NOT made");
   return folders ? kReady : kUnusable;
 }
 

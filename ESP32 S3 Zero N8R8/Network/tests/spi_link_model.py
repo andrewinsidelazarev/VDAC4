@@ -157,10 +157,11 @@ class LinkCore:
             app = (not resource and command != 0x31 and first <= command <= last
                    and 3 <= length <= 3 + APP_MEDIA_PREFIX)
             vfs = command == 0x5F and length == 3 + 6        # окно чтения SMB (kVfsReadMedia, 0.1.131)
-            valid = resource or app or vfs or (command == 0x31 and length == 3)
+            piece = command == 0x6F and length == 3 + 5      # кусок файла данных (kDataPiece, 0.1.166)
+            valid = resource or app or vfs or piece or (command == 0x31 and length == 3)
             size = int.from_bytes(data[HEADER+1:HEADER+3],'little') if valid else 0
             prefix = (data[HEADER+3:HEADER+7] if resource else data[HEADER+3:HEADER+length] if app else
-                      data[HEADER+3:HEADER+9] if vfs else b'')
+                      data[HEADER+3:HEADER+9] if vfs else data[HEADER+3:HEADER+8] if piece else b'')
             if put_available and 0 < size <= 8192 and self.from_capacity-len(self.from_z80) >= size+len(prefix)+4:
                 self.put_armed = True
                 self.put_media = True

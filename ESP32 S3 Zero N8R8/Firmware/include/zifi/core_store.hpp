@@ -60,6 +60,42 @@ extern const char* const kNoElf;
 const char* readElf(const char* name, uint8_t** data, uint32_t* size, uint32_t* stamp,
                     uint32_t waitMs = tang_sd::kForever);
 
+// Ядра с карты Evo (0.1.164; пользователь 23.11.2026: «проброс ядра ПЛИС с SD card Evo с кэшем во
+// флешке USB-C, как мы это делали для ELF», «должно работать и при отсутствии флешки»). Программа
+// Z80 (SPG, плагин) шлёт ИМЯ.BIN теми же командами, что и ELF: MOD_QUERY с флагом 2 (имя, длина,
+// время файла FAT), MOD_PUT, MOD_COMMIT. ESP проверяет битстрим (то же, что BL616) и кладёт его на
+// флешку в /usb/cores с временем файла карты; флешки нет — сразу в кэш ядер BL616 (его flash и есть
+// кэш). В следующий раз годная копия на флешке или то же ядро в кэше BL616 — и передачи нет.
+// Ядро, заявленное так в этом запуске ESP, load() и ABI core_load берут отсюда, а не с SD Tang.
+// Отметок — до 4 ядер (таблица в PSRAM); отметки с известным SHA хранятся в NVS — после перезапуска
+// ESP они помнят, какой файл карты Evo уже лежит в кэше BL616, но ядро не заявляют.
+//
+// Годен ли образ ядра (битстрим GW2AR-18 с меткой VDAC4, не длиннее слота flash Tang): nullptr — да.
+const char* checkEvoImage(const uint8_t* data, uint32_t size);
+// Отметка «ядро name с карты Evo». data — образ в PSRAM: переходит к core_store, он его и освободит;
+// nullptr — годная копия лежит на флешке. size, stamp — длина и время файла на карте Evo.
+void evoOffer(const char* name, uint8_t* data, uint32_t size, uint32_t stamp);
+// Ядро name с карты Evo заявлено в этом запуске ESP: CORE_APP не читает его ELF с SD Tang.
+bool evoMarked(const char* name);
+// MOD_QUERY без годной копии на флешке: этот файл карты (длина, время) уже в кэше BL616 — ядро
+// заявляется, и передавать его не нужно. Мост Tang занят дольше kQuickMs — false (пусть шлют).
+bool evoClaimCached(const char* name, uint32_t size, uint32_t stamp);
+// MOD_COMMIT без флешки: ядро сразу в кэш BL616; data переходит к core_store. nullptr — легло; иначе
+// причина, а образ остаётся в PSRAM (core_load положит его туда сам).
+const char* evoStoreToCache(const char* name, uint8_t* data, uint32_t size, uint32_t stamp);
+// Плагин берёт список ядер SD Tang (CORE_LIST): заявки ядер с карты Evo снимаются — ядро того же
+// имени с карты Tang снова грузится с карты Tang. Образы в PSRAM освобождаются.
+void evoReleaseClaims();
+// Образ ядра name той же длины и времени уже в PSRAM: передавать с карты не нужно.
+bool evoHeld(const char* name, uint32_t size, uint32_t stamp);
+// Отдать PSRAM (нужна доставке): образы ядер освобождаются; ядро с копией на флешке или уже в кэше
+// BL616 грузится и так, иначе его пришлют снова. Сколько байт освобождено.
+uint32_t evoReleaseMemory();
+// Записать в NVS отметки ядер с карты Evo, если с прошлого раза появился новый SHA (0.1.170). Звать
+// только из задачи со стеком во внутренней памяти — её зовёт Application::pollLink (задача обмена с
+// Z80). Загрузчик zm-coreload со стеком в PSRAM флешь ESP трогать не может: запись туда и отложена.
+void evoFlush();
+
 }  // namespace core_store
 }  // namespace zifi
 

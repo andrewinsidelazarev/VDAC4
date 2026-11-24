@@ -45,6 +45,12 @@ class UsbDrive {
   static constexpr const char* kMountPoint = "/usb";
   static constexpr const char* kMusicCache = "/usb/SYSTEM/CACHE/MUSIC";
   static constexpr const char* kElfFolder = "/usb/ELF";
+  // Ядра ПЛИС с карты Evo (0.1.164, core_store.hpp; пользователь: «в папке /cores/»): ИМЯ.BIN,
+  // время файла — как на карте Evo.
+  static constexpr const char* kCoreFolder = "/usb/cores";
+  // Файлы данных приложений с карты Evo (0.1.165, app_data_files.hpp): папка приложения в нём —
+  // /usb/SYSTEM/CACHE/<ПРИЛОЖЕНИЕ> (у Quake 2 — Q2: PAK0.PAK…), рядом с кэшем музыки.
+  static constexpr const char* kAppDataRoot = "/usb/SYSTEM/CACHE";
   // Самая большая передача флешке, байтов: кратно сектору (512 и 4096).
   static constexpr uint32_t kTransferBytes = 4096;
 

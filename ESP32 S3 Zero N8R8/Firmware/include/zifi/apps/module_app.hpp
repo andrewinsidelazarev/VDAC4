@@ -155,6 +155,7 @@ class ModuleApp : public App {
   static SemaphoreHandle_t coreJobDone_;
   static TaskHandle_t coreLoader_;
   static int coreLinkRead(uint32_t address, uint32_t* words, uint32_t count);
+  static int coreLinkReadChecked(uint32_t address, uint32_t* words, uint32_t count);   // ABI 1.21
   static int coreLinkWrite(uint32_t address, const uint32_t* words, uint32_t count);
   static int coreSockOpen(int udp, const char* host, uint16_t port, uint32_t timeoutMs);
   static int coreSockSend(int sock, const void* data, uint32_t count);
@@ -190,6 +191,17 @@ class ModuleApp : public App {
   static int coreCodeRam(uint32_t bytes, uint32_t* granted);
   static int coreModuleOpenEx(const char* name, uint32_t flags, void* arg1, void* arg2,
                               void** handle, int* entryResult, uint32_t* placed);
+  // ABI 1.20: файлы данных приложения с карты Evo в кэше на флешке (app_data_files.hpp, 0.1.165)
+  static int coreDataOpen(const char* name, void** file, uint32_t* size);
+  static int coreDataRead(void* file, uint32_t offset, void* data, uint32_t count, uint32_t* got);
+  static void coreDataClose(void* file);
+  // MOD_QUERY с флагом 0x04: файл данных приложения app — на флешку (0.1.165); программа Z80 назвала
+  // номер файла (index >= 0) — на учёт, читать у неё по запросу (0.1.166 — без флешки, 0.1.167 — всегда,
+  // флешку для файлов данных не трогать)
+  void handleDataQuery(const char* name, uint32_t size, uint32_t stamp, const char* app, int index);
+  // 0.1.166: кусок файла данных с карты Evo у программы Z80 (AppDataFiles::Fetch) и её ответ kDataPiece
+  static bool remoteFetch(void* context, uint8_t index, uint32_t offset, void* data, uint32_t count);
+  void handleDataPiece(const PacketView& packet);
   static int openModule(const char* name, bool internal, void* arg1, void* arg2, void** handle,
                         int* entryResult, uint32_t* placed);
   // Кусок code_ram приложения: статический — у Application бюджет статической RAM.
@@ -226,10 +238,17 @@ class ModuleApp : public App {
   bool moduleFromDrive(const char* name, uint32_t size, uint32_t stamp);
   // Только что принятый модуль — в /usb/ELF: true — записан, запуск будет с флешки.
   bool storeModuleOnDrive(const char* name, const uint8_t* data, uint32_t size, uint32_t stamp);
+  // Ядро ПЛИС с карты Evo (0.1.164, флаг 2 в MOD_QUERY): годная копия — передачи нет; иначе доставка.
+  void handleCoreQuery(const char* name, uint32_t size, uint32_t stamp);
+  // Принятое ядро: битстрим проверен — флешка /usb/cores или PSRAM, отметка для core_load.
+  // Где оно лежит (для журнала); nullptr — отказ.
+  const char* commitCore();
   void handleStart(const PacketView& packet);
   // Ядра ПЛИС (плагин VDAC4 Cores): список /CORES/ на SD Tang и слой ESP ядра
   void handleCoreList();
   void handleCoreApp(const PacketView& packet);
+  // CORE_APP ядра с карты Evo (0.1.164): ИМЯ.ELF из кэша модулей или с флешки, иначе общий слой
+  void startEvoCoreLayer(const char* name);
   // Приложение из прошивки, без ELF (общий слой ядра): как startApp
   int startBuiltin(const zm_app_t* app, const char* name);
   void replyApp(uint8_t response, int result, const char* fallbackText);
@@ -258,6 +277,8 @@ class ModuleApp : public App {
   uint32_t deliveryStamp_ = 0;
   uint32_t deliveryReceived_ = 0;
   bool deliveryResource_ = false;
+  bool deliveryCore_ = false;      // доставка — ядро ПЛИС с карты Evo (0.1.164)
+  bool deliveryData_ = false;      // доставка — файл данных приложения на флешку (0.1.165)
 
   // Активное приложение.
   void* appElf_ = nullptr;

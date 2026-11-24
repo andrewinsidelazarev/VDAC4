@@ -282,6 +282,23 @@ bool transferFailed(int client, const char* what) {
 }
 
 // Регистры Tang по LINK (tang_link.hpp): сводка, чтение и запись одного слова.
+// Строка счётчика проверенных чтений (0.1.169) в конце сводки «tang». Числа — с запуска ESP, из
+// оперативной памяти (tang::checkedReadStats), во флеш не пишутся. Пример:
+//   tang checked reads 15230, third read 812, outliers 1 (last: 0C = 00000858, kept 00000310)
+// «outliers» — заведомые ошибки: два чтения из трёх совпали, третье нет. У счётчика, который меняется
+// сам, все три чтения обычно разные, и такая ошибка сюда не попадает (link_vote.hpp).
+bool sendCheckedReads(int client) {
+  const tang::CheckedReadStats stats = tang::checkedReadStats();
+  if (stats.outliers == 0) {
+    return sendText(client, "tang checked reads %u, third read %u, outliers 0\n",
+                    static_cast<unsigned>(stats.reads), static_cast<unsigned>(stats.third));
+  }
+  return sendText(client, "tang checked reads %u, third read %u, outliers %u (last: %02X = %08X, kept %08X)\n",
+                  static_cast<unsigned>(stats.reads), static_cast<unsigned>(stats.third),
+                  static_cast<unsigned>(stats.outliers), static_cast<unsigned>(stats.lastAddress),
+                  static_cast<unsigned>(stats.lastRejected), static_cast<unsigned>(stats.lastAccepted));
+}
+
 bool runTang(int client, const char* arguments) {
   if (!tang::ready()) {
     return sendText(client, "tang: LINK is not ready\n");
@@ -480,7 +497,8 @@ bool runTang(int client, const char* arguments) {
                     static_cast<unsigned>(version & 0xFF), static_cast<unsigned>(r[0]),
                     static_cast<unsigned>(r[1]), static_cast<unsigned>(r[2]), static_cast<unsigned>(r[3]),
                     static_cast<unsigned>(r[4]), static_cast<unsigned>(r[5]), static_cast<unsigned>(r[6]),
-                    static_cast<unsigned>(r[7]), static_cast<unsigned>(tang::clockHz() / 1000));
+                    static_cast<unsigned>(r[7]), static_cast<unsigned>(tang::clockHz() / 1000)) &&
+           sendCheckedReads(client);
   }
   if (!tang::read(tang::kRegStatus, r, 8) || !tang::read(tang::kRegCtrl, c, 2)) {
     return transferFailed(client, "tang");
@@ -503,7 +521,8 @@ bool runTang(int client, const char* arguments) {
                   ((c[0] >> 17) & 1) ? ((r[7] >> 18) & 1 ? "on (now)" : "on") : "off",
                   static_cast<unsigned>(c[1]), static_cast<int>(static_cast<int8_t>(c[1] & 0xFF)),
                   static_cast<int>(static_cast<int8_t>((c[1] >> 8) & 0xFF)),
-                  static_cast<unsigned>(tang::clockHz() / 1000));
+                  static_cast<unsigned>(tang::clockHz() / 1000)) &&
+         sendCheckedReads(client);
 }
 
 bool runCommand(int client, const char* command) {

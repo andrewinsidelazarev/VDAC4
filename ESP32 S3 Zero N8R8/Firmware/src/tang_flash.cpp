@@ -6,7 +6,9 @@
 #include <string.h>
 
 #include <LittleFS.h>
+#include <atomic>
 #include <esp_cpu.h>
+#include <esp_memory_utils.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -62,6 +64,13 @@ bool g_haveSeen = false;
 uint32_t g_seen[8] = {};
 // FT SIZE (слово 6 ячейки, [1:0]); в ячейках до 0.1.104 там 0 — 100 %
 uint32_t g_ftSize = 0;
+// Копия ячейки в LittleFS ESP не записана: её просила задача со стеком в PSRAM (0.1.170). LittleFS —
+// во встроенной флеши ESP, а пока флешь пишется, кэш процессора выключен и стек в PSRAM недоступен:
+// ESP-IDF остановила бы прошивку (assert cache_utils.c:126 — так 24.11.2026 упала 0.1.169 на NVS в
+// загрузчике ядер). Такой путь есть: core_store перед сменой ядра зовёт flush() из zm-coreload (стек
+// в PSRAM). Копию тогда допишет poll() задачи LINK (стек во внутренней памяти), а при следующей
+// загрузке TS-Config её и так сверяет begin().
+std::atomic<bool> g_copyPending{false};
 
 uint32_t ftSizeOf(const uint32_t* record) {
   const uint32_t size = record[6] & 3;
@@ -299,6 +308,14 @@ bool currentRecord(uint32_t* record) {
 
 // Копия настроек в LittleFS ESP (ячейка как во flash Tang)
 void rememberRecord(const uint32_t* record) {
+  // Адрес локальной переменной — это адрес стека самой задачи: не во внутренней памяти — флешь ESP
+  // отсюда трогать нельзя, копию допишет poll() (см. g_copyPending).
+  int probe = 0;
+  if (!esp_ptr_internal(&probe)) {
+    g_copyPending = true;
+    return;
+  }
+  g_copyPending = false;
   File file = LittleFS.open(kSettingsFile, "w");
   if (file) {
     file.write(reinterpret_cast<const uint8_t*>(record), 8 * sizeof(uint32_t));
@@ -530,6 +547,11 @@ void begin(uint32_t coreVersion) {
 void poll() {
   if (!g_available) {
     return;
+  }
+  // Копия последней записанной ячейки, отложенная из задачи со стеком в PSRAM (0.1.170): poll зовёт
+  // задача LINK, у неё стек во внутренней памяти.
+  if (g_copyPending.load() && g_haveSaved) {
+    rememberRecord(g_saved);
   }
   uint32_t record[8];
   if (!currentRecord(record)) {

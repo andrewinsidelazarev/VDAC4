@@ -40,12 +40,63 @@
 #include "zifi/tang_sd.hpp"
 #include "zifi/sd2_files.hpp"
 #include "zifi/tang_files.hpp"
+#include "zifi/app_data_files.hpp"
+#include "zifi/usb_drive.hpp"
 
 namespace {
 // Файлы-диски приложения (sd_open): вне ModuleApp, у Application бюджет статической памяти ядра 1.
 constexpr size_t kMaxDiskFiles = 4;
 void* g_diskFiles[kMaxDiskFiles] = {};
 void* g_sd2Files[kMaxDiskFiles] = {};       // sd2_open (видео с SD2)
+// Файлы данных приложений с карты Evo на флешке (0.1.165): доставка — из задачи обмена с Z80,
+// чтение — из задач приложения (у объекта свой замок для дескрипторов). Объект — в PSRAM (0.1.166):
+// в нём таблицы дескрипторов и учёта (~2,8 КБ), а внутренней памяти мало (USB, Wi-Fi, TLS).
+zifi::AppDataFiles& appData() {
+  static zifi::AppDataFiles* files = [] {
+    void* place = heap_caps_malloc(sizeof(zifi::AppDataFiles), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return place != nullptr ? new (place) zifi::AppDataFiles(zifi::UsbDrive::kAppDataRoot)
+                            : new zifi::AppDataFiles(zifi::UsbDrive::kAppDataRoot);
+  }();
+  return *files;
+}
+
+// Файл данных без флешки (0.1.166): куски — у программы Z80, по одному запросу за раз (очередь
+// держит AppDataFiles). Запрос — в задаче приложения, куски принимает задача обмена с Z80.
+struct RemoteReads {
+  SemaphoreHandle_t lock = nullptr;    // мьютекс: request, seq, cancelled
+  SemaphoreHandle_t done = nullptr;    // запрос кончился: все байты пришли или Z80 не прочитала
+  zifi::AppDataRequest request;
+  uint8_t seq = 0;
+  bool cancelled = true;               // до запуска приложения и при выгрузке — запросов нет
+  // для журнала при выгрузке приложения
+  uint32_t bytes = 0;
+  uint32_t ms = 0;
+  uint32_t requests = 0;
+  uint32_t repeats = 0;
+  uint32_t longest = 0;
+};
+RemoteReads g_remote;
+constexpr uint32_t kRemoteAttempts = 3;     // запрос и два повтора
+constexpr uint32_t kRemoteWaitMs = 4000;    // 32 КБ у Z80 — ~0,3 с; 4 с — значит, не дошло
+
+// cancel: приложение выгружается — ждущий кусок запрос кончается сразу, новых нет; false — снова можно
+// (запуск приложения), счёт для журнала — с нуля.
+void remoteCancel(bool cancel) {
+  if (g_remote.lock == nullptr) {
+    return;
+  }
+  xSemaphoreTake(g_remote.lock, portMAX_DELAY);
+  g_remote.cancelled = cancel;
+  if (cancel) {
+    g_remote.request.end();
+  } else {
+    g_remote.bytes = g_remote.ms = g_remote.requests = g_remote.repeats = g_remote.longest = 0;
+  }
+  xSemaphoreGive(g_remote.lock);
+  if (cancel) {
+    xSemaphoreGive(g_remote.done);
+  }
+}
 }  // namespace
 #include "zifi/flash_fs.hpp"
 #include "zifi/http_stream.hpp"
@@ -53,6 +104,9 @@ void* g_sd2Files[kMaxDiskFiles] = {};       // sd2_open (видео с SD2)
 #include "zifi/resource_disk_cache.hpp"
 #include "zifi/z80_transport.hpp"
 #include "zifi/usb_drive.hpp"
+#if ZIFI_HAS_USB_DRIVE
+#include <esp_vfs_fat.h>
+#endif
 
 #include <WiFi.h>
 
@@ -155,6 +209,8 @@ constexpr char kTag[] = "zifi-zm";
 constexpr uint32_t kAllocMagic = 0x5A4D414C;   // "LAMZ"
 constexpr uint32_t kMaxModuleBytes = 2 * 1024 * 1024;
 constexpr uint32_t kMaxResourceBytes = 7 * 1024 * 1024;
+// Ядро ПЛИС с карты Evo (0.1.164): не длиннее слота flash Tang — больше битстрим GW2AR-18 не бывает.
+constexpr uint32_t kMaxCoreBytes = 1024 * 1024;
 // Временные буферы прошивки (Wi-Fi и LwIP, FTP, журнал) ложатся в PSRAM куда
 // придётся: доставке, которой не нашлось места, — подождать, пока уйдут.
 constexpr uint32_t kRoomWaitMs = 2000;
@@ -288,6 +344,10 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.pcm_low_latency = corePcmLowLatency;
   core_.code_ram = coreCodeRam;
   core_.module_open_ex = coreModuleOpenEx;
+  core_.data_open = coreDataOpen;
+  core_.data_read = coreDataRead;
+  core_.data_close = coreDataClose;
+  core_.link_read_checked = coreLinkReadChecked;
 }
 
 void ModuleApp::begin() {
@@ -299,12 +359,24 @@ void ModuleApp::begin() {
     bringupLog(kTag, "module slots not allocated: module_open will refuse");
   }
   appLock_ = xSemaphoreCreateMutex();
+  // Файлы данных без флешки (0.1.166): замок запроса, сигнал «кончился», блок 8 КБ в PSRAM.
+  g_remote.lock = xSemaphoreCreateMutex();
+  g_remote.done = xSemaphoreCreateBinary();
+  uint8_t* remoteBlock = static_cast<uint8_t*>(
+      heap_caps_malloc(AppDataFiles::kRemoteBlock, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (g_remote.lock == nullptr || g_remote.done == nullptr || remoteBlock == nullptr) {
+    bringupLog(kTag, "data files: no memory for reads from the Evo card");
+  } else {
+    appData().setFetch(remoteFetch, this, remoteBlock);
+  }
 #if ZIFI_HAS_SPI_LINK
   coreJobGo_ = xSemaphoreCreateBinary();
   coreJobDone_ = xSemaphoreCreateBinary();
   if (coreJobGo_ == nullptr || coreJobDone_ == nullptr ||
       // стек — в PSRAM: внутренней памяти мало (Wi-Fi, LWIP), а задача не трогает flash ESP
-      // (SD Tang и ящик BL616 — по LINK, журнал — очередью)
+      // (SD Tang и ящик BL616 — по LINK, журнал — очередью). Отметки ядер с карты Evo в NVS она
+      // не пишет сама: 0.1.169 упала на этом (assert cache_utils.c:126) — с 0.1.170 их пишет
+      // core_store::evoFlush() из задачи обмена с Z80.
       xTaskCreatePinnedToCoreWithCaps(coreLoaderTask, "zm-coreload", 8192, this, 2, &coreLoader_, 1,
                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
     coreLoader_ = nullptr;
@@ -353,6 +425,9 @@ bool ModuleApp::handleCommand(const PacketView& packet) {
       return true;
     case kModCommit:
       handleCommit();
+      return true;
+    case kDataPiece:
+      handleDataPiece(packet);
       return true;
     case kAppStart:
       handleStart(packet);
@@ -509,6 +584,162 @@ void ModuleApp::replyQuery(uint8_t state) {
   host_.transport().send(kRespModQuery, reply, sizeof(reply));
 }
 
+// MOD_QUERY с флагом 0x04 (0.1.165): файл данных приложения app с карты Evo — в /SYSTEM/CACHE/<app>/ на
+// флешке. Ответ: 0 — годная копия есть, 1 — шли (WRITING.TMP открыт, куски — сразу на флешку), 2 — нет
+// места, 3 — плохое имя, 4 — флешки нет. 5 (0.1.166) — файл остаётся на карте Evo, и приложение
+// читает его по запросу у программы Z80: она назвала номер файла (index), значит, умеет.
+// С 0.1.167 программа Z80 назвала номер — всегда 5, флешку не трогать, даже если она вставлена
+// (пользователь 24.11.2026: «кэш флешки OTG не используем — ждать полдня на копирование»: pak Quake 2 —
+// десятки мегабайт, копия на флешку шла часами, а читать с карты по запросу можно сразу). Не встал на
+// учёт (плохое имя, таблица полна) — 3. Кэш на флешке остался только для запускателей 0.1.165, что
+// номер файла не шлют.
+void ModuleApp::handleDataQuery(const char* name, uint32_t size, uint32_t stamp, const char* app,
+                                int index) {
+#if ZIFI_HAS_USB_DRIVE
+  const bool drive = usbDrive().ready();
+#else
+  const bool drive = false;
+#endif
+  if (index >= 0) {
+    if (appData().addRemote(app, name, size, stamp, static_cast<uint8_t>(index))) {
+      bringupLog(kTag, "data file %s of %s, %u bytes: read from the Evo card on request "
+                 "(file %d of the Z80 program)%s", name, app, static_cast<unsigned>(size), index,
+                 drive ? ", USB drive not used" : "");
+      replyQuery(AppDataFiles::kRemote);
+      return;
+    }
+    bringupLog(kTag, "data file %s of %s: NOT REGISTERED (bad name or table full)", name, app);
+    replyQuery(AppDataFiles::kBadName);
+    return;
+  }
+  if (!drive) {
+    bringupLog(kTag, "data file %s of %s: no USB drive", name, app);
+    replyQuery(AppDataFiles::kNoDrive);
+    return;
+  }
+#if ZIFI_HAS_USB_DRIVE
+  appData().forgetRemote(app, name);           // флешка есть — файл с неё, а не у Z80
+  uint64_t total = 0, freeBytes = 0;
+  if (esp_vfs_fat_info(UsbDrive::kMountPoint, &total, &freeBytes) != ESP_OK) {
+    freeBytes = 0;
+  }
+  const uint8_t answer = appData().begin(app, name, size, stamp, freeBytes);
+  bringupLog(kTag, "data file %s of %s, %u bytes: %s (%u MB free)", name, app,
+             static_cast<unsigned>(size),
+             answer == AppDataFiles::kHave   ? "fresh copy on the drive"
+             : answer == AppDataFiles::kSend ? "send"
+             : answer == AppDataFiles::kNoRoom ? "NO ROOM"
+                                               : "BAD NAME",
+             static_cast<unsigned>(freeBytes >> 20));
+  if (answer == AppDataFiles::kSend) {
+    deliveryData_ = true;
+    memcpy(deliveryName_, name, sizeof(deliveryName_));
+    deliverySize_ = size;
+    deliveryStamp_ = stamp;
+    deliveryReceived_ = 0;
+  }
+  replyQuery(answer);
+#endif
+}
+
+// ABI 1.20: data_open / data_read / data_close — файлы данных того приложения, что работает
+// (папка — имя его ELF без «.ELF»: Q2.ELF → /SYSTEM/CACHE/Q2).
+int ModuleApp::coreDataOpen(const char* name, void** file, uint32_t* size) {
+  if (file != nullptr) {
+    *file = nullptr;
+  }
+  char app[9] = {};
+  const char* elf = instance_ != nullptr ? instance_->appName_ : "";
+  for (size_t i = 0; i + 1 < sizeof(app) && elf[i] != 0 && elf[i] != '.'; ++i) {
+    app[i] = elf[i];
+  }
+  // Файл на учёте (флешки не было, 0.1.166) — у программы Z80; иначе — копия на флешке (без флешки
+  // её нет: fopen не найдёт).
+  const int result = appData().open(app, name, file, size);
+  if (result != ZM_OK) {
+    bringupLog(kTag, "data_open %s of %s: %s", name != nullptr ? name : "?", app,
+               result == ZM_NOT_FOUND ? "neither on the USB drive nor registered from the Evo card"
+                                      : "no free handle");
+  }
+  return result;
+}
+
+// Кусок файла данных у программы Z80 (0.1.166): событие kEventDataRead, ждать куски kDataPiece. Не
+// дошло за kRemoteWaitMs или Z80 не прочитала — спросить снова с новым номером (запоздавшие куски
+// прежнего номера отсекает AppDataRequest). Выгрузка приложения (remoteCancel) обрывает сразу.
+bool ModuleApp::remoteFetch(void* context, uint8_t index, uint32_t offset, void* data, uint32_t count) {
+  ModuleApp* self = static_cast<ModuleApp*>(context);
+  RemoteReads& r = g_remote;
+  if (self == nullptr || r.lock == nullptr || r.done == nullptr) {
+    return false;
+  }
+  const uint32_t began = coreMillis();
+  for (uint32_t attempt = 0; attempt < kRemoteAttempts; ++attempt) {
+    xSemaphoreTake(r.lock, portMAX_DELAY);
+    if (r.cancelled) {
+      xSemaphoreGive(r.lock);
+      return false;
+    }
+    const uint8_t seq = ++r.seq;
+    r.request.begin(seq, offset, count, static_cast<uint8_t*>(data));
+    xSemaphoreTake(r.done, 0);                // сигнал прежнего запроса — не наш
+    xSemaphoreGive(r.lock);
+    uint8_t event[AppDataRequest::kEventBytes];
+    AppDataRequest::event(event, seq, index, offset, count);
+    if (self->host_.sendEvent(kEventDataRead, event, sizeof(event), 1000)) {
+      xSemaphoreTake(r.done, pdMS_TO_TICKS(kRemoteWaitMs));
+    }
+    xSemaphoreTake(r.lock, portMAX_DELAY);
+    r.request.end();                          // дальше куски этого номера — мимо
+    const bool complete = r.request.complete();
+    const bool failed = r.request.failed();
+    const bool cancelled = r.cancelled;
+    xSemaphoreGive(r.lock);
+    if (complete) {
+      const uint32_t took = coreMillis() - began;
+      r.bytes += count;
+      r.ms += took;
+      ++r.requests;
+      if (took > r.longest) {
+        r.longest = took;
+      }
+      return true;
+    }
+    if (cancelled) {
+      return false;
+    }
+    ++r.repeats;
+    bringupLog(kTag, "data file %u of the Z80 program, %u bytes at %u: %s", index,
+               static_cast<unsigned>(count), static_cast<unsigned>(offset),
+               failed ? "the Z80 could not read it" : "no answer in 4 s");
+  }
+  bringupLog(kTag, "data file %u of the Z80 program: read at %u FAILED", index,
+             static_cast<unsigned>(offset));
+  return false;
+}
+
+// kDataPiece [номер запроса][смещение LE32][данные] (0.1.166): ответа нет.
+void ModuleApp::handleDataPiece(const PacketView& packet) {
+  RemoteReads& r = g_remote;
+  if (r.lock == nullptr) {
+    return;
+  }
+  xSemaphoreTake(r.lock, portMAX_DELAY);
+  const AppDataRequest::Result result = r.request.piece(packet.data, packet.length);
+  xSemaphoreGive(r.lock);
+  if (result == AppDataRequest::kDone || result == AppDataRequest::kFailed) {
+    xSemaphoreGive(r.done);
+  }
+}
+
+int ModuleApp::coreDataRead(void* file, uint32_t offset, void* data, uint32_t count, uint32_t* got) {
+  return appData().read(file, offset, data, count, got);
+}
+
+void ModuleApp::coreDataClose(void* file) {
+  appData().close(file);
+}
+
 // [флаги][длина LE32][время FAT LE32][имя, 0] → [0 есть / 1 шли / 2 нет места / 3 плохое имя][свободно LE32]
 void ModuleApp::handleQuery(const PacketView& packet) {
   dropDelivery();
@@ -534,6 +765,30 @@ void ModuleApp::handleQuery(const PacketView& packet) {
   }
   if (!ZmCache::validName(name) || size == 0) {
     replyQuery(3);
+    return;
+  }
+  // Файл данных приложения с карты Evo (флаг 4, 0.1.165): за именем — имя приложения; файл — на флешку
+  if ((packet.data[0] & 0x04) != 0) {
+    char app[9] = {};
+    const size_t appAt = 9 + nameLength + 1;
+    const size_t appLength = appAt < packet.length
+                                 ? strnlen(reinterpret_cast<const char*>(packet.data + appAt),
+                                           packet.length - appAt)
+                                 : 0;
+    if (appLength == 0 || appLength >= sizeof(app)) {
+      replyQuery(3);
+      return;
+    }
+    memcpy(app, packet.data + appAt, appLength);
+    // 0.1.166: за именем приложения — номер файла у программы Z80 (она умеет читать его по запросу)
+    const size_t indexAt = appAt + appLength + 1;
+    const int index = indexAt < packet.length ? packet.data[indexAt] : -1;
+    handleDataQuery(name, size, stamp, app, index);
+    return;
+  }
+  // Ядро ПЛИС с карты Evo (флаг 2, 0.1.164): ИМЯ.BIN — своим путём, в кэш ESP оно не ложится
+  if ((packet.data[0] & 0x02) != 0) {
+    handleCoreQuery(name, size, stamp);
     return;
   }
   if (resource) {
@@ -650,6 +905,18 @@ uint8_t* ModuleApp::allocateDelivery(const char* name, uint32_t size, bool resou
     return block;
   }
 #endif
+#if ZIFI_HAS_SPI_LINK
+  // Потом — образы ядер с карты Evo (0.1.164): с флешки или из кэша BL616 они грузятся и так,
+  // иначе плагин пришлёт их снова
+  if (const uint32_t releasedCores = core_store::evoReleaseMemory()) {
+    block = static_cast<uint8_t*>(heap_caps_malloc(size, kCaps));
+    if (block != nullptr) {
+      bringupLog(kTag, "room for %s, %u KB: %u KB of Evo card core images released", name,
+                 static_cast<unsigned>(size / 1024), static_cast<unsigned>(releasedCores / 1024));
+      return block;
+    }
+  }
+#endif
   const size_t largest = heap_caps_get_largest_free_block(kCaps);
   const size_t freeBytes = heap_caps_get_free_size(kCaps);
   char stopped[sizeof(appName_)] = {};
@@ -696,6 +963,17 @@ uint8_t* ModuleApp::allocateDelivery(const char* name, uint32_t size, bool resou
 // [смещение LE32][данные] → [1 принято / 0 не то место][принято всего LE32]
 void ModuleApp::handlePut(const PacketView& packet) {
   uint8_t reply[5] = {0};
+  if (deliveryData_) {
+    // Файл данных приложения (0.1.165): кусок сразу на флешку, PSRAM под весь файл не берётся
+    if (packet.length >= 4 &&
+        appData().put(readLe32(packet.data), packet.data + 4, packet.length - 4)) {
+      reply[0] = 1;
+    }
+    deliveryReceived_ = appData().received();
+    writeLe32(reply + 1, deliveryReceived_);
+    host_.transport().send(kRespModPut, reply, sizeof(reply));
+    return;
+  }
   if (delivery_ != nullptr && packet.length >= 4) {
     const uint32_t offset = readLe32(packet.data);
     const uint32_t length = packet.length - 4;
@@ -712,12 +990,28 @@ void ModuleApp::handlePut(const PacketView& packet) {
 // → [1 положен / 0 нет]
 void ModuleApp::handleCommit() {
   uint8_t ok = 0;
+  if (deliveryData_) {
+    // Файл данных приложения (0.1.165): всё ли принято — переименовать в настоящее имя, время с карты
+    const int64_t began = esp_timer_get_time();
+    ok = appData().commit() ? 1 : 0;
+    bringupLog(kTag, "data file %s: %u bytes %s in %u ms", deliveryName_,
+               static_cast<unsigned>(deliverySize_), ok ? "stored on the USB drive" : "REFUSED",
+               static_cast<unsigned>((esp_timer_get_time() - began) / 1000));
+    deliveryData_ = false;
+    dropDelivery();
+    host_.transport().send(kRespModCommit, &ok, 1);
+    return;
+  }
   // Запись модуля в LittleFS (стирание секторов) идёт секунды, и всё это время
   // плагин ждёт ответа: сколько именно — в строке журнала.
   const int64_t started = esp_timer_get_time();
   const char* where = "stored";
   if (delivery_ != nullptr && deliveryReceived_ == deliverySize_) {
-    if (deliveryResource_) {
+    if (deliveryCore_) {
+      // Ядро ПЛИС с карты Evo (0.1.164): проверка битстрима, флешка или PSRAM, отметка для core_load
+      where = commitCore();
+      ok = where != nullptr ? 1 : 0;
+    } else if (deliveryResource_) {
       if (adoptResource(deliveryName_, delivery_, deliverySize_, deliveryStamp_)) {
         delivery_ = nullptr;            // теперь у ресурса
         ok = 1;
@@ -749,7 +1043,8 @@ void ModuleApp::handleCommit() {
         appStale_ = true;
       }
     }
-    bringupLog(kTag, "%s %s: %u bytes %s in %u ms", deliveryResource_ ? "resource" : "module",
+    bringupLog(kTag, "%s %s: %u bytes %s in %u ms",
+               deliveryCore_ ? "core" : deliveryResource_ ? "resource" : "module",
                deliveryName_, static_cast<unsigned>(deliverySize_), ok ? where : "REFUSED",
                static_cast<unsigned>((esp_timer_get_time() - started) / 1000));
     // Принятый ресурс — сразу и на флешку, до ответа: плагин всё это время пишет
@@ -889,7 +1184,108 @@ bool ModuleApp::storeModuleOnDrive(const char* name, const uint8_t* data, uint32
 #endif
 }
 
+// Ядро ПЛИС с карты Evo (0.1.164): [флаги 2][длина][время][ИМЯ.BIN, 0] → 0 есть (образ в PSRAM,
+// годная копия на флешке /usb/cores или тот же файл в кэше BL616 — с карты не передавать) / 1 шли /
+// 2 нет места / 3 не ядро (имя не *.BIN, длина больше слота flash Tang). Принятое ядро — commitCore;
+// грузит его core_load.
+void ModuleApp::handleCoreQuery(const char* name, uint32_t size, uint32_t stamp) {
+#if ZIFI_HAS_SPI_LINK
+  char core[16] = {};
+  const char* dot = strrchr(name, '.');
+  if (dot == nullptr || dot == name || strcmp(dot, ".BIN") != 0 || size > kMaxCoreBytes ||
+      static_cast<size_t>(dot - name) >= sizeof(core)) {
+    replyQuery(3);
+    return;
+  }
+  memcpy(core, name, static_cast<size_t>(dot - name));
+  if (core_store::evoHeld(core, size, stamp)) {
+    bringupLog(kTag, "core %s: %u bytes already in PSRAM, not sent from the card", core,
+               static_cast<unsigned>(size));
+    replyQuery(0);
+    return;
+  }
+#if ZIFI_HAS_USB_DRIVE
+  if (usbDrive().ready() && ResourceDiskCache(UsbDrive::kCoreFolder).fresh(name, size, stamp)) {
+    core_store::evoOffer(core, nullptr, size, stamp);
+    bringupLog(kTag, "core %s: %u bytes on the USB drive, not sent from the card", core,
+               static_cast<unsigned>(size));
+    replyQuery(0);
+    return;
+  }
+#endif
+  // Флешки нет (или копии на ней нет): тот же файл карты уже в кэше BL616 (отметка с SHA, в NVS)
+  if (core_store::evoClaimCached(core, size, stamp)) {
+    bringupLog(kTag, "core %s: %u bytes already in the BL616 cache, not sent from the card", core,
+               static_cast<unsigned>(size));
+    replyQuery(0);
+    return;
+  }
+  delivery_ = allocateDelivery(name, size, false);
+  if (delivery_ == nullptr) {
+    replyQuery(2);
+    return;
+  }
+  memcpy(deliveryName_, name, sizeof(deliveryName_));
+  deliverySize_ = size;
+  deliveryStamp_ = stamp;
+  deliveryReceived_ = 0;
+  deliveryResource_ = false;
+  deliveryCore_ = true;
+  replyQuery(1);
+#else
+  (void)name;
+  (void)size;
+  (void)stamp;
+  replyQuery(3);
+#endif
+}
+
+// Принятое ядро с карты Evo: годный битстрим — на флешку /usb/cores (время — как у файла на карте) и
+// отметка «с карты Evo» для core_load; флешки нет (или не записалось) — сразу в кэш BL616, а не
+// вышло — образ остаётся в PSRAM у core_store. Возвращает, где оно лежит (для журнала); nullptr — отказ.
+const char* ModuleApp::commitCore() {
+#if ZIFI_HAS_SPI_LINK
+  char core[16] = {};
+  memcpy(core, deliveryName_, strcspn(deliveryName_, "."));
+  if (const char* bad = core_store::checkEvoImage(delivery_, deliverySize_)) {
+    bringupLog(kTag, "core %s: not a VDAC4 core bitstream (%s)", core, bad);
+    return nullptr;
+  }
+#if ZIFI_HAS_USB_DRIVE
+  if (usbDrive().ready()) {
+    mkdir(UsbDrive::kCoreFolder, 0777);   // папку /cores могли стереть на ПК: нет — создать
+    const int64_t started = esp_timer_get_time();
+    const bool written = ResourceDiskCache(UsbDrive::kCoreFolder)
+                             .write(deliveryName_, delivery_, deliverySize_, deliveryStamp_);
+    const unsigned ms = static_cast<unsigned>((esp_timer_get_time() - started) / 1000);
+    if (written) {
+      core_store::evoOffer(core, nullptr, deliverySize_, deliveryStamp_);
+      bringupLog(kTag, "core %s: %u bytes written to the USB drive in %u ms", core,
+                 static_cast<unsigned>(deliverySize_), ms);
+      return "stored on the USB drive";
+    }
+    bringupLog(kTag, "core %s: NOT written to the USB drive in %u ms, kept in PSRAM", core, ms);
+  }
+#endif
+  // Флешки нет: ядро сразу в кэш BL616 (его flash — постоянный кэш ядер; пользователь: «должно
+  // работать и при отсутствии флешки»), не вышло — образ в PSRAM, core_load положит его сам
+  const char* problem = core_store::evoStoreToCache(core, delivery_, deliverySize_, deliveryStamp_);
+  delivery_ = nullptr;                    // образ теперь у core_store
+  if (problem != nullptr) {
+    bringupLog(kTag, "core %s: not put into the BL616 cache now (%s), kept in PSRAM", core, problem);
+    return "kept in PSRAM";
+  }
+  return "put into the BL616 cache";
+#else
+  return nullptr;
+#endif
+}
+
 void ModuleApp::dropDelivery() {
+  if (deliveryData_) {
+    appData().drop();                   // недоставленный файл данных: WRITING.TMP — прочь
+    deliveryData_ = false;
+  }
   if (delivery_ != nullptr) {
     heap_caps_free(delivery_);
   }
@@ -897,6 +1293,7 @@ void ModuleApp::dropDelivery() {
   deliverySize_ = 0;
   deliveryReceived_ = 0;
   deliveryName_[0] = 0;
+  deliveryCore_ = false;
 }
 
 // [итог int8][приложение, 0][версия, 0]; не вышло и есть текст — он вместо версии
@@ -924,6 +1321,8 @@ void ModuleApp::replyApp(uint8_t response, int result, const char* fallbackText)
 // → [1][число][записи: имя 16, длина LE32, флаги (0 — есть ИМЯ.ELF)] или [0][текст, 0]
 void ModuleApp::handleCoreList() {
 #if ZIFI_HAS_SPI_LINK
+  // Плагин выбирает ядро из списка карты Tang: заявки ядер с карты Evo снимаются (0.1.164)
+  core_store::evoReleaseClaims();
   static core_store::Entry entries[core_store::kMaxCores];
   static uint8_t reply[2 + core_store::kMaxCores * 21];
   size_t count = 0;
@@ -967,6 +1366,11 @@ void ModuleApp::handleCoreApp(const PacketView& packet) {
   memcpy(raw, packet.data, length);
   if (!core_cache::normalizeName(raw, name)) {
     replyApp(kRespCoreApp, ZM_ERROR, "bad core name");
+    return;
+  }
+  // Ядро прислано с карты Evo (0.1.164) — его слой тоже оттуда, SD Tang не читается
+  if (core_store::evoMarked(name)) {
+    startEvoCoreLayer(name);
     return;
   }
   uint8_t* data = nullptr;
@@ -1026,6 +1430,44 @@ void ModuleApp::handleCoreApp(const PacketView& packet) {
 #else
   (void)packet;
   replyApp(kRespCoreApp, ZM_ERROR, "no LINK to the Tang");
+#endif
+}
+
+// Слой ESP ядра с карты Evo (0.1.164). SD Tang не читается: своё ИМЯ.ELF программа Z80 присылает
+// обычным MOD_QUERY — оно в кэше модулей ESP или на флешке (/usb/ELF); не прислано — общий слой из
+// прошивки (ему плагин, как прежде, шлёт имя ядра командой 0x70). Ядро грузит сам слой (core_load):
+// отметка «с карты Evo» ведёт его к образу на флешке или в PSRAM.
+void ModuleApp::startEvoCoreLayer(const char* name) {
+#if ZIFI_HAS_SPI_LINK
+  char module[13] = {};
+  bool own = false;
+  if (strlen(name) <= 8) {
+    snprintf(module, sizeof(module), "%s.ELF", name);
+    uint32_t driveSize = 0;
+    own = driveModuleSize(module, &driveSize) || (cache_ != nullptr && cache_->find(module) != nullptr);
+  }
+  if (!own) {
+    bringupLog(kTag, "core %s (Evo card): no ESP layer of its own sent, built-in core layer", name);
+    replyApp(kRespCoreApp, startBuiltin(coreBuiltinApp(), "CORE"), nullptr);
+    return;
+  }
+  // Другой слой — прежний уходит со всем, что держал (как у ядра с SD Tang)
+  if (app_ == nullptr || strcmp(appName_, module) != 0 || appStale_) {
+    stopApp();
+    dropDelivery();
+    for (Resource& item : resources_) {
+      if (item.data != nullptr) {
+        heap_caps_free(item.data);
+      }
+      item = Resource{};
+    }
+    player_overlay::releaseMemory();
+  }
+  bringupLog(kTag, "core %s (Evo card): ESP layer %s", name, module);
+  const int result = startApp(module);
+  replyApp(kRespCoreApp, result, result == ZM_NO_MEMORY ? "not enough working RAM to start the core app" : nullptr);
+#else
+  (void)name;
 #endif
 }
 
@@ -1270,6 +1712,7 @@ int ModuleApp::startApp(const char* name) {
   app_ = app;
   strncpy(appName_, name, sizeof(appName_) - 1);
   xSemaphoreGive(appLock_);
+  remoteCancel(false);                     // файлы данных без флешки: запросы к Z80 снова можно
   const int64_t started = esp_timer_get_time();
   result = app->start(&core_);
   if (result != ZM_OK) {
@@ -1302,6 +1745,15 @@ void ModuleApp::stopApp() {
   appStarted_ = false;
   setAppMediaRange(1, 0);                 // порции DMA без суммы — больше ни одной команде
   xSemaphoreGive(appLock_);
+  // Задача приложения может ждать кусок файла данных у программы Z80 (0.1.166): до stop() — оборвать,
+  // иначе stop() ждал бы её до срока запроса.
+  remoteCancel(true);
+  if (g_remote.requests != 0) {
+    bringupLog(kTag, "app %s: data files read from the Evo card: %u KB in %u ms, %u requests "
+               "(%u repeated), longest %u ms", appName_, static_cast<unsigned>(g_remote.bytes / 1024),
+               static_cast<unsigned>(g_remote.ms), static_cast<unsigned>(g_remote.requests),
+               static_cast<unsigned>(g_remote.repeats), static_cast<unsigned>(g_remote.longest));
+  }
 #if ZIFI_HAS_SPI_LINK
   player_overlay::appGone();             // экран приложения — сразу прочь
 #endif
@@ -1334,6 +1786,7 @@ void ModuleApp::stopApp() {
   for (size_t i = 0; i < kMaxSockets; ++i) {
     coreSockClose(static_cast<int>(i));
   }
+  appData().closeAll();                  // файлы данных приложения (data_open, 0.1.165)
   for (size_t i = 0; i < kMaxDiskFiles; ++i) {
     if (g_diskFiles[i] != nullptr) {
       coreSdClose(g_diskFiles[i]);
@@ -1571,6 +2024,40 @@ void* ModuleApp::coreRealloc(void* pointer, size_t size) {
     return nullptr;
   }
   const size_t old = heap_caps_get_allocated_size(header) - sizeof(AllocHeader);
+  // 0.1.166: на меньший размер — на месте. Куча ESP-IDF (TLSF) отрезает хвост блока и оставляет адрес: ни
+  // второго блока на время копии (у блока в 2 МБ это ещё до 2 МБ PSRAM), ни сдвига — приложение вправе держать
+  // указатели внутрь блока (Quake 2: Hunk_End урезает кусок, в который уже разложена модель). Прежде realloc
+  // всегда брал новый блок и копировал — найдено в Unreal NG 24.11.2026 (его модель ESP повторяет прошивку).
+  // Вид памяти — тот, где блок лежит (coreAlloc мог взять другой, если нужного не было): иначе
+  // heap_caps_realloc перенёс бы блок туда, куда просили.
+  if (size <= old) {
+    portENTER_CRITICAL(&instance_->allocLock_);
+    if (header->prev != nullptr) {
+      header->prev->next = header->next;
+    } else {
+      instance_->allocations_ = header->next;
+    }
+    if (header->next != nullptr) {
+      header->next->prev = header->prev;
+    }
+    portEXIT_CRITICAL(&instance_->allocLock_);
+    const uint32_t kind = esp_ptr_external_ram(header) ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+                                                       : (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    AllocHeader* kept =
+        static_cast<AllocHeader*>(heap_caps_realloc(header, size + sizeof(AllocHeader), kind));
+    if (kept == nullptr) {
+      kept = header;                      // не вышло — блок прежний (realloc его не тронул)
+    }
+    kept->prev = nullptr;
+    portENTER_CRITICAL(&instance_->allocLock_);
+    kept->next = static_cast<AllocHeader*>(instance_->allocations_);
+    if (kept->next != nullptr) {
+      kept->next->prev = kept;
+    }
+    instance_->allocations_ = kept;
+    portEXIT_CRITICAL(&instance_->allocLock_);
+    return kept + 1;
+  }
   void* fresh = coreAlloc(size, header->caps);
   if (fresh == nullptr) {
     return nullptr;
@@ -2027,6 +2514,20 @@ int ModuleApp::coreCoreBack(uint32_t timeoutMs) {
 int ModuleApp::coreLinkRead(uint32_t address, uint32_t* words, uint32_t count) {
 #if ZIFI_HAS_SPI_LINK
   return words != nullptr && (address & 3) == 0 && count > 0 && count <= 16 && tang::read(address, words, count)
+             ? ZM_OK
+             : ZM_ERROR;
+#else
+  (void)address; (void)words; (void)count;
+  return ZM_ERROR;
+#endif
+}
+
+// ABI 1.21 (0.1.168): то же, что coreLinkRead, но слова читаются 2–3 раза и сверяются
+// (tang::readChecked, почему так — в link_vote.hpp).
+int ModuleApp::coreLinkReadChecked(uint32_t address, uint32_t* words, uint32_t count) {
+#if ZIFI_HAS_SPI_LINK
+  return words != nullptr && (address & 3) == 0 && count > 0 && count <= 16 &&
+                 tang::readChecked(address, words, count)
              ? ZM_OK
              : ZM_ERROR;
 #else

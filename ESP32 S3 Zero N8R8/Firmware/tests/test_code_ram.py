@@ -36,14 +36,18 @@ class CodeRamTest(unittest.TestCase):
 
     def test_api_documented(self) -> None:
         sdk = text('modules', 'sdk', 'include', 'zm_app.h')
-        self.assertIn('#define ZM_APP_ABI_MINOR 19', sdk)
+        # ABI 1.19 и новее (1.20 — data_open…, 0.1.165): поля code_ram и module_open_ex на месте
+        self.assertRegex(sdk, r'#define ZM_APP_ABI_MINOR (19|[2-9]\d)\b')
         self.assertIn('#define ZM_MODULE_TEXT_INTERNAL 0x01u', sdk)
         self.assertIn('int (*code_ram)(uint32_t bytes, uint32_t* granted);', sdk)
         self.assertIn('int (*module_open_ex)(const char* name, uint32_t flags,', sdk)
-        # новые поля — в конце таблицы ядра: старые приложения видят прежние смещения
+        # новые поля — в конце таблицы ядра: старые приложения видят прежние смещения; за module_open_ex
+        # — только поля следующих версий ABI (с 1.20 — data_open, data_read, data_close)
         core = sdk[sdk.index('struct zm_core {'):]
         core = core[:core.index('\n};')]
-        self.assertTrue(core.rstrip().endswith('int* entry_result, uint32_t* placed);'))
+        tail = core[core.index('int* entry_result, uint32_t* placed);'):]
+        self.assertLess(core.index('int (*code_ram)'), core.index('int (*module_open_ex)'))
+        self.assertNotIn('code_ram', tail)
 
     def test_exec_opened_and_closed(self) -> None:
         app = text('src', 'apps', 'module_app.cpp')

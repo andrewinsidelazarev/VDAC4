@@ -129,6 +129,23 @@ bool read(uint32_t address, uint32_t* words, size_t count, const char* file = __
           int line = __builtin_LINE());
 bool write(uint32_t address, const uint32_t* words, size_t count, const char* file = __builtin_FILE(),
            int line = __builtin_LINE());
+// Проверенное чтение (0.1.168, link_vote.hpp): те же слова читаются два раза подряд под одним
+// замком; не совпали — третий раз, и каждое слово — медиана трёх. Ловит слово, испорченное на
+// проводе или «рваное» внутри ядра (значение сменилось посреди выдачи). Цена — 2–3 обмена, поэтому
+// для регистров состояния, а не для потоков данных. До 16 слов; false — LINK не работает.
+bool readChecked(uint32_t address, uint32_t* words, size_t count, const char* file = __builtin_FILE(),
+                 int line = __builtin_LINE());
+// Счётчик проверенных чтений (0.1.169) — для команды консоли «tang». Числа — с запуска ESP, только
+// в оперативной памяти: во флеш они не пишутся.
+struct CheckedReadStats {
+  uint32_t reads = 0;          // проверенных чтений, дошедших до конца
+  uint32_t third = 0;          // из них понадобилось третье чтение (слово менялось или испортилось)
+  uint32_t outliers = 0;       // из них с выбросом: два чтения совпали, третье — нет (заведомая ошибка)
+  uint32_t lastAddress = 0;    // последний выброс: байтовый адрес слова,
+  uint32_t lastRejected = 0;   //   отброшенное значение
+  uint32_t lastAccepted = 0;   //   и принятое
+};
+CheckedReadStats checkedReadStats();
 // Слова подряд в один регистр (окно FT_DATA): по слову за транзакцию, слов — сколько угодно.
 bool writeRepeat(uint32_t address, const uint32_t* words, size_t count, const char* file = __builtin_FILE(),
                  int line = __builtin_LINE());

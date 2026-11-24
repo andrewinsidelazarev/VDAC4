@@ -34,6 +34,7 @@
 #include "zifi/config.hpp"
 #include "zifi/config_store.hpp"
 #include "zifi/bringup_log.hpp"
+#include "zifi/core_store.hpp"
 #include "zifi/diagnostic_log.hpp"
 #include "zifi/elf_probe.hpp"
 #include "zifi/flash_fs.hpp"
@@ -2015,6 +2016,11 @@ void Application::pollLink() {
   usbDrive().poll();                        // вынутую флешку отмонтировать здесь же, на ядре 1
 #endif
   vdisk_service::poll(millis());            // том USB Flash: дописать файл после записи (0.1.148)
+#if ZIFI_HAS_SPI_LINK
+  // Отметки ядер с карты Evo — в NVS здесь, со стеком loopTask во внутренней памяти (0.1.170):
+  // загрузчик ядер zm-coreload (стек в PSRAM) только ставит флаг, флешь ESP ему трогать нельзя.
+  core_store::evoFlush();
+#endif
   // Сначала обслуживаем запрос ядра 0 к файловой системе. Внутри VfsClient
   // канал остаётся под единственным владельцем ядра 1 до получения ответа Z80.
 #if ZIFI_HAS_SPI_LINK

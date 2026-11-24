@@ -23,6 +23,7 @@
 #include "zifi/diagnostic_log.hpp"
 #include "zifi/ft_rom.hpp"
 #include "zifi/link_spi3.hpp"
+#include "zifi/link_vote.hpp"
 #include "zifi/tang_flash.hpp"
 #include "zifi/tang_menu.hpp"
 #include "zifi/tang_overlay.hpp"
@@ -151,6 +152,16 @@ std::atomic<uint32_t> g_lockReportAt{0};
 // LinkGuard этой задачи LINK не получила: её обмены, пока объект жив, сразу отказывают
 // (иначе каждый ждал бы kLockWaitMs заново)
 thread_local int t_failedGuards = 0;
+
+// Счётчик проверенных чтений (0.1.169, команда консоли «tang»). Только оперативная память: числа
+// растут с запуска ESP и во флеш не пишутся никогда (журнал платы во флеше они не трогают).
+// atomic — потому что пишет задача приложения (под замком LINK), а читает задача консоли (без него).
+std::atomic<uint32_t> g_checkedReads{0};    // проверенных чтений, дошедших до конца
+std::atomic<uint32_t> g_checkedThird{0};    // из них с третьим чтением
+std::atomic<uint32_t> g_checkedOutliers{0}; // из них с выбросом (два чтения совпали, третье нет)
+std::atomic<uint32_t> g_outlierAddress{0};  // последний выброс: байтовый адрес слова
+std::atomic<uint32_t> g_outlierRejected{0}; //   отброшенное значение
+std::atomic<uint32_t> g_outlierAccepted{0}; //   принятое значение
 
 uint32_t nowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
@@ -748,6 +759,46 @@ bool read(uint32_t address, uint32_t* words, size_t count, const char* file, int
 
 bool write(uint32_t address, const uint32_t* words, size_t count, const char* file, int line) {
   return ready() && lockedWrite(address, words, count, file, line);
+}
+
+// Проверенное чтение (0.1.168): почему так и чего оно стоит — в link_vote.hpp.
+bool readChecked(uint32_t address, uint32_t* words, size_t count, const char* file, int line) {
+  if (!ready() || !takeLock(file, line, address)) {
+    return false;
+  }
+  // Все два-три чтения — под одним замком: между ними не вклинится обмен другой задачи, и они
+  // идут вплотную друг к другу. Число слов (1…16) проверяет readVoted до первого чтения.
+  link_vote::Outlier outlier;
+  const link_vote::Outcome outcome = link_vote::readVoted(
+      [&](uint32_t* out) { return link_spi3::transfer(kCmdRead, address, out, count, true, g_dummy); },
+      words, count, &outlier);
+  giveLock();
+  if (outcome == link_vote::Outcome::kFailed) {
+    return false;
+  }
+  // Счётчик — в ОЗУ (см. g_checkedReads): прибавить единицу, во флеш ничего не пишется.
+  ++g_checkedReads;
+  if (outcome == link_vote::Outcome::kMedian) {
+    ++g_checkedThird;
+  }
+  if (outlier.found) {
+    ++g_checkedOutliers;
+    g_outlierAddress = address + static_cast<uint32_t>(outlier.index) * 4U;
+    g_outlierRejected = outlier.rejected;
+    g_outlierAccepted = outlier.accepted;
+  }
+  return true;
+}
+
+CheckedReadStats checkedReadStats() {
+  CheckedReadStats stats;
+  stats.reads = g_checkedReads.load();
+  stats.third = g_checkedThird.load();
+  stats.outliers = g_checkedOutliers.load();
+  stats.lastAddress = g_outlierAddress.load();
+  stats.lastRejected = g_outlierRejected.load();
+  stats.lastAccepted = g_outlierAccepted.load();
+  return stats;
 }
 
 bool writeRepeat(uint32_t address, const uint32_t* words, size_t count, const char* file, int line) {

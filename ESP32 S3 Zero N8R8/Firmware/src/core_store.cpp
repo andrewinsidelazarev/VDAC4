@@ -3,11 +3,14 @@
 #if ZIFI_HAS_SPI_LINK
 
 #include <Arduino.h>
+#include <atomic>
 #include <dirent.h>
 #include <esp_heap_caps.h>
+#include <esp_memory_utils.h>
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <nvs.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -18,6 +21,9 @@
 #include "zifi/tang_flash.hpp"
 #include "zifi/tang_link.hpp"
 #include "zifi/tang_sd.hpp"
+#if ZIFI_HAS_USB_DRIVE
+#include "zifi/usb_drive.hpp"
+#endif
 
 namespace zifi {
 namespace core_store {
@@ -96,6 +102,256 @@ bool fileSha(const char* path, uint32_t* size, uint8_t digest[32]) {
 bool fileRead(void* ctx, uint32_t offset, uint8_t* data, uint32_t size) {
   FILE* f = static_cast<FILE*>(ctx);
   return fseek(f, static_cast<long>(offset), SEEK_SET) == 0 && fread(data, 1, size, f) == size;
+}
+
+// --- ядра с карты Evo (0.1.164) ------------------------------------------------------------------
+// Отметки «ядро с карты Evo» и их образы в PSRAM. Пишет задача сети (MOD_QUERY, MOD_COMMIT), читает
+// загрузчик ядер (load) — под g_evoLock. Образ, который загрузчик взял в работу, из таблицы вынут
+// (data = nullptr): освобождает или возвращает его загрузчик же (evoDone). Таблица — в PSRAM:
+// внутренняя память ESP на счету. Освобождение памяти — вне замка.
+struct EvoCore {
+  char name[16];          // пусто — место свободно
+  uint32_t size;          // длина и время файла на карте Evo
+  uint32_t stamp;
+  uint8_t* data;          // образ в PSRAM; nullptr — он на флешке (или уже только в кэше BL616)
+  bool hasSha;            // ядро уже клали в кэш BL616: sha известен, считать заново не нужно
+  uint8_t sha[32];
+  bool claimed;           // заявлено в этом запуске ESP (MOD_QUERY): load и CORE_APP берут его отсюда
+};
+constexpr size_t kEvoCores = 4;
+constexpr uint32_t kEvoStoreWaitMs = 3000;   // MOD_COMMIT ждёт мост Tang (ящик BL616) не дольше
+std::atomic<EvoCore*> g_evo{nullptr};
+size_t g_evoNext = 0;     // какую отметку вытеснять, когда мест нет
+portMUX_TYPE g_evoLock = portMUX_INITIALIZER_UNLOCKED;
+
+// Отметки с известным SHA — в NVS ESP («zifi-evo»/«cores», до 4 записей по 56 байт): после
+// перезапуска ESP MOD_QUERY по ним узнаёт, что этот файл карты Evo уже в кэше BL616, — и без флешки
+// ядро не идёт с карты заново. Заявок («грузить отсюда») в NVS нет: их даёт только MOD_QUERY.
+constexpr char kEvoNvs[] = "zifi-evo";
+constexpr char kEvoKey[] = "cores";
+// NVS лежит во встроенной флеши ESP. Пока идёт запись или чтение флеши, кэш процессора выключен,
+// и стек задачи, которая обращается к флеши, обязан быть во внутренней памяти: стек в PSRAM в это
+// время недоступен, и ESP-IDF останавливает прошивку (assert esp_task_stack_is_sane_cache_disabled,
+// cache_utils.c:126). Загрузчик ядер zm-coreload нарочно со стеком в PSRAM (внутренней памяти
+// мало) — и 24.11.2026 на 0.1.169 упал так при первой загрузке нового Q2.BIN: syncEvo → evoDone →
+// evoSave → nvs_set_blob. С 0.1.170 evoDone только ставит этот флаг, а записывает отметки
+// evoFlush() — его зовёт задача обмена с Z80 (Arduino loopTask, стек во внутренней памяти).
+std::atomic<bool> g_evoSavePending{false};
+struct EvoSaved {
+  char name[16];
+  uint32_t size;
+  uint32_t stamp;
+  uint8_t sha[32];
+};
+
+void evoLoadSaved(EvoCore* table) {
+  nvs_handle_t handle;
+  if (nvs_open(kEvoNvs, NVS_READONLY, &handle) != ESP_OK) {
+    return;                               // записей ещё не было
+  }
+  EvoSaved saved[kEvoCores] = {};
+  size_t length = sizeof saved;
+  if (nvs_get_blob(handle, kEvoKey, saved, &length) == ESP_OK) {
+    for (size_t i = 0; i < kEvoCores && i < length / sizeof(EvoSaved); ++i) {
+      if (saved[i].name[0] == 0) {
+        continue;
+      }
+      memcpy(table[i].name, saved[i].name, sizeof table[i].name);
+      table[i].name[sizeof table[i].name - 1] = 0;
+      table[i].size = saved[i].size;
+      table[i].stamp = saved[i].stamp;
+      memcpy(table[i].sha, saved[i].sha, sizeof table[i].sha);
+      table[i].hasSha = true;
+    }
+  }
+  nvs_close(handle);
+}
+
+void evoSave() {
+  EvoCore* table = g_evo.load();
+  if (table == nullptr) {
+    return;
+  }
+  EvoSaved saved[kEvoCores] = {};
+  portENTER_CRITICAL(&g_evoLock);
+  for (size_t i = 0; i < kEvoCores; ++i) {
+    if (table[i].name[0] != 0 && table[i].hasSha) {
+      memcpy(saved[i].name, table[i].name, sizeof saved[i].name);
+      saved[i].size = table[i].size;
+      saved[i].stamp = table[i].stamp;
+      memcpy(saved[i].sha, table[i].sha, sizeof saved[i].sha);
+    }
+  }
+  portEXIT_CRITICAL(&g_evoLock);
+  nvs_handle_t handle;
+  if (nvs_open(kEvoNvs, NVS_READWRITE, &handle) != ESP_OK) {
+    bringupLog(kTag, "Evo card cores: NVS not opened, marks not saved");
+    return;
+  }
+  const esp_err_t err = nvs_set_blob(handle, kEvoKey, saved, sizeof saved);
+  if (err != ESP_OK || nvs_commit(handle) != ESP_OK) {
+    bringupLog(kTag, "Evo card cores: marks not saved to NVS (%d)", static_cast<int>(err));
+  }
+  nvs_close(handle);
+}
+
+// Таблицу заводят только evoOffer и evoClaimCached — их зовёт задача обмена с Z80 (MOD_QUERY,
+// MOD_COMMIT), у которой стек во внутренней памяти: поэтому evoLoadSaved здесь может читать NVS.
+// zm-coreload таблицу не заводит (syncEvo и evoFind берут только готовую через g_evo).
+EvoCore* evoTable() {
+  EvoCore* table = g_evo.load();
+  if (table == nullptr) {
+    table = static_cast<EvoCore*>(
+        heap_caps_calloc(kEvoCores, sizeof(EvoCore), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (table != nullptr) {
+      evoLoadSaved(table);                // до публикации: другие задачи видят таблицу уже полной
+    }
+    EvoCore* expected = nullptr;
+    if (table != nullptr && !g_evo.compare_exchange_strong(expected, table)) {
+      heap_caps_free(table);
+      table = expected;
+    }
+  }
+  return table;
+}
+
+// Отметка name (имя уже нормализовано): копия полей в *out; take — образ вынимается из таблицы и
+// теперь у вызвавшего; claimedOnly — только заявленная в этом запуске ESP.
+bool evoFind(const char* name, EvoCore* out, bool take, bool claimedOnly) {
+  EvoCore* table = g_evo.load();
+  if (table == nullptr) {
+    return false;
+  }
+  bool found = false;
+  portENTER_CRITICAL(&g_evoLock);
+  for (size_t i = 0; i < kEvoCores; ++i) {
+    if (table[i].name[0] != 0 && strcmp(table[i].name, name) == 0) {
+      if (claimedOnly && !table[i].claimed) {
+        break;
+      }
+      *out = table[i];
+      if (take) {
+        table[i].data = nullptr;
+      }
+      found = true;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&g_evoLock);
+  return found;
+}
+
+// После попытки загрузки: sha (ядро легло в кэш BL616) и образ назад — пусть полежит до повтора.
+// Отметку за это время могли сменить (пришёл другой файл) — тогда образ освобождается.
+void evoDone(const char* name, const EvoCore& was, const uint8_t* sha, uint8_t* data) {
+  EvoCore* table = g_evo.load();
+  uint8_t* drop = data;
+  bool save = false;
+  portENTER_CRITICAL(&g_evoLock);
+  for (size_t i = 0; table != nullptr && i < kEvoCores; ++i) {
+    EvoCore& e = table[i];
+    if (e.name[0] != 0 && strcmp(e.name, name) == 0 && e.size == was.size && e.stamp == was.stamp) {
+      if (sha != nullptr) {
+        save = !e.hasSha || memcmp(e.sha, sha, sizeof e.sha) != 0;
+        memcpy(e.sha, sha, sizeof e.sha);
+        e.hasSha = true;
+      }
+      if (data != nullptr && e.data == nullptr) {
+        e.data = data;
+        drop = nullptr;
+      }
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&g_evoLock);
+  if (drop != nullptr) {
+    heap_caps_free(drop);
+  }
+  if (save) {
+    // SHA нового файла — в NVS, чтобы пережил перезапуск ESP. Не здесь: evoDone зовут и из
+    // zm-coreload (стек в PSRAM, флешь ей трогать нельзя) — запишет evoFlush (см. g_evoSavePending).
+    g_evoSavePending = true;
+  }
+}
+
+struct MemImage {
+  const uint8_t* data;
+  uint32_t size;
+};
+
+bool memRead(void* ctx, uint32_t offset, uint8_t* out, uint32_t size) {
+  const MemImage* image = static_cast<const MemImage*>(ctx);
+  if (offset > image->size || size > image->size - offset) {
+    return false;
+  }
+  memcpy(out, image->data + offset, size);
+  return true;
+}
+
+const char* const kNotEvo = "not a core from the Evo card";
+
+// Ядро с карты Evo — в кэш BL616, если его там нет: образ из PSRAM или копия с флешки. kNotEvo —
+// отметки нет (ядро не с карты Evo: как прежде, с SD Tang).
+const char* syncEvo(const char* name, Progress progress, void* ctx) {
+  EvoCore mark;
+  if (!evoFind(name, &mark, true, true)) {
+    return kNotEvo;
+  }
+  char path[64];
+  bool usb = false;
+#if ZIFI_HAS_USB_DRIVE
+  snprintf(path, sizeof path, "%s/%s.BIN", UsbDrive::kCoreFolder, name);
+  usb = mark.data == nullptr && usbDrive().ready();
+#else
+  path[0] = 0;
+#endif
+  uint8_t digest[32];
+  bool haveSha = mark.hasSha;
+  const char* problem = nullptr;
+  if (haveSha) {
+    memcpy(digest, mark.sha, sizeof digest);
+  } else if (mark.data != nullptr) {
+    Sha256 sha;
+    haveSha = sha.begin() && sha.update(mark.data, mark.size) && sha.finish(digest);
+  } else if (usb) {
+    uint32_t size = 0;
+    haveSha = fileSha(path, &size, digest) && size == mark.size;
+  }
+  if (!haveSha) {
+    problem = mark.data != nullptr ? "SHA-256 of the Evo card core failed"
+                                   : "the Evo card core is neither in PSRAM nor on the USB drive: send it again";
+  }
+  if (problem == nullptr) {
+    ProgressCtx pc = {progress, ctx};
+    const bl616::PushIo io = {&pc, linkRead, linkWrite, sleepMs, nowMs, pushProgress};
+    core_cache::Client cache(io, esp_random());
+    core_cache::Found found = core_cache::Found::kNone;
+    problem = cache.find(name, digest, &found);
+    if (problem == nullptr && found != core_cache::Found::kFound) {
+      const uint32_t start = static_cast<uint32_t>(millis());
+      const char* from = "PSRAM";
+      if (mark.data != nullptr) {
+        MemImage image = {mark.data, mark.size};
+        problem = cache.put(name, mark.size, digest, core_cache::ImageReader{&image, memRead});
+      } else if (FILE* f = usb ? fopen(path, "rb") : nullptr) {
+        from = "the USB drive";
+        problem = cache.put(name, mark.size, digest, core_cache::ImageReader{f, fileRead});
+        fclose(f);
+      } else {
+        problem = "the Evo card core left the BL616 cache and has no copy here: send it again";
+      }
+      bringupLog(kTag, "core %s (%u bytes, Evo card, from %s) to the BL616 cache: %s, %u ms", name,
+                 static_cast<unsigned>(mark.size), from, problem ? problem : "OK",
+                 static_cast<unsigned>(millis() - start));
+    }
+  }
+  // Ядро в кэше BL616 — образ в PSRAM больше не нужен; не вышло — пусть полежит до повтора
+  if (problem == nullptr && mark.data != nullptr) {
+    heap_caps_free(mark.data);
+    mark.data = nullptr;
+  }
+  evoDone(name, mark, problem == nullptr ? digest : nullptr, mark.data);
+  return problem;
 }
 
 // Новое ядро на LINK после LOAD или BOOT (seq — номер команды): удача — личность 3+, а если want не 0 —
@@ -301,6 +557,11 @@ const char* load(const char* name, uint32_t* version, Progress progress, void* c
       break;
     }
   }
+  // ядро с карты Evo (MOD_QUERY с флагом 2, 0.1.164) — из PSRAM или с флешки, не с SD Tang
+  const char* evo = syncEvo(n, progress, ctx);
+  if (evo != kNotEvo) {
+    return evo != nullptr ? evo : loadCached(n, version);
+  }
   // ядро есть на SD — сначала свежий образ в кэш; SD нет (мост пропал, карты нет) — что в кэше
   if (tang_sd::mount() == nullptr) {
     const char* problem = sync(n, progress, ctx);
@@ -331,6 +592,218 @@ const char* loadCached(const char* name, uint32_t* version) {
     return problem;
   }
   return waitCore(n, cache.lastSeq(), reloads, 0, version);
+}
+
+const char* checkEvoImage(const uint8_t* data, uint32_t size) {
+  if (data == nullptr || size < 128 + 64) {
+    return "too short for a core bitstream";
+  }
+  if (size > tang::kSlotBytes) {
+    return "longer than a Tang flash slot (1 MB)";
+  }
+  uint32_t usercode = 0;
+  return core_cache::checkImage(data, 128, data + size - 64, 64, &usercode);
+}
+
+void evoOffer(const char* name, uint8_t* data, uint32_t size, uint32_t stamp) {
+  char n[16];
+  EvoCore* table = core_cache::normalizeName(name, n) ? evoTable() : nullptr;
+  if (table == nullptr) {
+    if (data != nullptr) {
+      heap_caps_free(data);
+    }
+    return;
+  }
+  uint8_t* drop = nullptr;
+  uint8_t* dropOld = nullptr;
+  portENTER_CRITICAL(&g_evoLock);
+  EvoCore* slot = nullptr;
+  EvoCore* empty = nullptr;
+  for (size_t i = 0; i < kEvoCores; ++i) {
+    if (table[i].name[0] != 0 && strcmp(table[i].name, n) == 0) {
+      slot = &table[i];
+    } else if (table[i].name[0] == 0 && empty == nullptr) {
+      empty = &table[i];
+    }
+  }
+  if (slot == nullptr) {
+    slot = empty;
+    if (slot == nullptr) {
+      slot = &table[g_evoNext];
+      g_evoNext = (g_evoNext + 1) % kEvoCores;
+    }
+    drop = slot->data;
+    *slot = EvoCore{};
+    memcpy(slot->name, n, sizeof slot->name);
+  } else if (slot->size != size || slot->stamp != stamp) {
+    drop = slot->data;                // другой файл: прежние образ и sha не годятся
+    slot->data = nullptr;
+    slot->hasSha = false;
+  }
+  slot->size = size;
+  slot->stamp = stamp;
+  slot->claimed = true;                 // программа Z80 прислала или подтвердила его сейчас
+  if (data != nullptr) {
+    dropOld = slot->data;
+    slot->data = data;
+  }
+  portEXIT_CRITICAL(&g_evoLock);
+  if (drop != nullptr) {
+    heap_caps_free(drop);
+  }
+  if (dropOld != nullptr && dropOld != drop) {
+    heap_caps_free(dropOld);
+  }
+}
+
+bool evoMarked(const char* name) {
+  char n[16];
+  EvoCore mark;
+  return core_cache::normalizeName(name, n) && evoFind(n, &mark, false, true);
+}
+
+bool evoHeld(const char* name, uint32_t size, uint32_t stamp) {
+  char n[16];
+  EvoCore mark;
+  return core_cache::normalizeName(name, n) && evoFind(n, &mark, false, true) && mark.data != nullptr &&
+         mark.size == size && mark.stamp == stamp;
+}
+
+bool evoClaimCached(const char* name, uint32_t size, uint32_t stamp) {
+  char n[16];
+  EvoCore mark;
+  if (!core_cache::normalizeName(name, n) || evoTable() == nullptr || !evoFind(n, &mark, false, false) ||
+      !mark.hasSha || mark.size != size || mark.stamp != stamp) {
+    return false;                         // этот файл карты в кэш BL616 ещё не клали
+  }
+  tang_sd::Session session(tang_sd::kQuickMs);
+  if (!session.ok()) {
+    return false;
+  }
+  const bl616::PushIo io = {nullptr, linkRead, linkWrite, sleepMs, nowMs, nullptr};
+  core_cache::Client cache(io, esp_random());
+  core_cache::Found found = core_cache::Found::kNone;
+  if (cache.find(n, mark.sha, &found) != nullptr || found != core_cache::Found::kFound) {
+    return false;                         // кэш BL616 его уже вытеснил (или BL616 не ответил)
+  }
+  EvoCore* table = g_evo.load();
+  bool claimed = false;
+  portENTER_CRITICAL(&g_evoLock);
+  for (size_t i = 0; i < kEvoCores; ++i) {
+    EvoCore& e = table[i];
+    if (e.name[0] != 0 && strcmp(e.name, n) == 0 && e.size == size && e.stamp == stamp && e.hasSha) {
+      e.claimed = true;
+      claimed = true;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&g_evoLock);
+  return claimed;
+}
+
+const char* evoStoreToCache(const char* name, uint8_t* data, uint32_t size, uint32_t stamp) {
+  char n[16];
+  if (!core_cache::normalizeName(name, n)) {
+    heap_caps_free(data);
+    return "bad core name";
+  }
+  uint8_t digest[32];
+  Sha256 sha;
+  const char* problem = sha.begin() && sha.update(data, size) && sha.finish(digest) ? nullptr : "SHA-256 failed";
+  if (problem == nullptr) {
+    tang_sd::Session session(kEvoStoreWaitMs);
+    if (!session.ok()) {
+      problem = tang_sd::kBusy;
+    } else {
+      const bl616::PushIo io = {nullptr, linkRead, linkWrite, sleepMs, nowMs, nullptr};
+      core_cache::Client cache(io, esp_random());
+      core_cache::Found found = core_cache::Found::kNone;
+      problem = cache.find(n, digest, &found);
+      if (problem == nullptr && found != core_cache::Found::kFound) {
+        const uint32_t start = static_cast<uint32_t>(millis());
+        MemImage image = {data, size};
+        problem = cache.put(n, size, digest, core_cache::ImageReader{&image, memRead});
+        bringupLog(kTag, "core %s (%u bytes, Evo card, no USB drive) to the BL616 cache: %s, %u ms", n,
+                   static_cast<unsigned>(size), problem ? problem : "OK",
+                   static_cast<unsigned>(millis() - start));
+      }
+    }
+  }
+  if (problem != nullptr) {
+    evoOffer(n, data, size, stamp);       // образ — в PSRAM: core_load положит его в кэш сам
+    return problem;
+  }
+  heap_caps_free(data);
+  evoOffer(n, nullptr, size, stamp);
+  EvoCore was = {};
+  was.size = size;
+  was.stamp = stamp;
+  evoDone(n, was, digest, nullptr);       // SHA — в отметку и в NVS
+  return nullptr;
+}
+
+void evoReleaseClaims() {
+  EvoCore* table = g_evo.load();
+  if (table == nullptr) {
+    return;
+  }
+  uint8_t* drop[kEvoCores] = {};
+  portENTER_CRITICAL(&g_evoLock);
+  for (size_t i = 0; i < kEvoCores; ++i) {
+    table[i].claimed = false;
+    drop[i] = table[i].data;
+    table[i].data = nullptr;
+  }
+  portEXIT_CRITICAL(&g_evoLock);
+  for (uint8_t* data : drop) {
+    if (data != nullptr) {
+      heap_caps_free(data);
+    }
+  }
+}
+
+uint32_t evoReleaseMemory() {
+  EvoCore* table = g_evo.load();
+  if (table == nullptr) {
+    return 0;
+  }
+  uint8_t* drop[kEvoCores] = {};
+  uint32_t bytes = 0;
+  portENTER_CRITICAL(&g_evoLock);
+  for (size_t i = 0; i < kEvoCores; ++i) {
+    if (table[i].data != nullptr) {
+      drop[i] = table[i].data;
+      bytes += table[i].size;
+      table[i].data = nullptr;
+    }
+  }
+  portEXIT_CRITICAL(&g_evoLock);
+  for (uint8_t* data : drop) {
+    if (data != nullptr) {
+      heap_caps_free(data);
+    }
+  }
+  return bytes;
+}
+
+// Отложенная запись отметок в NVS (0.1.170, почему — у g_evoSavePending). Зовёт Application::pollLink
+// (задача обмена с Z80, Arduino loopTask: стек во внутренней памяти) на каждом проходе: флага нет —
+// сразу выход, так что ничего не стоит.
+void evoFlush() {
+  if (!g_evoSavePending.load()) {
+    return;
+  }
+  // Страховка: адрес локальной переменной — это адрес стека самой задачи. Он не во внутренней
+  // памяти (кто-то позвал evoFlush из задачи со стеком в PSRAM) — не писать, флаг оставить: запишет
+  // следующий вызов из правильной задачи. Иначе ESP-IDF остановила бы прошивку, как 24.11.2026.
+  int probe = 0;
+  if (!esp_ptr_internal(&probe)) {
+    return;
+  }
+  // Флаг снимается до записи: если за время записи придёт новый SHA, флаг встанет снова, и следующий
+  // проход запишет и его.
+  g_evoSavePending = false;
+  evoSave();
 }
 
 const char* const kNoElf = "the core has no ESP layer (ELF) on the Tang SD";

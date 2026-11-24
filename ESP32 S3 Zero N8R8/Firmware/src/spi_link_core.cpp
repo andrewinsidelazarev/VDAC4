@@ -189,9 +189,15 @@ bool SpiLinkCore::handleRequest(const uint8_t* request, uint8_t* response,
                      length >= 3 && length <= 3 + kAppMediaPrefixMax;
     // окно чтения SMB (0.1.131): своё управление — kVfsReadMediaPrefix байт перед данными
     const bool vfs = command == kVfsReadMedia && length == 3 + kVfsReadMediaPrefix;
-    const bool valid = resource || app || vfs || (command == kAudioData && length == 3);
+    // кусок файла данных приложения с карты Evo (0.1.166): [номер запроса][смещение] перед данными
+    const bool piece = command == kDataPiece && length == 3 + kDataPiecePrefix;
+    const bool valid = resource || app || vfs || piece || (command == kAudioData && length == 3);
     const size_t size = valid ? readLe16(request + kHeaderSize + 1) : 0;
-    const size_t prefix = resource ? 4 : app ? length - 3 : vfs ? kVfsReadMediaPrefix : 0;
+    const size_t prefix = resource ? 4
+                          : app    ? length - 3
+                          : vfs    ? kVfsReadMediaPrefix
+                          : piece  ? kDataPiecePrefix
+                                   : 0;
     if (put.available && size != 0 && size <= kMediaMax &&
         ((size + 511u) & ~size_t(511u)) <= put.capacity &&
         fromZ80_.freeSpace() >= size + prefix + 4) {

@@ -849,6 +849,7 @@ constexpr uint32_t kMaxResourceBytes = 7 * 1024 * 1024;
 uint8_t* delivery = nullptr;                             // в PSRAM, как на ESP
 bool deliveryOpen = false;
 bool deliveryResource = false;
+bool deliveryCore = false;        // ядро ПЛИС с карты Evo (0.1.164)
 char deliveryName[13] = {};
 uint32_t deliverySize = 0;
 uint32_t deliveryStamp = 0;
@@ -998,6 +999,7 @@ void dropDelivery() {
   delivery = nullptr;
   deliveryOpen = false;
   deliveryResource = false;
+  deliveryCore = false;
   deliverySize = deliveryReceived = 0;
   deliveryName[0] = 0;
 }
@@ -1122,6 +1124,64 @@ void copyResourceToDrive(const char* name) {
   }
 }
 
+// Ядра ПЛИС с карты Evo (как прошивка 0.1.164): «флешка» — <VDAC4_USB>\cores. Пусто — флешки нет.
+std::string usbCoreDir() {
+  if (!usbReady()) {
+    return std::string();
+  }
+  const std::string dir = std::string(getenv("VDAC4_USB")) + "\\cores";
+  CreateDirectoryA(dir.c_str(), nullptr);
+  return dir;
+}
+
+// [флаги 2][длина][время][ИМЯ.BIN] → 0 копия на «флешке» годна / 1 шли / 2 нет места / 3 не ядро
+void handleCoreQuery(const char* name, uint32_t size, uint32_t stamp) {
+  const char* dot = strrchr(name, '.');
+  if (dot == nullptr || dot == name || strcmp(dot, ".BIN") != 0 || size > 1024u * 1024u) {
+    replyQuery(3);
+    return;
+  }
+  const std::string cores = usbCoreDir();
+  if (!cores.empty() && zifi::ResourceDiskCache(cores.c_str()).fresh(name, size, stamp)) {
+    hostLog("zifi-zm", "core %s: %u bytes on the USB drive, not sent from the card", name,
+            static_cast<unsigned>(size));
+    replyQuery(0);
+    return;
+  }
+  delivery = allocateDelivery(name, size, false);
+  if (delivery == nullptr) {
+    replyQuery(2);
+    return;
+  }
+  deliveryOpen = true;
+  deliveryResource = false;
+  deliveryCore = true;
+  memcpy(deliveryName, name, sizeof(deliveryName));
+  deliverySize = size;
+  deliveryStamp = stamp;
+  deliveryReceived = 0;
+  replyQuery(1);
+}
+
+// Принятое ядро: начало битстрима Gowin (синхрослово A5C3 в первых 128 байтах) — на «флешку».
+// Без флешки прошивка держит образ в PSRAM; модель только пишет об этом в журнал.
+const char* commitCore() {
+  bool sync = false;
+  for (uint32_t i = 0; i + 1 < deliverySize && i < 128; ++i) {
+    sync = sync || (delivery[i] == 0xA5 && delivery[i + 1] == 0xC3);
+  }
+  if (!sync || deliverySize < 192) {
+    hostLog("zifi-zm", "core %s: not a core bitstream", deliveryName);
+    return nullptr;
+  }
+  const std::string cores = usbCoreDir();
+  if (!cores.empty() &&
+      zifi::ResourceDiskCache(cores.c_str()).write(deliveryName, delivery, deliverySize, deliveryStamp)) {
+    return "stored on the USB drive";
+  }
+  return "kept in PSRAM";
+}
+
 void handleQuery(const PacketView& packet) {
   dropDelivery();
   if (packet.length < 10) {
@@ -1146,6 +1206,10 @@ void handleQuery(const PacketView& packet) {
   }
   if (!ZmCache::validName(name) || size == 0) {
     replyQuery(3);
+    return;
+  }
+  if ((packet.data[0] & 0x02) != 0) {
+    handleCoreQuery(name, size, stamp);
     return;
   }
   if (resource) {
@@ -1214,8 +1278,12 @@ void handlePut(const PacketView& packet) {
 void handleCommit() {
   uint8_t ok = 0;
   const Clock::time_point started = Clock::now();
+  const char* where = "stored";
   if (deliveryOpen && deliveryReceived == deliverySize) {
-    if (deliveryResource) {
+    if (deliveryCore) {
+      where = commitCore();
+      ok = where != nullptr ? 1 : 0;
+    } else if (deliveryResource) {
       if (adoptResource(deliveryName, delivery, deliverySize, deliveryStamp)) {
         delivery = nullptr;              // теперь у ресурса
         ok = 1;
@@ -1232,8 +1300,9 @@ void handleCommit() {
         std::this_thread::sleep_for(std::chrono::milliseconds(commitDelayMs));
       }
     }
-    hostLog("zifi-zm", "%s %s: %u bytes %s in %u ms", deliveryResource ? "resource" : "module",
-            deliveryName, static_cast<unsigned>(deliverySize), ok ? "stored" : "REFUSED",
+    hostLog("zifi-zm", "%s %s: %u bytes %s in %u ms",
+            deliveryCore ? "core" : deliveryResource ? "resource" : "module",
+            deliveryName, static_cast<unsigned>(deliverySize), ok ? where : "REFUSED",
             static_cast<unsigned>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                       Clock::now() - started)
                                       .count()));

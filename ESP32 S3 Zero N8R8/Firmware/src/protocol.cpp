@@ -48,6 +48,7 @@ bool FrameParser::feed(uint8_t byte, uint32_t nowMs, PacketView& packet) {
 
     case kCommand:
       if (rawMedia_ && byte != kAudioData && byte != kModPut && byte != kVfsReadMedia &&
+          byte != kDataPiece &&
           !appMediaCommand(byte)) {
         ++resyncCount_;
         reset();
@@ -69,7 +70,9 @@ bool FrameParser::feed(uint8_t byte, uint32_t nowMs, PacketView& packet) {
       checksum_ ^= byte;
       position_ = 0;
       if (length_ > (rawMedia_ ? kMaxMediaPayload : kMaxPayload) ||
-          (rawMedia_ && (length_ <= (command_ == kModPut ? 4 : 0) ||
+          (rawMedia_ && (length_ <= (command_ == kModPut       ? 4
+                                     : command_ == kDataPiece ? kDataPiecePrefix
+                                                              : 0) ||
                          (command_ == kAudioData && length_ > 8192)))) {
         // Большая длина означает потерю синхронизации либо несовместимую
         // версию протокола. Не пытаемся пропустить указанное число байтов:
