@@ -17,6 +17,11 @@
 #include <freertos/task.h>
 
 #include "esp_private/msc_scsi_bot.h"
+#include "ff.h"                 // ff_mutex_take / ff_mutex_give: замок тома FatFs
+// Устройство драйвера (поле xfer — буфер передачи) и номер его диска FatFs: заголовки
+// private_include компонента usb_host_msc (путь — main/CMakeLists.txt, 0.1.174).
+#include "msc_common.h"
+#include "diskio_usb.h"
 #include "usb/msc_host.h"
 #include "usb/msc_host_vfs.h"
 #include "usb/usb_host.h"
@@ -77,6 +82,8 @@ SemaphoreHandle_t g_signal = nullptr;   // будит задачу usb-drive
 // и ядро 1 (закрытие вынутой готовой) — никогда одновременно: по g_state.
 msc_host_device_handle_t g_device = nullptr;
 msc_host_vfs_handle_t g_vfs = nullptr;
+// Длина буфера передачи драйвера (g_device->xfer), байтов; 0 — флешки нет (0.1.174).
+std::atomic<uint32_t> g_transferBytes{0};
 
 uint32_t uptimeMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
@@ -233,6 +240,7 @@ bool growTransferBuffer(msc_host_device_handle_t device, uint32_t sectorSize) {
 }
 
 void closeDrive() {
+  g_transferBytes.store(0);
   if (g_vfs != nullptr) {
     msc_host_vfs_unregister(g_vfs);
     g_vfs = nullptr;
@@ -272,6 +280,7 @@ uint8_t openDrive(uint8_t address) {
                info.idProduct);
     return kUnusable;
   }
+  g_transferBytes.store(static_cast<uint32_t>(device->xfer->data_buffer_size));
   esp_vfs_fat_mount_config_t mount = {};
   mount.format_if_mount_failed = false;   // чужую флешку не трогаем
   mount.max_files = 4;
@@ -451,6 +460,54 @@ bool UsbDrive::ready() {
 bool UsbDrive::isReady() const { return g_state.load() == kReady; }
 
 uint32_t UsbDrive::generation() const { return g_generation.load(); }
+
+uint32_t UsbDrive::transferBytes() const {
+  return g_state.load() == kReady ? g_transferBytes.load() : 0;
+}
+
+uint32_t UsbDrive::setTransferBytes(uint32_t bytes) {
+  if (g_state.load() != kReady || g_device == nullptr) {
+    return 0;
+  }
+  if (bytes < kTransferBytes) {
+    bytes = kTransferBytes;                // меньше — передачи кэшей заставили бы драйвер расти
+  }
+  msc_device_t* device = g_device;
+  // Диск FatFs флешки = её том (VolToPart: том N — диск N). Под его замком идут все передачи
+  // после монтирования (FatFs через /usb и через букву шары).
+  const BYTE pdrv = ff_diskio_get_pdrv_disk(&device->disk);
+  if (pdrv >= FF_VOLUMES) {
+    return g_transferBytes.load();
+  }
+  if (!ff_mutex_take(pdrv)) {
+    bringupLog(kTag, "transfer buffer stays %u bytes: the volume is busy",
+               static_cast<unsigned>(g_transferBytes.load()));
+    return g_transferBytes.load();
+  }
+  const uint32_t have = static_cast<uint32_t>(device->xfer->data_buffer_size);
+  uint32_t now = have;
+  if (have != bytes) {
+    usb_transfer_t* fresh = nullptr;
+    if (usb_host_transfer_alloc(bytes, 0, &fresh) == ESP_OK) {
+      // Поля передачи драйвер заполняет перед каждой (msc_bulk_transfer, msc_control_transfer):
+      // новому объекту ничего переносить не нужно.
+      usb_transfer_t* old = device->xfer;
+      device->xfer = fresh;
+      usb_host_transfer_free(old);
+      now = static_cast<uint32_t>(fresh->data_buffer_size);
+      bringupLog(kTag, "transfer buffer %u -> %u bytes; internal %u free, %u largest",
+                 static_cast<unsigned>(have), static_cast<unsigned>(now),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+    } else {
+      bringupLog(kTag, "transfer buffer stays %u bytes: no %u bytes of DMA memory",
+                 static_cast<unsigned>(have), static_cast<unsigned>(bytes));
+    }
+  }
+  g_transferBytes.store(now);
+  ff_mutex_give(pdrv);
+  return now;
+}
 
 const char* UsbDrive::status() const {
   switch (g_state.load()) {

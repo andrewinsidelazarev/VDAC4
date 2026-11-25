@@ -18,6 +18,12 @@ class FatVolumePort {
   virtual void release() = 0;
   // Буква диска FatFs вместе с двоеточием ("0:"); действует между acquire и release.
   virtual const char* drive() const = 0;
+  // Самый большой кусок одного f_read/f_write сейчас, байтов (кратно 512). FatFs отдаёт устройству
+  // целые сектора прямо из буфера вызывающего, так что этим куском ограничена и одна передача
+  // устройству. Спрашивается на каждую операцию, после acquire. Карта Tang — всегда 16 КиБ (серии
+  // CMD25 до 32 блоков). Флешка USB — длина буфера её драйвера (usb_share.cpp, 0.1.174).
+  static constexpr size_t kDefaultTransfer = 16384;
+  virtual size_t maxTransfer() const { return kDefaultTransfer; }
 };
 
 // Источник моста VFS — том FatFs самой ESP: microSD Tang (шара SMB «TANG», без Z80), а с 0.1.171 и
@@ -31,7 +37,8 @@ class TangVfs : public VfsBackend {
   static constexpr uint32_t kSerial = 0x54414E47;   // «TANG»: у FatFs нет серийного номера тома
   static constexpr uint32_t kUsbSerial = 0x55534220; // «USB »: шара флешки (0.1.171)
   // 16 КиБ (0.1.137, было 4): FatFs отдаёт карте серии CMD25 до 32 блоков; буфер — в PSRAM.
-  static constexpr size_t kBufferSize = 16384;
+  // Кусок одной операции — меньшее из kBufferSize и port.maxTransfer() на эту операцию.
+  static constexpr size_t kBufferSize = FatVolumePort::kDefaultTransfer;
 
   // serial и label — серийный номер и метка тома в ответах SMB о томе (Windows различает тома
   // по серийному номеру); label — строка, живущая всё время работы.
@@ -90,7 +97,7 @@ class TangVfs : public VfsBackend {
   uint32_t serial_;
   const char* label_;
   State* state_;
-  uint8_t* buffer_;
+  uint8_t* buffer_;               // kBufferSize байтов, в PSRAM
   uint8_t openMode_;
   uint8_t lastStatus_;
   char lastError_[64];

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <esp_timer.h>
 #include <esp_vfs_fat.h>
 
 #include "ff.h"
@@ -30,6 +31,9 @@ constexpr const char* kNoLetter = "FatFs drive of the USB drive not found";
 // Сколько ждать карту Tang, если её держит другая операция (поиск буквы — раз на монтирование).
 constexpr uint32_t kTangWaitMs = 2000;
 #endif
+// Не хватило внутренней памяти на буфер передачи 16 КиБ — следующая попытка не раньше чем через
+// столько (0.1.174): шара пока работает кусками по нынешнему буферу, журнал не засоряется.
+constexpr uint32_t kGrowRetryMs = 10000;
 
 // Номер монтирования, на котором букву найти не удалось (0 — такого не было): шара до следующего
 // монтирования прячется. atomic: пишет ядро 1 (мост VFS), читает проба из задачи SMB.
@@ -46,12 +50,23 @@ class UsbVolume : public FatVolumePort {
     if (vdisk_service::usbHeldByWc()) {
       return kHeldByWc;
     }
-    return findLetter();
+    const char* problem = findLetter();
+    if (problem == nullptr) {
+      growTransfer();
+    }
+    return problem;
   }
 
   void release() override {}
 
   const char* drive() const override { return letter_; }
+
+  // Передача флешке — не больше буфера драйвера (0.1.174): длиннее — драйвер стал бы растить его сам
+  // (освободить, потом выделить; не вышло — остался бы с освобождённым буфером). На 0.1.171–0.1.172
+  // шара передавала по 16 КиБ, драйвер вырос сам и держал 15 872 байта до вынимания флешки — они
+  // легли в резерв code_ram, и Metal Slug получил отказ. Теперь буфер растит growTransfer, а перед
+  // стартом приложения прошивка возвращает его к UsbDrive::kTransferBytes (ModuleApp::startApp).
+  size_t maxTransfer() const override { return usbDrive().transferBytes(); }
 
  private:
   // Буква диска флешки для текущего монтирования: nullptr — найдена (в letter_), иначе причина.
@@ -110,8 +125,25 @@ class UsbVolume : public FatVolumePort {
     return kNoLetter;
   }
 
+  // Буфер передачи драйвера — до UsbDrive::kServerTransferBytes, пока работают серверы: система
+  // однозадачная, приложения сейчас нет. Внутренней памяти нет — шара работает кусками по нынешнему
+  // буферу (не меньше UsbDrive::kTransferBytes), попытка — снова не раньше kGrowRetryMs.
+  void growTransfer() {
+    UsbDrive& drive = usbDrive();
+    if (drive.transferBytes() >= UsbDrive::kServerTransferBytes) {
+      return;
+    }
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time() / 1000);
+    if (growTriedMs_ != 0 && now - growTriedMs_ < kGrowRetryMs) {
+      return;
+    }
+    growTriedMs_ = now | 1;
+    drive.setTransferBytes(UsbDrive::kServerTransferBytes);
+  }
+
   char letter_[4] = {};
   uint32_t generation_ = 0;   // монтирование, для которого letter_ найдена (0 — не найдена)
+  uint32_t growTriedMs_ = 0;  // последняя попытка вырастить буфер (0 — не было)
 };
 
 }  // namespace

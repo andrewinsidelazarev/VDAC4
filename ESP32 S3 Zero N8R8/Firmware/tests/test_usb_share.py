@@ -58,7 +58,8 @@ class UsbShareTest(unittest.TestCase):
         # операции — на ядре 1 через ready() (там же usb_drive отмонтирует вынутую флешку)
         acquire = function_body(self.share, "const char* acquire() override")
         self.assertLess(acquire.index("usbDrive().ready()"), acquire.index("usbHeldByWc()"))
-        self.assertIn("return findLetter();", acquire)
+        # буква найдена — буфер драйвера растёт под серверы (0.1.174)
+        self.assertLess(acquire.index("findLetter()"), acquire.index("growTransfer();"))
 
     def test_letter_search_never_touches_the_tang_card(self) -> None:
         find = function_body(self.share, "const char* findLetter()")
@@ -100,6 +101,57 @@ class UsbShareTest(unittest.TestCase):
         # пути WC не задевают местные шары и в кэше каталогов
         cache = read("src", "directory_cache.cpp")
         self.assertIn("!(value[1] >= '\\x01' && value[1] < ' ')", cache)
+
+    def test_driver_buffer_follows_the_servers(self) -> None:
+        # 0.1.173–0.1.174 (Metal Slug не получил code_ram на 0.1.172): шара передавала флешке по 16 КиБ,
+        # драйвер usb_host_msc сам вырастил буфер (внутреннее ОЗУ, до вынимания флешки), и 15 872 байта
+        # легли в резерв code_ram. Теперь буфер меняет прошивка: серверам — 16 КиБ, приложению — 4 КиБ.
+        drive_header = read("include", "zifi", "usb_drive.hpp")
+        self.assertIn("static constexpr uint32_t kTransferBytes = 4096;", drive_header)
+        self.assertIn("static constexpr uint32_t kServerTransferBytes = 16384;", drive_header)
+        drive = self.drive
+        resize = function_body(drive, "uint32_t UsbDrive::setTransferBytes(uint32_t bytes)")
+        # под замком тома FatFs флешки, новый буфер — до освобождения старого
+        self.assertIn("ff_diskio_get_pdrv_disk(&device->disk)", resize)
+        self.assertLess(resize.index("ff_mutex_take(pdrv)"), resize.index("usb_host_transfer_alloc("))
+        self.assertLess(resize.index("usb_host_transfer_alloc(bytes, 0, &fresh) == ESP_OK"),
+                        resize.index("device->xfer = fresh;"))
+        self.assertLess(resize.index("device->xfer = fresh;"), resize.index("usb_host_transfer_free(old);"))
+        self.assertLess(resize.index("usb_host_transfer_free(old);"), resize.index("ff_mutex_give(pdrv);"))
+        self.assertIn("bytes = kTransferBytes;", resize)
+        self.assertIn("g_transferBytes.store(static_cast<uint32_t>(device->xfer->data_buffer_size));", drive)
+        self.assertIn("g_transferBytes.store(0);", function_body(drive, "void closeDrive()"))
+        cmake = read("main", "CMakeLists.txt")
+        self.assertIn('target_include_directories(${COMPONENT_LIB} PRIVATE "${ZIFI_MSC_DIR}/private_include")', cmake)
+        # шара: куски не длиннее буфера драйвера, рост — после найденной буквы, не чаще kGrowRetryMs
+        self.assertIn("size_t maxTransfer() const override { return usbDrive().transferBytes(); }", self.share)
+        grow = function_body(self.share, "void growTransfer()")
+        self.assertIn("drive.setTransferBytes(UsbDrive::kServerTransferBytes);", grow)
+        self.assertIn("now - growTriedMs_ < kGrowRetryMs", grow)
+        # перед стартом приложения (после остановки серверов) — назад kTransferBytes
+        app = read("src", "apps", "module_app.cpp")
+        start = function_body(app, "int ModuleApp::startApp(const char* name)")
+        self.assertLess(start.index("host_.stopFileServers()"),
+                        start.index("usbDrive().setTransferBytes(UsbDrive::kTransferBytes);"))
+        self.assertLess(start.index("usbDrive().setTransferBytes(UsbDrive::kTransferBytes);"),
+                        start.index("loadElf(name"))
+        # TangVfs: кусок — по пределу тома на каждую операцию, после захвата тома
+        vfs_header = read("include", "zifi", "tang_vfs.hpp")
+        self.assertIn("virtual size_t maxTransfer() const { return kDefaultTransfer; }", vfs_header)
+        vfs = read("src", "tang_vfs.cpp")
+        for name in ("bool TangVfs::readFileWindow(", "bool TangVfs::writeFileWindow(",
+                     "bool TangVfs::setFileSize("):
+            body = vfs[vfs.index(name):]
+            body = body[:body.index("\n}\n")]
+            self.assertNotIn("kBufferSize", body, name)
+            self.assertLess(body.index("Lock lock(*this);"), body.index("transferOf(port_)"), name)
+        # стенд ПК: флешке 16 КиБ, контрольный прогон — 4 КиБ
+        host = read("tools", "host_smb", "host_fatfs.cpp")
+        self.assertIn("constexpr size_t kUsbTransferBytes = 16384;", host)
+        self.assertIn('HostVolume g_usbVolume(1, "1:", "no USB drive", kUsbTransferBytes);', host)
+        stand = read("tools", "host_smb", "build_and_test.py")
+        self.assertIn("env['ZIFI_HOST_USB_TRANSFER'] = '4096'", stand)
+        self.assertIn("if not limit // 2 < usb_largest <= limit:", stand)
 
 
 if __name__ == "__main__":

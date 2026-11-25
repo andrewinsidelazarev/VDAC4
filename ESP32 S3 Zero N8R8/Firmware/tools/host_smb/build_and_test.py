@@ -1,5 +1,6 @@
 import subprocess
 import os
+import re
 import socket
 import struct
 import time
@@ -985,13 +986,32 @@ def run_usb_share(out):
             ['.test-build\\host_smb\\smb_reproduce_test.exe', f'127.0.0.1:{usb_port}', share, mode],
             capture_output=True, text=True, timeout=timeout)
 
-    for absent in (False, True):
+    def largest_transfers(text):
+        # самая большая передача каждому диску после создания его образа (метка стенда)
+        largest = {}
+        for line in text.splitlines():
+            counted = re.match(r'host disk (\d+): transfers counted from here', line)
+            if counted:
+                largest[int(counted.group(1))] = 0
+                continue
+            seen = re.match(r'host disk (\d+): largest transfer (\d+) bytes', line)
+            if seen and int(seen.group(1)) in largest:
+                largest[int(seen.group(1))] = max(largest[int(seen.group(1))], int(seen.group(2)))
+        return largest
+
+    # Образ флешки — 256 МБ: кластер 128 КБ, как на плате, а набору нужны сотни файлов.
+    for absent, control in ((False, False), (False, True), (True, False)):
         env = dict(os.environ)
         env['ZIFI_HOST_TANG'] = str(card)
         env['ZIFI_HOST_USB'] = str(flash)
+        env['ZIFI_HOST_USB_MB'] = '256'
         if absent:
             env['ZIFI_HOST_USB_ABSENT'] = '1'
-        log_path = out / ('host_smb_usb_absent.log' if absent else 'host_smb_usb.log')
+        if control:
+            # на плате не нашлось памяти вырастить буфер драйвера: шара — кусками по 4 КиБ
+            env['ZIFI_HOST_USB_TRANSFER'] = '4096'
+        log_path = out / ('host_smb_usb_absent.log' if absent else
+                          'host_smb_usb_control.log' if control else 'host_smb_usb.log')
         with log_path.open('w', encoding='utf-8') as log:
             server = subprocess.Popen(
                 ['.test-build\\host_smb\\host_smb.exe', str(sd_share), str(usb_port)],
@@ -1009,7 +1029,12 @@ def run_usb_share(out):
                             raise RuntimeError(f'{other} share broke without a USB drive:\n' + still.stdout[-2000:])
                     print('USB share absent without a drive, SD and TANG work: PASS')
                     continue
-                for share, mode in (('USB', 'all'), ('USB', 'test51'), ('TANG', 'basic'), ('SD', 'basic')):
+                if control:
+                    print('Running USB share all with a 4096-byte driver buffer (grow refused, control)...')
+                    result = run('USB', 'all')
+                    if result.returncode != 0:
+                        raise RuntimeError('USB share all failed in the control run:\n' + result.stdout[-1500:])
+                for share, mode in () if control else (('USB', 'all'), ('USB', 'test51'), ('TANG', 'basic'), ('SD', 'basic')):
                     print(f'Running {share} share {mode} (USB drive present)...')
                     result = run(share, mode)
                     print(f'{share} {mode} OUTPUT TAIL:\n' + result.stdout[-1500:])
@@ -1025,6 +1050,17 @@ def run_usb_share(out):
         text = log_path.read_text(encoding='utf-8', errors='replace')
         if 'АВАРИЙНОЕ' in text or 'ПРОВЕРКА CRT' in text:
             raise RuntimeError('host_smb crashed on the USB share:\n' + text[-3000:])
+        if not absent:
+            # 0.1.174: передача флешке — не длиннее буфера драйвера USB (иначе драйвер растил бы его
+            # сам, а при нехватке памяти остался бы с освобождённым буфером). Серверы растят буфер до
+            # 16 КиБ, и шара передаёт такими кусками; не вышло — кусками по 4 КиБ (контрольный прогон).
+            usb_largest = largest_transfers(text).get(1, 0)
+            limit = 4096 if control else 16384
+            print(f'Largest transfer to the USB flash: {usb_largest} bytes, driver buffer {limit}')
+            if not limit // 2 < usb_largest <= limit:
+                raise RuntimeError(f'USB share transfer to the drive is {usb_largest} bytes, '
+                                   f'the driver buffer is {limit}')
+            print(f'USB share transfers fit the {limit}-byte driver buffer: PASS')
 
 
 if __name__ == '__main__':

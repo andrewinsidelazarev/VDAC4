@@ -1688,6 +1688,13 @@ int ModuleApp::startApp(const char* name) {
   if (!host_.stopFileServers()) {
     bringupLog(kTag, "app %s: file servers did not stop", name);
   }
+#if ZIFI_HAS_USB_DRIVE
+  // Серверы могли вырастить буфер передачи драйвера флешки до 16 КиБ (шара USB, 0.1.174): буфер —
+  // во внутреннем ОЗУ и живёт, пока флешка вставлена. Приложению — назад kTransferBytes.
+  if (usbDrive().ready()) {
+    usbDrive().setTransferBytes(UsbDrive::kTransferBytes);
+  }
+#endif
   // vTaskDelete returns stack memory on the idle task, after stopApp.
   vTaskDelay(pdMS_TO_TICKS(10));
   const zm_app_t* app = nullptr;

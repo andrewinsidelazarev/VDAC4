@@ -47,6 +47,11 @@ idf_component_register(
         vfs
 )
 
+# Буфер передачи драйвера флешки прошивка меняет сама (usb_drive.cpp, 0.1.174): устройство драйвера
+# (msc_common.h) и номер его диска FatFs (diskio_usb.h) — в private_include компонента usb_host_msc.
+idf_component_get_property(ZIFI_MSC_DIR espressif__usb_host_msc COMPONENT_DIR)
+target_include_directories(${COMPONENT_LIB} PRIVATE "${ZIFI_MSC_DIR}/private_include")
+
 # Две догадки GCC 15 о snprintf, которые ESP-IDF превращает в ошибки:
 # -Wformat-truncation — короткие тексты состояния прошивка намеренно обрезает до размера поля;
 # -Wrestrict — копирование между разными полями одного объекта он считает наложением.

@@ -20,8 +20,8 @@ FatVolumePort& tangVolume();
 void setTangCardPresent(bool present);
 bool tangCardPresent();
 
-// Флешка в USB-C ESP32 (шара «USB», 0.1.171): образ megabytes МБ, exFAT, кластер 4 КБ (как
-// у пользователя на плате — exFAT), содержимое — копия папки folder. Том — буква "1:".
+// Флешка в USB-C ESP32 (шара «USB», 0.1.171): образ megabytes МБ, exFAT, кластер 128 КБ (как
+// у флешки пользователя на плате, 0.1.173), содержимое — копия папки folder. Том — буква "1:".
 bool createUsbFlash(const std::string& folder, uint32_t megabytes, std::string& error);
 FatVolumePort& usbVolume();
 // «Флешка вставлена»: так стенд проверяет пропадание шары USB.

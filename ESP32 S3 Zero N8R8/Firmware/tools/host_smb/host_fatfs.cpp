@@ -33,17 +33,20 @@ struct Disk {
   FATFS fs = {};
   bool mounted = false;
   bool present = true;
+  // Самая большая передача устройству (disk_read/disk_write) после создания образа, байтов: на
+  // плате передача флешке USB не должна быть длиннее буфера её драйвера (0.1.174).
+  uint64_t largest = 0;
 };
 Disk g_disks[2];
 std::recursive_mutex g_volumeLocks[FF_VOLUMES + 1];
 
 Disk* diskOf(BYTE pdrv) { return pdrv < 2 ? &g_disks[pdrv] : nullptr; }
 
-// Том для TangVfs: диск pdrv под буквой "pdrv:".
+// Том для TangVfs: диск pdrv под буквой "pdrv:"; transfer — предел передачи, как у порта на плате.
 class HostVolume : public zifi::FatVolumePort {
  public:
-  HostVolume(BYTE pdrv, const char* drive, const char* absent)
-      : pdrv_(pdrv), drive_(drive), absent_(absent) {}
+  HostVolume(BYTE pdrv, const char* drive, const char* absent, size_t transfer)
+      : pdrv_(pdrv), drive_(drive), absent_(absent), transfer_(transfer) {}
   const char* acquire() override {
     const Disk& disk = g_disks[pdrv_];
     if (!disk.present) {
@@ -53,15 +56,34 @@ class HostVolume : public zifi::FatVolumePort {
   }
   void release() override {}
   const char* drive() const override { return drive_; }
+  size_t maxTransfer() const override { return transfer_; }
+  void setTransfer(size_t transfer) { transfer_ = transfer; }
 
  private:
   BYTE pdrv_;
   const char* drive_;
   const char* absent_;
+  size_t transfer_;
 };
 
-HostVolume g_tangVolume(0, "0:", "no Tang SD card");
-HostVolume g_usbVolume(1, "1:", "no USB drive");
+// Флешке — как UsbVolume на плате, когда серверы вырастили буфер драйвера
+// (UsbDrive::kServerTransferBytes = 16384; совпадение проверяет tests/test_usb_share.py), карте
+// Tang — предел по умолчанию.
+constexpr size_t kUsbTransferBytes = 16384;
+HostVolume g_tangVolume(0, "0:", "no Tang SD card", zifi::FatVolumePort::kDefaultTransfer);
+HostVolume g_usbVolume(1, "1:", "no USB drive", kUsbTransferBytes);
+
+// Передача length байтов диску pdrv: новая самая большая — в журнал стенда (его читает
+// build_and_test.py, run_usb_share).
+void noteTransfer(BYTE pdrv, uint64_t length) {
+  Disk& disk = g_disks[pdrv];
+  if (length > disk.largest) {
+    disk.largest = length;
+    std::printf("host disk %u: largest transfer %llu bytes\n", static_cast<unsigned>(pdrv),
+                static_cast<unsigned long long>(length));
+    std::fflush(stdout);
+  }
+}
 
 bool copyIn(const fs::path& source, const std::string& target, std::string& error) {
   for (const fs::directory_entry& entry : fs::directory_iterator(source)) {
@@ -130,6 +152,9 @@ bool createDisk(BYTE pdrv, const char* drive, const std::string& folder, uint32_
   if (!folder.empty() && !copyIn(fs::path(folder), drive, error)) {
     return false;
   }
+  disk.largest = 0;                     // заполнение образа на ПК — не работа шары
+  std::printf("host disk %u: transfers counted from here\n", static_cast<unsigned>(pdrv));
+  std::fflush(stdout);
   return true;
 }
 
@@ -151,6 +176,7 @@ extern "C" DRESULT disk_read(BYTE pdrv, BYTE* buffer, LBA_t sector, UINT count) 
     return RES_PARERR;
   }
   std::memcpy(buffer, disk->data.data() + at, static_cast<size_t>(length));
+  noteTransfer(pdrv, length);
   return RES_OK;
 }
 
@@ -162,6 +188,7 @@ extern "C" DRESULT disk_write(BYTE pdrv, const BYTE* buffer, LBA_t sector, UINT 
     return RES_PARERR;
   }
   std::memcpy(disk->data.data() + at, buffer, static_cast<size_t>(length));
+  noteTransfer(pdrv, length);
   return RES_OK;
 }
 
@@ -224,8 +251,15 @@ void setTangCardPresent(bool present) { g_disks[0].present = present; }
 bool tangCardPresent() { return g_disks[0].present && g_disks[0].mounted; }
 
 bool createUsbFlash(const std::string& folder, uint32_t megabytes, std::string& error) {
-  // exFAT, кластер 4 КБ: так флешку размечает Windows по умолчанию для небольших объёмов
-  return createDisk(1, "1:", folder, megabytes, FM_EXFAT, 4096, error);
+  // exFAT, кластер 128 КБ — как у флешки пользователя на плате (60 ГБ). Кластер важен (0.1.173):
+  // FatFs передаёт устройству за раз не больше остатка кластера, и при кластере 4 КБ стенд не увидел
+  // бы передач по 16 КиБ, которые на 0.1.171–0.1.172 заняли резерв code_ram.
+  // ZIFI_HOST_USB_TRANSFER — другой предел передачи тома (контрольный прогон run_usb_share: 4096 —
+  // на плате не нашлось памяти вырастить буфер драйвера, и шара обязана уложиться в него).
+  if (const char* transfer = std::getenv("ZIFI_HOST_USB_TRANSFER")) {
+    g_usbVolume.setTransfer(static_cast<size_t>(std::strtoul(transfer, nullptr, 10)));
+  }
+  return createDisk(1, "1:", folder, megabytes, FM_EXFAT, 128 * 1024, error);
 }
 
 FatVolumePort& usbVolume() { return g_usbVolume; }

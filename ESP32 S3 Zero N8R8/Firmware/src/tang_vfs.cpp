@@ -67,6 +67,19 @@ void release(void* memory) {
 #endif
 }
 
+// Кусок одного f_read/f_write для тома сейчас: что разрешает устройство, но не больше буфера и не
+// меньше сектора (512), кратно сектору. Флешке USB — длина буфера её драйвера (0.1.174): FatFs
+// передаёт ей целые сектора прямо из буфера, и передача длиннее буфера заставила бы драйвер растить
+// его сам (освободить, потом выделить — при неудаче он остался бы с освобождённым буфером).
+size_t transferOf(const FatVolumePort& port) {
+  size_t bytes = port.maxTransfer();
+  if (bytes > TangVfs::kBufferSize) {
+    bytes = TangVfs::kBufferSize;
+  }
+  bytes &= ~static_cast<size_t>(511);
+  return bytes < 512 ? 512 : bytes;
+}
+
 void fillEntry(const FILINFO& info, VfsEntry& entry) {
   entry.isDirectory = (info.fattrib & AM_DIR) != 0;
   entry.size = info.fsize > 0xFFFFFFFFULL ? 0xFFFFFFFFUL : static_cast<uint32_t>(info.fsize);
@@ -452,8 +465,9 @@ bool TangVfs::readFileWindow(size_t wanted, WindowSink sink, void* sinkContext,
   if (!lock.ok()) {
     return false;
   }
+  const size_t chunk = transferOf(port_);   // после acquire: флешка уже вырастила буфер или нет
   while (received < wanted) {
-    const size_t part = (wanted - received) < kBufferSize ? (wanted - received) : kBufferSize;
+    const size_t part = (wanted - received) < chunk ? (wanted - received) : chunk;
     UINT got = 0;
     const FRESULT result = f_read(&state_->file, buffer_, static_cast<UINT>(part), &got);
     if (result != FR_OK) {
@@ -482,8 +496,9 @@ bool TangVfs::writeFileWindow(size_t length, WindowSource source, void* sourceCo
   if (!lock.ok()) {
     return false;
   }
+  const size_t chunk = transferOf(port_);
   for (size_t done = 0; done < length;) {
-    const size_t want = (length - done) < kBufferSize ? (length - done) : kBufferSize;
+    const size_t want = (length - done) < chunk ? (length - done) : chunk;
     const size_t got = source(sourceContext, done, buffer_, want);
     if (got == 0) {
       return failStatus(kStatusFailure, "write-source");
@@ -530,9 +545,10 @@ bool TangVfs::setFileSize(uint32_t size, uint32_t& actualSize) {
     // Рост — нулями, как SetEndOfFile в Windows: FatFs при f_lseek за конец оставил бы в новых
     // кластерах прежнее содержимое карты.
     result = f_lseek(file, old);
-    memset(buffer_, 0, kBufferSize);
+    const size_t chunk = transferOf(port_);
+    memset(buffer_, 0, chunk);
     for (FSIZE_t at = old; result == FR_OK && at < size;) {
-      const UINT part = static_cast<UINT>((size - at) < kBufferSize ? (size - at) : kBufferSize);
+      const UINT part = static_cast<UINT>((size - at) < chunk ? (size - at) : chunk);
       UINT written = 0;
       result = f_write(file, buffer_, part, &written);
       if (result == FR_OK && written != part) {
