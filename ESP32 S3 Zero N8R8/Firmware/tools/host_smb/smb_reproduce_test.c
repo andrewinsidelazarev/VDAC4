@@ -2391,6 +2391,7 @@ int main(int argc, char **argv) {
     if (strcmp(only_test, "test48") == 0) goto test_48;
     if (strcmp(only_test, "test49") == 0) goto test_49;
     if (strcmp(only_test, "test50") == 0) goto test_50;
+    if (strcmp(only_test, "test51") == 0) goto test_51;
   }
 
   /* TEST 1: Sequential & Multiple Reads check */
@@ -6851,6 +6852,68 @@ test_50:
                : 0u,
            named);
     printf("RESULT TEST 50: %s\n", test_ok ? "PASS" : "FAIL");
+    failures += !test_ok;
+  }
+  if (only_test != NULL) goto done;
+
+test_51:
+  /* ТЕСТ 51 (0.1.171): три дисковые шары — SD, TANG и USB (флешка в USB-C ESP32) — в перечне
+   * srvsvc. Тот же запрос Проводника, что в ТЕСТАХ 31 и 50: записей четыре (SD, TANG, USB, IPC$),
+   * оба имени и подпись «USB flash ESP32» есть в ответе, ResumeHandle по-прежнему NULL. */
+  printf("\n--- TEST 51: NetrShareEnum lists the TANG and USB shares ---\n");
+  {
+    static const uint8_t windows_request[] = {
+      0x05, 0x00, 0x00, 0x03, 0x10, 0x00, 0x00, 0x00,
+      0x58, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+      0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x00,
+      0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
+      0x5c, 0x00, 0x5c, 0x00, 0x5a, 0x00, 0x58, 0x00,
+      0x2d, 0x00, 0x45, 0x00, 0x76, 0x00, 0x6f, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+      0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x02, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00
+    };
+    static const uint8_t tang_utf16[] = {'T', 0, 'A', 0, 'N', 0, 'G', 0};
+    static const uint8_t usb_utf16[] = {'U', 0, 'S', 0, 'B', 0, 0, 0};
+    static const uint8_t remark_utf16[] = {'U', 0, 'S', 0, 'B', 0, ' ', 0, 'f', 0, 'l', 0,
+                                           'a', 0, 's', 0, 'h', 0};
+    struct smb2_dcerpc_share extra[2];
+    uint8_t response[1024];
+    struct smb2_dcerpc_request_info info;
+    uint16_t presentation_context = 0;
+    size_t response_length = 0;
+    int tang_named = 0, usb_named = 0, remark_named = 0;
+    int test_ok;
+
+    extra[0].name = "TANG";
+    extra[0].remark = "Tang microSD";
+    extra[1].name = "USB";
+    extra[1].remark = "USB flash ESP32";
+    memset(&info, 0, sizeof(info));
+    test_ok = smb2_dcerpc_srvsvc_reply3(
+                  smb2, windows_request, sizeof(windows_request), "SD", extra, 2,
+                  "ZX-Evo", &presentation_context, response, sizeof(response),
+                  &response_length, &info) == 0 &&
+              response_length > 24 && response[2] == 2 &&
+              test_read_le16(response + 8) == response_length &&
+              test_read_le32(response + response_length - 12) == 4 &&
+              test_read_le32(response + response_length - 8) == 0 &&
+              test_read_le32(response + response_length - 4) == 0;
+    for (size_t at = 0; test_ok && at + sizeof(remark_utf16) <= response_length; ++at) {
+      tang_named |= memcmp(response + at, tang_utf16, sizeof(tang_utf16)) == 0;
+      usb_named |= memcmp(response + at, usb_utf16, sizeof(usb_utf16)) == 0;
+      remark_named |= memcmp(response + at, remark_utf16, sizeof(remark_utf16)) == 0;
+    }
+    test_ok = test_ok && tang_named && usb_named && remark_named;
+    printf("  response=%lu bytes entries=%u TANG=%d USB=%d remark=%d\n",
+           (unsigned long)response_length,
+           response_length >= 12
+               ? (unsigned)test_read_le32(response + response_length - 12)
+               : 0u,
+           tang_named, usb_named, remark_named);
+    printf("RESULT TEST 51: %s\n", test_ok ? "PASS" : "FAIL");
     failures += !test_ok;
   }
 

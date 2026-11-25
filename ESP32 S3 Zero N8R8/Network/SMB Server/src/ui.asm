@@ -16,6 +16,7 @@ UI_FIELD_LAST   equ 30
 UI_FIELD_PORT   equ 5
 UI_FIELD_NBNS   equ 30
 UI_FIELD_UNC2   equ 30                  ; вторая шара: «\\ZX-Evo\TANG  (Tang microSD)» или прочерк
+UI_FIELD_UNC3   equ 32                  ; третья шара: «\\ZX-Evo\USB  (USB flash ESP32)» или прочерк
 UI_FIELD_PROGRESS equ 30
 
 ; Создать окно, сохранить закрываемую им область экрана и заполнить динамические
@@ -193,6 +194,20 @@ Ui_BuildTang:
         ld b,UI_FIELD_UNC2
         jp Ui_CopyField
 
+; Строка UNC3 (0.5.22): шара USB — флешка в USB-C ESP32, если ESP её открыла (шестой байт ответа
+; SMB_START, прошивка 0.1.172+), иначе прочерк: флешки нет, она не FAT32/exFAT, WC держит её как
+; SD2 (VDAC4 VFS) или прошивка старая.
+Ui_BuildUsb:
+        ld a,(LinkUsb)
+        or a
+        ld hl,UiUsbNone
+        jr z,.show
+        ld hl,UiUsbShare
+.show:
+        ld de,UiUnc3Field
+        ld b,UI_FIELD_UNC3
+        jp Ui_CopyField
+
 ; Собрать отображаемый IPv4 без схемы и порта. Поле предварительно очищается
 ; пробелами, чтобы короткий новый адрес не оставил хвост старого.
 ;
@@ -234,7 +249,7 @@ SmbWindow:
         db #81                         ; тень и рамка стиля 1
         db 0
         db #FF,#FF                     ; X,Y: центр, см. Ui_Open
-        db 52,19                       ; ширина и высота
+        db 52,20                       ; ширина и высота (0.5.22: +1 строка — UNC3)
         db #17                         ; синий фон, ярко-белые символы
         db 0
         dw 0
@@ -289,7 +304,8 @@ UiPortField:
 UiFirmwareField:
         ds UI_FIELD_FW,' '
         db #0D,#0D
-        ; Две шары — две строки: том панели WC и microSD Tang (прошивка ESP 0.1.125+).
+        ; Три шары — три строки: том панели WC, microSD Tang (прошивка ESP 0.1.125+) и флешка в
+        ; USB-C ESP32 (0.1.172+).
         db "UNC1   : \\\\ZX-Evo\\"
 UiUncDevice:
         db "?","  (volume "
@@ -298,6 +314,10 @@ UiVolumeDevice:
         db "UNC2   : "
 UiUnc2Field:
         ds UI_FIELD_UNC2,' '
+        db #0D
+        db "UNC3   : "
+UiUnc3Field:
+        ds UI_FIELD_UNC3,' '
         db #0D
         db "Login  : zx / zx; SMB signing",#0D
         db "NetBIOS: "
@@ -357,3 +377,5 @@ UiNetbiosUnavailable:
                      db "unavailable; use IP",0
 UiTangShare:       db "\\\\ZX-Evo\\TANG  (Tang microSD)",0
 UiTangNone:        db "-  (no Tang microSD)",0
+UiUsbShare:        db "\\\\ZX-Evo\\USB  (USB flash ESP32)",0
+UiUsbNone:         db "-  (no USB flash)",0

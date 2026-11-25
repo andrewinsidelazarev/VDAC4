@@ -401,21 +401,56 @@ bool asciiEqualNoCase(const char* left, const char* right) {
   return *left == 0 && *right == 0;
 }
 
-// Шара «TANG» (microSD Tang через FatFs ESP): её пути у сервера и моста VFS начинаются с корня
-// kTangRoot — первого имени с управляющим знаком, которого у пути шары WC не бывает (normalizePath
-// такие отвергает). Мост по нему отдаёт запрос TangVfs.
-constexpr const char* kTangRoot = SmbServer::kTangRoot;
-constexpr size_t kTangRootLength = 6;
-static_assert(kTangRootLength == sizeof("/\x01TANG") - 1, "kTangRoot length");
+// Шары сервера. Номер 0 — том WC (карта Evo через плагин SMB на Z80): его пути — обычные "/…".
+// Местные шары ESP, без Z80: 1 — «TANG» (microSD Tang через FatFs ESP, 0.1.125), 2 — «USB»
+// (флешка в USB-C ESP32, 0.1.171). Пути местной шары у сервера и моста VFS начинаются с её корня —
+// первого имени с управляющим знаком ("/\x01TANG", "/\x02USB"), которого у пути шары WC не бывает
+// (normalizePath такие отвергает). Мост по корню отдаёт запрос источнику этой шары.
+constexpr uint8_t kShareWc = 0;
+constexpr uint8_t kShareTang = 1;
+constexpr uint8_t kShareUsb = 2;
+constexpr uint8_t kShareCount = 3;
 
-bool isTangPath(const char* path) {
-  return path != nullptr && strncmp(path, kTangRoot, kTangRootLength) == 0 &&
-         (path[kTangRootLength] == 0 || path[kTangRootLength] == '/');
+struct LocalShareInfo {
+  const char* name;      // имя для \\ZX-Evo\имя
+  const char* root;      // корень путей у сервера и моста
+  size_t rootLength;
+  const char* remark;    // подпись в списке шар Windows (net view)
+  const char* tag;       // начало пути в строках плагина: «TANG:/путь»
+};
+constexpr LocalShareInfo kLocalShares[kShareCount] = {
+    {nullptr, "/", 1, nullptr, nullptr},
+    {SmbServer::kTangShare, SmbServer::kTangRoot, 6, "Tang microSD", "TANG:"},
+    {SmbServer::kUsbShare, SmbServer::kUsbRoot, 5, "USB flash ESP32", "USB:"},
+};
+static_assert(sizeof("/\x01TANG") - 1 == 6 && sizeof("/\x02USB") - 1 == 5, "local share root length");
+
+// Номер местной шары, под корень которой попал path; kShareWc — путь тома WC.
+uint8_t shareOfPath(const char* path) {
+  if (path == nullptr) {
+    return kShareWc;
+  }
+  for (uint8_t share = 1; share < kShareCount; ++share) {
+    const LocalShareInfo& info = kLocalShares[share];
+    if (strncmp(path, info.root, info.rootLength) == 0 &&
+        (path[info.rootLength] == 0 || path[info.rootLength] == '/')) {
+      return share;
+    }
+  }
+  return kShareWc;
 }
 
-// Корень любой шары: "/" — том WC, kTangRoot — карта Tang.
+// Корень любой шары: "/" — том WC, корень местной шары — она сама.
 bool isShareRoot(const char* path) {
-  return path != nullptr && (strcmp(path, "/") == 0 || strcmp(path, kTangRoot) == 0);
+  if (path == nullptr) {
+    return false;
+  }
+  for (uint8_t share = 0; share < kShareCount; ++share) {
+    if (strcmp(path, kLocalShares[share].root) == 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 bool asciiPathBelongsTo(const char* value, const char* root) {
@@ -423,7 +458,7 @@ bool asciiPathBelongsTo(const char* value, const char* root) {
     return false;
   }
   if (root[0] == '/' && root[1] == 0) {
-    return value[0] == '/' && !isTangPath(value);   // корень WC — без шары TANG
+    return value[0] == '/' && shareOfPath(value) == kShareWc;   // корень WC — без местных шар
   }
   size_t index = 0;
   while (root[index] != 0 && value[index] != 0) {
@@ -898,7 +933,7 @@ struct SmbServer::Impl {
   struct Tree {
     bool used = false;
     bool ipc = false;
-    bool tang = false;                // шара «TANG»: пути под kTangRoot
+    uint8_t share = kShareWc;         // чья шара: kShareWc, kShareTang, kShareUsb (пути под её корнем)
     uint32_t id = 0;
     smb2_context* owner = nullptr;
     uint32_t ownerId = 0;
@@ -1386,17 +1421,19 @@ struct SmbServer::Impl {
   // свободное место, но не эту величину.
   bool fsInfoRefreshRequired;
   uint32_t allocationUnitBytes;
-  // Те же сведения второй шары (WC или TANG — та, что сейчас не выбрана selectFsShare).
+  // Те же сведения остальных шар: живые поля выше описывают шару fsStateShare, а сохранённые
+  // сведения других шар лежат здесь, пока selectFsShare не выберет одну из них.
   struct FsShareState {
     VfsFsInfo info;
     bool valid = false;
     bool refreshRequired = true;
     uint32_t allocationUnit = 0;
   };
-  FsShareState otherFsState;
-  bool fsStateTang = false;
-  SmbServer::SharePresence tangProbe = nullptr;
-  void* tangProbeContext = nullptr;
+  FsShareState savedFsState[kShareCount];
+  uint8_t fsStateShare = kShareWc;
+  // Есть ли сейчас местная шара (номер — индекс): проба владельца (setTangShare, setUsbShare).
+  SmbServer::SharePresence shareProbe[kShareCount] = {};
+  void* shareProbeContext[kShareCount] = {};
   smb2_file_fs_volume_info volumeInfo;
   smb2_file_fs_size_info sizeInfo;
   smb2_file_fs_full_size_info fullSizeInfo;
@@ -1641,14 +1678,17 @@ struct SmbServer::Impl {
                      const uint8_t fileId[SMB2_FD_SIZE],
                      int* slot = nullptr);
   void releaseHandle(int slot);
-  uint32_t allocateTree(bool ipc, smb2_context* owner, bool tang = false);
-  // Шара TANG сейчас есть (проба владельца и TangVfs у моста).
-  bool tangShareAvailable();
-  // "/путь" -> kTangRoot + "/путь" на месте; false — не помещается.
-  bool prefixTangPath(char path[kMaxPath + 1]) const;
-  // Сведения о томе своей шары: живые поля описывают шару fsStateTang, вторая — в otherFsState.
-  void selectFsShare(bool tang);
-  void selectFsShareFor(const char* path) { selectFsShare(isTangPath(path)); }
+  uint32_t allocateTree(bool ipc, smb2_context* owner, uint8_t share = kShareWc);
+  // Местная шара share сейчас есть: проба владельца да и её источник подключён к мосту.
+  bool shareAvailable(uint8_t share);
+  bool tangShareAvailable() { return shareAvailable(kShareTang); }
+  // "/путь" -> корень шары share + "/путь" на месте; false — не помещается.
+  bool prefixSharePath(uint8_t share, char path[kMaxPath + 1]) const;
+  // Сведения о томе своей шары: живые поля описывают шару fsStateShare, остальные — в savedFsState.
+  void selectFsShare(uint8_t share);
+  void selectFsShareFor(const char* path) { selectFsShare(shareOfPath(path)); }
+  // Местные шары, которые есть сейчас, — для списка шар Windows (srvsvc); сколько записано.
+  int availableLocalShares(smb2_dcerpc_share* out, int capacity);
   const Tree* findTree(uint32_t id) const;
   void releaseTree(uint32_t id);
   uint32_t visibleSize(const Handle& handle) const;
@@ -1819,8 +1859,10 @@ bool SmbServer::Impl::start(const uint8_t* payload, uint16_t length,
   fsInfoValid = false;
   fsInfoRefreshRequired = true;
   allocationUnitBytes = 0;
-  otherFsState = FsShareState();
-  fsStateTang = false;
+  for (FsShareState& state : savedFsState) {
+    state = FsShareState();
+  }
+  fsStateShare = kShareWc;
   memset(&server, 0, sizeof(server));
   server.fd = -1;
   server.port = portValue;
@@ -3556,7 +3598,7 @@ void SmbServer::Impl::releaseDirectoryBatch() {
 }
 
 
-uint32_t SmbServer::Impl::allocateTree(bool ipc, smb2_context* owner, bool tang) {
+uint32_t SmbServer::Impl::allocateTree(bool ipc, smb2_context* owner, uint8_t share) {
   const uint32_t ownerId = contextOwnerId(owner);
   const uint64_t sessionId = contextSessionId(owner);
   if (owner == nullptr || ownerId == 0 || sessionId == 0) {
@@ -3583,7 +3625,7 @@ uint32_t SmbServer::Impl::allocateTree(bool ipc, smb2_context* owner, bool tang)
 
   trees[slot].used = true;
   trees[slot].ipc = ipc;
-  trees[slot].tang = tang;
+  trees[slot].share = share;
   trees[slot].id = id;
   trees[slot].owner = owner;
   trees[slot].ownerId = ownerId;
@@ -3952,12 +3994,13 @@ void SmbServer::Impl::sendOperation(const char* operation, const char* path) {
   }
   if (path != nullptr && *path != 0 && used + 1 < sizeof(shown)) {
     shown[used++] = ' ';
-    if (isTangPath(path)) {
-      // шара TANG — «TANG:/путь», без внутреннего корня
-      for (const char* tag = "TANG:"; *tag != 0 && used + 1 < sizeof(shown); ++tag) {
+    const uint8_t share = shareOfPath(path);
+    if (share != kShareWc) {
+      // местная шара — «TANG:/путь», «USB:/путь», без внутреннего корня
+      for (const char* tag = kLocalShares[share].tag; *tag != 0 && used + 1 < sizeof(shown); ++tag) {
         shown[used++] = *tag;
       }
-      path += kTangRootLength;
+      path += kLocalShares[share].rootLength;
       if (*path == 0) {
         path = "/";
       }
@@ -5181,45 +5224,64 @@ void SmbServer::Impl::updateSharedPhysicalSize(const char* path,
   refreshCachedSize(path, directorySize);
 }
 
-void SmbServer::Impl::selectFsShare(bool tang) {
-  if (tang == fsStateTang) {
+void SmbServer::Impl::selectFsShare(uint8_t share) {
+  if (share >= kShareCount || share == fsStateShare) {
     return;
   }
-  FsShareState live;
+  // живые поля — в запас текущей шары, из запаса новой — в живые поля
+  FsShareState& live = savedFsState[fsStateShare];
   live.info = cachedFsInfo;
   live.valid = fsInfoValid;
   live.refreshRequired = fsInfoRefreshRequired;
   live.allocationUnit = allocationUnitBytes;
-  cachedFsInfo = otherFsState.info;
-  fsInfoValid = otherFsState.valid;
-  fsInfoRefreshRequired = otherFsState.refreshRequired;
-  allocationUnitBytes = otherFsState.allocationUnit;
-  otherFsState = live;
-  fsStateTang = tang;
+  const FsShareState& next = savedFsState[share];
+  cachedFsInfo = next.info;
+  fsInfoValid = next.valid;
+  fsInfoRefreshRequired = next.refreshRequired;
+  allocationUnitBytes = next.allocationUnit;
+  fsStateShare = share;
 }
 
-bool SmbServer::Impl::tangShareAvailable() {
-  return tangProbe != nullptr && bridge.isLocalPath(kTangRoot) && tangProbe(tangProbeContext);
+bool SmbServer::Impl::shareAvailable(uint8_t share) {
+  return share != kShareWc && share < kShareCount && shareProbe[share] != nullptr &&
+         bridge.isLocalPath(kLocalShares[share].root) && shareProbe[share](shareProbeContext[share]);
 }
 
-bool SmbServer::Impl::prefixTangPath(char path[kMaxPath + 1]) const {
+int SmbServer::Impl::availableLocalShares(smb2_dcerpc_share* out, int capacity) {
+  int count = 0;
+  for (uint8_t share = 1; share < kShareCount && count < capacity; ++share) {
+    if (shareAvailable(share)) {
+      out[count].name = kLocalShares[share].name;
+      out[count].remark = kLocalShares[share].remark;
+      ++count;
+    }
+  }
+  return count;
+}
+
+bool SmbServer::Impl::prefixSharePath(uint8_t share, char path[kMaxPath + 1]) const {
+  if (share == kShareWc || share >= kShareCount) {
+    return true;                          // том WC: путь как есть
+  }
+  const char* root = kLocalShares[share].root;
+  const size_t rootLength = kLocalShares[share].rootLength;
   const size_t length = strlen(path);
   if (strcmp(path, "/") == 0) {
-    memcpy(path, kTangRoot, kTangRootLength + 1);
+    memcpy(path, root, rootLength + 1);
     return true;
   }
-  if (length + kTangRootLength > kMaxPath) {
+  if (length + rootLength > kMaxPath) {
     return false;
   }
-  memmove(path + kTangRootLength, path, length + 1);
-  memcpy(path, kTangRoot, kTangRootLength);
+  memmove(path + rootLength, path, length + 1);
+  memcpy(path, root, rootLength);
   return true;
 }
 
 bool SmbServer::Impl::loadFsInfo(VfsFsInfo& info, uint8_t& status) {
   status = 0;
-  // запрос о томе — корнем своей шары: мост отдаёт TANG её источнику
-  const char* shareRoot = fsStateTang ? kTangRoot : nullptr;
+  // запрос о томе — корнем своей шары: мост отдаёт местную шару её источнику
+  const char* shareRoot = fsStateShare != kShareWc ? kLocalShares[fsStateShare].root : nullptr;
   if (fsInfoRefreshRequired) {
     VfsResult invalidateResult = {};
     if (!closeActive(true) ||
@@ -5392,8 +5454,9 @@ bool SmbServer::Impl::parseShare(const smb2_tree_connect_request* request,
 }
 
 bool SmbServer::Impl::makeInfoName(const Handle& handle) {
-  // имя от корня своей шары: у TANG — без kTangRoot
-  const char* shown = isTangPath(handle.path) ? handle.path + kTangRootLength : handle.path;
+  // имя от корня своей шары: у местной шары — без её корня
+  const uint8_t share = shareOfPath(handle.path);
+  const char* shown = share != kShareWc ? handle.path + kLocalShares[share].rootLength : handle.path;
   size_t length = strlen(shown);
   if (length + 1 > sizeof(infoName)) {
     return false;
@@ -8457,28 +8520,33 @@ int SmbServer::Impl::treeConnectHandler(
   }
   diagnosticLogEvent("SMB tree-request share=%s", requestedShare);
   const bool ipc = asciiEqualNoCase(requestedShare, "IPC$");
-  bool tang = false;
+  uint8_t share = kShareWc;
+  if (!ipc && !asciiEqualNoCase(requestedShare, self->share)) {
+    // местная шара по имени — только если она есть сейчас: TANG — Tang на связи, в нём карта, и WC
+    // её не держит (SD2); USB — флешка в USB-C ESP32 вставлена, смонтирована, и WC её не держит
+    for (uint8_t candidate = 1; candidate < kShareCount; ++candidate) {
+      if (asciiEqualNoCase(requestedShare, kLocalShares[candidate].name)) {
+        share = self->shareAvailable(candidate) ? candidate : kShareCount;
+        break;
+      }
+    }
+    if (share == kShareWc || share == kShareCount) {
+      return replyStatus(smb2, SMB2_TREE_CONNECT,
+                         SMB2_STATUS_BAD_NETWORK_NAME);
+    }
+  }
   if (ipc) {
     reply->share_type = SMB2_SHARE_TYPE_PIPE;
     reply->maximal_access = 0x001F00A9;
-  } else if (asciiEqualNoCase(requestedShare, self->share)) {
-    reply->share_type = SMB2_SHARE_TYPE_DISK;
-    reply->maximal_access = 0x001F01FF;
-  } else if (asciiEqualNoCase(requestedShare, SmbServer::kTangShare) &&
-             self->tangShareAvailable()) {
-    // microSD Tang: есть Tang, в нём карта, и WC её не держит (SD2)
-    tang = true;
-    reply->share_type = SMB2_SHARE_TYPE_DISK;
-    reply->maximal_access = 0x001F01FF;
   } else {
-    return replyStatus(smb2, SMB2_TREE_CONNECT,
-                       SMB2_STATUS_BAD_NETWORK_NAME);
+    reply->share_type = SMB2_SHARE_TYPE_DISK;
+    reply->maximal_access = 0x001F01FF;
   }
   // IPC$ и SD могут одновременно жить в одном SMB-сеансе. Выдаём каждому
   // TREE_CONNECT собственный TreeId и запоминаем тип именно этого дерева.
   // Глобальный флаг здесь недопустим: служебный запрос IPC$ от Windows/Linux
   // иначе превращал последующие обращения к SD в OBJECT_NAME_NOT_FOUND.
-  reply->tree_id = self->allocateTree(ipc, smb2, tang);
+  reply->tree_id = self->allocateTree(ipc, smb2, share);
   if (reply->tree_id == 0) {
     return replyStatus(smb2, SMB2_TREE_CONNECT,
                        SMB2_STATUS_INSUFFICIENT_RESOURCES);
@@ -8567,10 +8635,10 @@ int SmbServer::Impl::createHandler(smb2_server* serverValue,
   if (!self->normalizePath(request->name == nullptr ? "" : request->name,
                            path) ||
       request->create_disposition > SMB2_FILE_OVERWRITE_IF ||
-      (tree->tang && !self->prefixTangPath(path))) {
+      !self->prefixSharePath(tree->share, path)) {
     return createStatus(smb2, request, SMB2_STATUS_OBJECT_NAME_INVALID);
   }
-  self->selectFsShare(tree->tang);
+  self->selectFsShare(tree->share);
   const uint32_t shareRelevantAccessMask =
       SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
       SMB2_FILE_EXECUTE | SMB2_DELETE | SMB2_FILE_WRITE_ATTRIBUTES |
@@ -9293,9 +9361,11 @@ int SmbServer::Impl::writeHandler(smb2_server* serverValue,
 
     size_t responseLength = 0;
     smb2_dcerpc_request_info rpcInfo = {};
-    const int rpcResult = smb2_dcerpc_srvsvc_reply2(
+    smb2_dcerpc_share localShares[SMB2_DCERPC_MAX_EXTRA_SHARES] = {};
+    const int localCount = self->availableLocalShares(localShares, SMB2_DCERPC_MAX_EXTRA_SHARES);
+    const int rpcResult = smb2_dcerpc_srvsvc_reply3(
         smb2, request->buf, request->length, self->share,
-        self->tangShareAvailable() ? SmbServer::kTangShare : nullptr, self->hostname,
+        localShares, localCount, self->hostname,
         &handle->rpcContextId, handle->pipeResponse,
         sizeof(handle->pipeResponse), &responseLength, &rpcInfo);
     logRpcExchange("WRITE", rpcInfo, rpcResult, responseLength);
@@ -9644,10 +9714,12 @@ int SmbServer::Impl::ioctlHandler(smb2_server* serverValue,
       handle->pipeResponseOffset = 0;
       size_t responseLength = 0;
       smb2_dcerpc_request_info rpcInfo = {};
-      const int rpcResult = smb2_dcerpc_srvsvc_reply2(
+      smb2_dcerpc_share localShares[SMB2_DCERPC_MAX_EXTRA_SHARES] = {};
+      const int localCount = self->availableLocalShares(localShares, SMB2_DCERPC_MAX_EXTRA_SHARES);
+      const int rpcResult = smb2_dcerpc_srvsvc_reply3(
           smb2, static_cast<const uint8_t*>(request->input),
           request->input_count, self->share,
-          self->tangShareAvailable() ? SmbServer::kTangShare : nullptr, self->hostname,
+          localShares, localCount, self->hostname,
           &handle->rpcContextId,
           handle->pipeResponse, sizeof(handle->pipeResponse),
           &responseLength, &rpcInfo);
@@ -10553,7 +10625,7 @@ int SmbServer::Impl::setInfoHandler(smb2_server* serverValue,
       const bool normalized = self->normalizePath(converted, target);
       free(const_cast<char*>(converted));
       if (!normalized ||
-          (isTangPath(handle->path) && !self->prefixTangPath(target))) {
+          !self->prefixSharePath(shareOfPath(handle->path), target)) {
         return replyStatus(smb2, SMB2_SET_INFO,
                            SMB2_STATUS_OBJECT_NAME_INVALID);
       }
@@ -10650,12 +10722,21 @@ void SmbServer::setTimezoneHours(int8_t hours) {
 }
 
 void SmbServer::setTangShare(SharePresence probe, void* context) {
-  impl_->tangProbe = probe;
-  impl_->tangProbeContext = context;
+  impl_->shareProbe[kShareTang] = probe;
+  impl_->shareProbeContext[kShareTang] = context;
 }
 
 bool SmbServer::tangShareAvailable() const {
-  return impl_ != nullptr && impl_->tangShareAvailable();
+  return impl_ != nullptr && impl_->shareAvailable(kShareTang);
+}
+
+void SmbServer::setUsbShare(SharePresence probe, void* context) {
+  impl_->shareProbe[kShareUsb] = probe;
+  impl_->shareProbeContext[kShareUsb] = context;
+}
+
+bool SmbServer::usbShareAvailable() const {
+  return impl_ != nullptr && impl_->shareAvailable(kShareUsb);
 }
 
 bool SmbServer::stop() {

@@ -1,5 +1,7 @@
-// microSD Tang на стенде ПК: диск FatFs в памяти и служебные функции FatFs (на плате их дают
-// ESP-IDF и tang_sd). Сама FatFs — components/fatfs/src/ff.c прошивки, собранная для ПК.
+// Тома FatFs на стенде ПК: диски в памяти и служебные функции FatFs (на плате их дают ESP-IDF,
+// tang_sd и usb_drive). Сама FatFs — components/fatfs/src/ff.c прошивки, собранная для ПК.
+// Диск 0 ("0:") — microSD Tang (шара «TANG», FAT32), диск 1 ("1:") — флешка в USB-C ESP32
+// (шара «USB», 0.1.171; exFAT — как у пользователя на плате).
 
 #include "host_fatfs.hpp"
 
@@ -24,25 +26,42 @@ namespace fs = std::filesystem;
 namespace {
 
 constexpr UINT kSectorBytes = 512;
-std::vector<uint8_t> g_disk;
-FATFS g_fs;
-bool g_mounted = false;
-bool g_present = true;
+
+// Один диск стенда: образ в памяти, объект тома FatFs и «вставлен ли».
+struct Disk {
+  std::vector<uint8_t> data;
+  FATFS fs = {};
+  bool mounted = false;
+  bool present = true;
+};
+Disk g_disks[2];
 std::recursive_mutex g_volumeLocks[FF_VOLUMES + 1];
 
+Disk* diskOf(BYTE pdrv) { return pdrv < 2 ? &g_disks[pdrv] : nullptr; }
+
+// Том для TangVfs: диск pdrv под буквой "pdrv:".
 class HostVolume : public zifi::FatVolumePort {
  public:
+  HostVolume(BYTE pdrv, const char* drive, const char* absent)
+      : pdrv_(pdrv), drive_(drive), absent_(absent) {}
   const char* acquire() override {
-    if (!g_present) {
-      return "no Tang SD card";
+    const Disk& disk = g_disks[pdrv_];
+    if (!disk.present) {
+      return absent_;
     }
-    return g_mounted ? nullptr : "Tang SD is not mounted";
+    return disk.mounted ? nullptr : "volume is not mounted";
   }
   void release() override {}
-  const char* drive() const override { return "0:"; }
+  const char* drive() const override { return drive_; }
+
+ private:
+  BYTE pdrv_;
+  const char* drive_;
+  const char* absent_;
 };
 
-HostVolume g_volume;
+HostVolume g_tangVolume(0, "0:", "no Tang SD card");
+HostVolume g_usbVolume(1, "1:", "no USB drive");
 
 bool copyIn(const fs::path& source, const std::string& target, std::string& error) {
   for (const fs::directory_entry& entry : fs::directory_iterator(source)) {
@@ -83,40 +102,80 @@ bool copyIn(const fs::path& source, const std::string& target, std::string& erro
   return true;
 }
 
+// Новый диск pdrv: образ megabytes МБ, файловая система format (FM_FAT32, FM_EXFAT) с кластером
+// cluster байт, смонтирован под буквой drive, содержимое — копия папки folder (пусто — пустой).
+bool createDisk(BYTE pdrv, const char* drive, const std::string& folder, uint32_t megabytes,
+                BYTE format, DWORD cluster, std::string& error) {
+  Disk& disk = g_disks[pdrv];
+  if (disk.mounted) {
+    f_mount(nullptr, drive, 0);
+    disk.mounted = false;
+  }
+  disk.data.assign(static_cast<size_t>(megabytes) * 1024U * 1024U, 0);
+  MKFS_PARM options = {};
+  options.fmt = format;
+  options.au_size = cluster;
+  std::vector<uint8_t> work(4096);
+  FRESULT result = f_mkfs(drive, &options, work.data(), static_cast<UINT>(work.size()));
+  if (result != FR_OK) {
+    error = "mkfs: " + std::to_string(result);
+    return false;
+  }
+  result = f_mount(&disk.fs, drive, 1);
+  if (result != FR_OK) {
+    error = "mount: " + std::to_string(result);
+    return false;
+  }
+  disk.mounted = true;
+  if (!folder.empty() && !copyIn(fs::path(folder), drive, error)) {
+    return false;
+  }
+  return true;
+}
+
 }  // namespace
 
-// --- устройство FatFs: образ в памяти --------------------------------------------------------
+// --- устройство FatFs: образы в памяти --------------------------------------------------------
 
-extern "C" DSTATUS disk_initialize(BYTE) { return g_disk.empty() ? STA_NOINIT : 0; }
-extern "C" DSTATUS disk_status(BYTE) { return g_disk.empty() ? STA_NOINIT : 0; }
+extern "C" DSTATUS disk_initialize(BYTE pdrv) {
+  const Disk* disk = diskOf(pdrv);
+  return disk == nullptr || disk->data.empty() ? STA_NOINIT : 0;
+}
+extern "C" DSTATUS disk_status(BYTE pdrv) { return disk_initialize(pdrv); }
 
-extern "C" DRESULT disk_read(BYTE, BYTE* buffer, LBA_t sector, UINT count) {
+extern "C" DRESULT disk_read(BYTE pdrv, BYTE* buffer, LBA_t sector, UINT count) {
+  const Disk* disk = diskOf(pdrv);
   const uint64_t at = static_cast<uint64_t>(sector) * kSectorBytes;
   const uint64_t length = static_cast<uint64_t>(count) * kSectorBytes;
-  if (at + length > g_disk.size()) {
+  if (disk == nullptr || at + length > disk->data.size()) {
     return RES_PARERR;
   }
-  std::memcpy(buffer, g_disk.data() + at, static_cast<size_t>(length));
+  std::memcpy(buffer, disk->data.data() + at, static_cast<size_t>(length));
   return RES_OK;
 }
 
-extern "C" DRESULT disk_write(BYTE, const BYTE* buffer, LBA_t sector, UINT count) {
+extern "C" DRESULT disk_write(BYTE pdrv, const BYTE* buffer, LBA_t sector, UINT count) {
+  Disk* disk = diskOf(pdrv);
   const uint64_t at = static_cast<uint64_t>(sector) * kSectorBytes;
   const uint64_t length = static_cast<uint64_t>(count) * kSectorBytes;
-  if (at + length > g_disk.size()) {
+  if (disk == nullptr || at + length > disk->data.size()) {
     return RES_PARERR;
   }
-  std::memcpy(g_disk.data() + at, buffer, static_cast<size_t>(length));
+  std::memcpy(disk->data.data() + at, buffer, static_cast<size_t>(length));
   return RES_OK;
 }
 
-extern "C" DRESULT disk_ioctl(BYTE, BYTE command, void* buffer) {
+extern "C" DRESULT disk_ioctl(BYTE pdrv, BYTE command, void* buffer) {
+  const Disk* disk = diskOf(pdrv);
+  if (disk == nullptr) {
+    return RES_PARERR;
+  }
   switch (command) {
     case CTRL_SYNC:
     case CTRL_TRIM:
       return RES_OK;
     case GET_SECTOR_COUNT:
-      *static_cast<LBA_t*>(buffer) = static_cast<LBA_t>(g_disk.size() / kSectorBytes);
+      *static_cast<LBA_t*>(buffer) = static_cast<LBA_t>(disk->data.size() / kSectorBytes);
       return RES_OK;
     case GET_SECTOR_SIZE:
       *static_cast<WORD*>(buffer) = static_cast<WORD>(kSectorBytes);
@@ -157,35 +216,21 @@ namespace zifi {
 namespace host {
 
 bool createTangCard(const std::string& folder, uint32_t megabytes, std::string& error) {
-  if (g_mounted) {
-    f_mount(nullptr, "0:", 0);
-    g_mounted = false;
-  }
-  g_disk.assign(static_cast<size_t>(megabytes) * 1024U * 1024U, 0);
-  MKFS_PARM options = {};
-  options.fmt = FM_FAT32;
-  options.au_size = kSectorBytes;
-  std::vector<uint8_t> work(4096);
-  FRESULT result = f_mkfs("0:", &options, work.data(), static_cast<UINT>(work.size()));
-  if (result != FR_OK) {
-    error = "mkfs: " + std::to_string(result);
-    return false;
-  }
-  result = f_mount(&g_fs, "0:", 1);
-  if (result != FR_OK) {
-    error = "mount: " + std::to_string(result);
-    return false;
-  }
-  g_mounted = true;
-  if (!folder.empty() && !copyIn(fs::path(folder), "0:", error)) {
-    return false;
-  }
-  return true;
+  return createDisk(0, "0:", folder, megabytes, FM_FAT32, kSectorBytes, error);
 }
 
-FatVolumePort& tangVolume() { return g_volume; }
-void setTangCardPresent(bool present) { g_present = present; }
-bool tangCardPresent() { return g_present && g_mounted; }
+FatVolumePort& tangVolume() { return g_tangVolume; }
+void setTangCardPresent(bool present) { g_disks[0].present = present; }
+bool tangCardPresent() { return g_disks[0].present && g_disks[0].mounted; }
+
+bool createUsbFlash(const std::string& folder, uint32_t megabytes, std::string& error) {
+  // exFAT, кластер 4 КБ: так флешку размечает Windows по умолчанию для небольших объёмов
+  return createDisk(1, "1:", folder, megabytes, FM_EXFAT, 4096, error);
+}
+
+FatVolumePort& usbVolume() { return g_usbVolume; }
+void setUsbFlashPresent(bool present) { g_disks[1].present = present; }
+bool usbFlashPresent() { return g_disks[1].present && g_disks[1].mounted; }
 
 }  // namespace host
 }  // namespace zifi

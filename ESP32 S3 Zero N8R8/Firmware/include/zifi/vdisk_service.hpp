@@ -64,6 +64,9 @@ void handle(const PacketView& packet, Z80Transport& transport);
 // Для видео с SD2 (sd2_files; звать с ядра 1 — состояние службы живёт там): SD2 — сама карта Tang
 // (режим 1)?; файл тома VFS по первому кластеру — источник, путь, длина (vdisk::Volume::fileAt).
 bool rawMode();
+// Флешка ESP сейчас SD2 у WC (режим 2, «USB Flash»)? Можно звать из любой задачи (0.1.171: шара SMB
+// «USB» в это время прячется).
+bool usbHeldByWc();
 bool volumeFile(uint32_t cluster, vdisk::Source** source, std::vector<char>& where, uint64_t* size);
 
 // Каждый проход цикла обмена (ядро 1): том флешки после секунды тишины дописывает файл.

@@ -271,24 +271,53 @@ size_t VfsBridge::readForNetwork(uint8_t* output, size_t capacity) {
 }
 
 void VfsBridge::attachLocal(const char* root, VfsBackend* backend) {
-  snprintf(localRoot_, sizeof(localRoot_), "%s", root == nullptr ? "" : root);
-  localRootLength_ = strlen(localRoot_);
-  local_ = localRootLength_ != 0 ? backend : nullptr;
+  if (root == nullptr || root[0] == 0 || backend == nullptr) {
+    return;
+  }
+  // тот же корень — замена источника, иначе первое свободное место
+  size_t slot = kMaxLocal;
+  for (size_t i = 0; i < kMaxLocal; ++i) {
+    if (locals_[i].backend != nullptr && strcmp(locals_[i].root, root) == 0) {
+      slot = i;
+      break;
+    }
+    if (slot == kMaxLocal && locals_[i].backend == nullptr) {
+      slot = i;
+    }
+  }
+  if (slot == kMaxLocal) {
+    return;
+  }
+  snprintf(locals_[slot].root, sizeof(locals_[slot].root), "%s", root);
+  locals_[slot].rootLength = strlen(locals_[slot].root);
+  locals_[slot].backend = backend;
 }
 
-bool VfsBridge::isLocalPath(const char* path) const {
-  return local_ != nullptr && path != nullptr &&
-         strncmp(path, localRoot_, localRootLength_) == 0 &&
-         (path[localRootLength_] == 0 || path[localRootLength_] == '/');
+size_t VfsBridge::localIndex(const char* path) const {
+  if (path == nullptr) {
+    return kMaxLocal;
+  }
+  for (size_t i = 0; i < kMaxLocal; ++i) {
+    const Local& local = locals_[i];
+    if (local.backend != nullptr && strncmp(path, local.root, local.rootLength) == 0 &&
+        (path[local.rootLength] == 0 || path[local.rootLength] == '/')) {
+      return i;
+    }
+  }
+  return kMaxLocal;
 }
+
+bool VfsBridge::isLocalPath(const char* path) const { return localIndex(path) != kMaxLocal; }
 
 VfsBackend& VfsBridge::route(const char* path, const char*& routed) {
   routed = path;
-  if (!isLocalPath(path)) {
+  const size_t index = localIndex(path);
+  if (index == kMaxLocal) {
     return vfs_;
   }
-  routed = path[localRootLength_] == 0 ? "/" : path + localRootLength_;
-  return *local_;
+  const Local& local = locals_[index];
+  routed = path[local.rootLength] == 0 ? "/" : path + local.rootLength;
+  return *local.backend;
 }
 
 void VfsBridge::finish(bool success, const char* error) {

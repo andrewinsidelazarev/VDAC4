@@ -20,7 +20,8 @@ class FatVolumePort {
   virtual const char* drive() const = 0;
 };
 
-// Источник моста VFS — microSD Tang через FatFs самой ESP (шара SMB «TANG», без Z80).
+// Источник моста VFS — том FatFs самой ESP: microSD Tang (шара SMB «TANG», без Z80), а с 0.1.171 и
+// флешка в USB-C ESP32 (шара «USB»: тот же класс, другой порт тома, свои серийный номер и метка).
 // Смысл операций — как у VfsClient (vfs_backend.hpp). Пути — от корня карты ("/CORES/NES.BIN"),
 // в UTF-8; FatFs прошивки работает в кодовой странице 437 (CONFIG_FATFS_API_ENCODING_ANSI_OEM),
 // поэтому имя со знаками вне неё отвергается (0x13), а в листинге такие знаки — «?» от FatFs.
@@ -28,10 +29,13 @@ class FatVolumePort {
 class TangVfs : public VfsBackend {
  public:
   static constexpr uint32_t kSerial = 0x54414E47;   // «TANG»: у FatFs нет серийного номера тома
+  static constexpr uint32_t kUsbSerial = 0x55534220; // «USB »: шара флешки (0.1.171)
   // 16 КиБ (0.1.137, было 4): FatFs отдаёт карте серии CMD25 до 32 блоков; буфер — в PSRAM.
   static constexpr size_t kBufferSize = 16384;
 
-  explicit TangVfs(FatVolumePort& port);
+  // serial и label — серийный номер и метка тома в ответах SMB о томе (Windows различает тома
+  // по серийному номеру); label — строка, живущая всё время работы.
+  explicit TangVfs(FatVolumePort& port, uint32_t serial = kSerial, const char* label = "TANG");
   ~TangVfs() override;
 
   TangVfs(const TangVfs&) = delete;
@@ -83,6 +87,8 @@ class TangVfs : public VfsBackend {
   void applyPendingTimes();
 
   FatVolumePort& port_;
+  uint32_t serial_;
+  const char* label_;
   State* state_;
   uint8_t* buffer_;
   uint8_t openMode_;

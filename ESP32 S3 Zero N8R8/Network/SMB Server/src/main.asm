@@ -20,7 +20,12 @@ mainStart:
         ; а config и UART предоставляют используемые ими общие процедуры.
         INCLUDE "smb_server.asm"
         DEFINE CONFIG_ACTIVE_VOLUME
+        ; zifi.ini читается в VfsBuf (0.5.22): INI нужен только при старте (Config_Load и отправка
+        ; CMD_WIFI_INI в Link_Start), а VfsBuf занят лишь файловыми запросами — их разбирает
+        ; Vfs_Serve в цикле сервера, после Link_Start. Так освобождены 512 байт страницы #8000.
+        DEFINE CONFIG_INI_BUFFER_AT VfsBuf
         INCLUDE "config.asm"
+        ASSERT IO_SIZE+16 >= CONFIG_INI_BUFFER_SIZE, "VfsBuf is smaller than the zifi.ini buffer"
         INCLUDE "zifi_link.asm"
 
 ; Переходники API Wild Commander. Номер функции передаётся в A и выполняется

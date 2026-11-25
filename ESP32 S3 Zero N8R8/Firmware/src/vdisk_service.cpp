@@ -1,6 +1,7 @@
 // Служба виртуального диска VDAC4 VFS — см. zifi/vdisk_service.hpp
 #include "zifi/vdisk_service.hpp"
 
+#include <atomic>
 #include <string.h>
 
 #include "zifi/board.hpp"
@@ -36,6 +37,10 @@ void put32(uint8_t* p, uint32_t v) {
   p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
 }
 uint32_t get32(const uint8_t* p) { return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
+
+// Флешка — SD2 у WC (режим 2): шара SMB «USB» тогда прячется (0.1.171) — WC пишет в её файлы через
+// свой том, и правки по сети ему посреди работы видеть нельзя. atomic: пишет ядро 1, читает задача SMB.
+std::atomic<bool> g_usbHeld{false};
 
 struct State {
   vdisk::Volume volume;
@@ -105,6 +110,7 @@ struct State {
       usbVolume.reset();
     }
     usbMode = false;
+    g_usbHeld = false;
     usbDirty = false;
     lba = UINT32_MAX;
   }
@@ -118,6 +124,8 @@ State& state() {
 }  // namespace
 
 bool rawMode() { return state().raw; }
+
+bool usbHeldByWc() { return g_usbHeld.load(); }
 
 bool volumeFile(uint32_t cluster, vdisk::Source** source, std::vector<char>& where, uint64_t* size) {
   State& s = state();
@@ -309,6 +317,7 @@ void handle(const PacketView& packet, Z80Transport& transport) {
           if (!s.usbMode && usbDrive().ready()) {
             s.usbVolume.reset();             // свежий снимок флешки
             s.usbMode = true;
+            g_usbHeld = true;
             s.usbDirty = false;
             s.lba = UINT32_MAX;
             bringupLog("vdisk", "SD2 = USB flash, read and write");

@@ -29,7 +29,14 @@ class HttpsHybridUnzipContractTest(unittest.TestCase):
         self.assertIn("call retry_online_unzip_if_bad", spg)
         self.assertIn("call zip_body_is_valid", spg)
         self.assertIn("ld hl,zip_url_buffer_data", spg)
-        self.assertIn("Online unzip failed, loading ZIP", spg)
+        # Сломался онлайн-распаковщик — исходный ZIP грузится не молча, а после вопроса пользователю
+        # (так в исходнике SPG с первого коммита; тест ждал прежнюю строку «Online unzip failed,
+        # loading ZIP», которой в коде нет — поправлено 25.11.2026).
+        self.assertIn('win_unpacker_text\tdb "Online unpacker is damaged.",0', spg)
+        self.assertIn('win_question_text\tdb "Save zip archive? (Y/N)",0', spg)
+        self.assertIn("win_unzip_ask\tcall win_ask_unpacker", spg)
+        ask = spg[spg.index("\nretry_online_unzip_if_bad\n"):spg.index("\nretry_online_unzip_failed\n")]
+        self.assertLess(ask.index("ld hl,win_unzip_ask"), ask.index("ld hl,zip_url_buffer_data"))
         self.assertIn("ld b,237", spg)
         self.assertNotIn('"http://prods.tslabs.info/', spg)
         self.assertIn('"https://prods.tslabs.info/prods_zifi.php?t=1"', spg)

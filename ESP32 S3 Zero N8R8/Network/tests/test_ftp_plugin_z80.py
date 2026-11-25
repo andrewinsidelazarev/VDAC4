@@ -997,5 +997,14 @@ class FtpPluginDirBatchTest(SmbPluginDirBatchTest):
         return Harness(WMF, SYM)
 
 
+def load_tests(loader, standard_tests, pattern):
+    """Сценарии этого файла сами по себе не запускаются: они — общая основа, а гоняет их
+    test_spi_link_z80.py (spi_variant: FtpDatesTest → SpiFtpDatesTest и т. д.) на настоящих сборках
+    плагинов для VDAC4 (build\\vdac4, канал SPI). Сборки ZiFi с каналом UART (ZIFIFTP.WMF, ZIFISMB.WMF)
+    build.bat больше не делает, и прямой запуск проверял бы устаревшие файлы, оставшиеся в build:
+    25.11.2026 так набралось 55 ошибок по образам от 12.11. Сценарии теста не тронуты."""
+    return unittest.TestSuite()
+
+
 if __name__ == "__main__":
     unittest.main()

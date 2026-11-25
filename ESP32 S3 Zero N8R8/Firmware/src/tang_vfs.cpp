@@ -121,8 +121,10 @@ class TangVfs::Lock {
   const char* problem_;
 };
 
-TangVfs::TangVfs(FatVolumePort& port)
+TangVfs::TangVfs(FatVolumePort& port, uint32_t serial, const char* label)
     : port_(port),
+      serial_(serial),
+      label_(label != nullptr ? label : "TANG"),
       state_(nullptr),
       buffer_(static_cast<uint8_t*>(allocate(kBufferSize))),
       openMode_(0),
@@ -367,8 +369,8 @@ bool TangVfs::getFsInfo(VfsFsInfo& info, bool, bool) {
   info.sectorsPerCluster = static_cast<uint8_t>(sectorsPerCluster);
   info.totalClusters = fs->n_fatent - 2;
   info.freeClusters = freeClusters;
-  info.serial = kSerial;
-  snprintf(info.label, sizeof(info.label), "TANG");
+  info.serial = serial_;
+  snprintf(info.label, sizeof(info.label), "%s", label_);
   info.totalSectors = info.totalClusters * sectorsPerCluster;
   lastStatus_ = 0;
   return true;

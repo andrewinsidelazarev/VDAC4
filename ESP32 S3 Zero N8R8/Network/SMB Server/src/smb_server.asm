@@ -263,10 +263,10 @@ Link_Start:
         ; Подключение к сети занимает секунды, поэтому ждём с повтором.
         ld a,RESP_WIFI_INI
         call Link_WaitResult
-        jr c,.wifi_fail
+        jp c,.wifi_fail                  ; jp: разбор строки UNC3 (0.5.22) отодвинул метку
         ld a,(ProtoBuf)
         or a
-        jr z,.wifi_fail
+        jp z,.wifi_fail
         ; Запомнить выданный IP для окна статуса.
         ld hl,ProtoBuf+1
         ld de,LocalIp
@@ -325,9 +325,25 @@ Link_Start:
         ld a,(ProtoBuf+4)
         ld (LinkTang),a
 .tang_done:
+        ; С прошивки 0.1.172 шестой байт — есть шара USB (флешка в USB-C ESP32). Прошивка
+        ; постарше отвечает пятью байтами: шары нет, строка UNC3 — прочерк.
+        xor a
+        ld (LinkUsb),a
+        ld hl,(ProtoRxLen)
+        ld a,h
+        or a
+        jr nz,.usb_flag
+        ld a,l
+        cp 6
+        jr c,.usb_done
+.usb_flag:
+        ld a,(ProtoBuf+5)
+        ld (LinkUsb),a
+.usb_done:
         call Ui_BuildPort
         call Ui_BuildNetbios
         call Ui_BuildTang
+        call Ui_BuildUsb
         or a
         ret
 
@@ -599,6 +615,7 @@ LinkSmbShare:   db "?",0                  ; номер устройства по
 LinkSmbStartLen equ $-LinkSmbStart
 LinkNetbios:    db 0                     ; 1, если ESP заняла UDP-порт 137
 LinkTang:       db 0                     ; 1, если ESP открыла шару TANG (microSD Tang)
+LinkUsb:        db 0                     ; 1, если ESP открыла шару USB (флешка в USB-C ESP32, 0.1.172)
 LinkIniMsg:     db "ini=",0
 LinkNoReply:    db "no ESP reply",0
 LinkNativePrefix: db "Native C++ ",0

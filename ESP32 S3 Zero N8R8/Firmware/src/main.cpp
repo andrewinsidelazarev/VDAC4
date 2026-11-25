@@ -44,6 +44,7 @@
 #include "zifi/tang_link.hpp"
 #include "zifi/tang_menu.hpp"
 #include "zifi/tang_update.hpp"
+#include "zifi/usb_share.hpp"
 #include "zifi/net_client.hpp"
 #include "zifi/crash_record.hpp"
 #include "zifi/net_console.hpp"
@@ -551,6 +552,14 @@ void Application::begin() {
   // Есть, пока Tang на связи, карта вставлена и WC её не держит (SD2).
   vfsBridge_.attachLocal(SmbServer::kTangRoot, &tang_sd::vfs());
   smb_.setTangShare([](void*) { return tang_sd::shareReady(); }, nullptr);
+#endif
+#if ZIFI_HAS_USB_DRIVE
+  // Шара SMB «USB» (0.1.171): флешка в USB-C ESP32 через FatFs ESP, тем же TangVfs. Есть, пока
+  // флешка вставлена и смонтирована и WC не держит её как SD2 (VDAC4 VFS, режим «USB Flash»).
+  vfsBridge_.attachLocal(SmbServer::kUsbRoot, &usb_share::vfs());
+  smb_.setUsbShare([](void*) { return usb_share::shareReady(); }, nullptr);
+#endif
+#if ZIFI_HAS_SPI_LINK
   // Сторож обмена: встала задача обмена — запись в журнал и перезапуск ESP.
   startLinkWatchdog(link_, vfsBridge_);
   // LINK к Tang: ждёт питания Tang, выбирает частоту, следит за состоянием Tang
@@ -1068,12 +1077,13 @@ void Application::processFtpRamStats() {
 }
 
 void Application::processSmbStart() {
-  // Ответ: [успех][порт LE16][NBNS 0/1][TANG 0/1]. NBNS — удалось ли занять UDP/137
+  // Ответ: [успех][порт LE16][NBNS 0/1][TANG 0/1][USB 0/1]. NBNS — удалось ли занять UDP/137
   // для заданного имени SMB; TANG (0.1.125) — открыта ли шара microSD Tang (окно
-  // плагина, строка UNC2). Старый плагин читает первые четыре байта.
+  // плагина, строка UNC2); USB (0.1.172) — открыта ли шара флешки в USB-C ESP32 (строка UNC3).
+  // Старый плагин читает первые четыре или пять байтов.
   exchange_->responseCommand = kRespSmbStart;
-  exchange_->responseLength = 5;
-  memset(exchange_->response, 0, 5);
+  exchange_->responseLength = 6;
+  memset(exchange_->response, 0, 6);
   if (otaHoldsNetwork("smb")) {
     setNetworkError("smb:ota active");
     return;
@@ -1111,6 +1121,9 @@ void Application::processSmbStart() {
   }
 #endif
   exchange_->response[4] = smb_.tangShareAvailable() ? 1 : 0;
+  // Флешку usb_drive монтирует сам через 3 с после старта ESP, а SMB_START раньше обычно не
+  // приходит (связь с Tang выше ждёт до 10 с); не смонтирована — строка UNC3 покажет прочерк.
+  exchange_->response[5] = smb_.usbShareAvailable() ? 1 : 0;
 }
 
 void Application::processSmbStop() {

@@ -36,6 +36,30 @@ int smb2_dcerpc_srvsvc_reply(struct smb2_context *smb2,
                             size_t *response_length,
                             struct smb2_dcerpc_request_info *request_info);
 
+/* Дополнительная дисковая шара: имя (как в \\сервер\имя) и подпись, которую Windows
+ * показывает в «Комментарии» (net view). */
+struct smb2_dcerpc_share {
+        const char *name;
+        const char *remark;
+};
+
+/* Сколько дополнительных шар умеет ответ (VDAC4 с 0.1.171: «TANG» — microSD Tang и «USB» —
+ * флешка в USB-C ESP32). */
+#define SMB2_DCERPC_MAX_EXTRA_SHARES 4
+
+/* То же, что smb2_dcerpc_srvsvc_reply, но кроме disk_share ещё extra_count дисковых шар из
+ * extra (порядок — как в списке Windows). Шара без имени (NULL или "") пропускается. */
+int smb2_dcerpc_srvsvc_reply3(struct smb2_context *smb2,
+                             const uint8_t *request, size_t request_length,
+                             const char *disk_share,
+                             const struct smb2_dcerpc_share *extra,
+                             int extra_count,
+                             const char *server_name,
+                             uint16_t *presentation_context,
+                             uint8_t *response, size_t response_capacity,
+                             size_t *response_length,
+                             struct smb2_dcerpc_request_info *request_info);
+
 /* То же со второй дисковой шарой (VDAC4: «TANG» — microSD Tang): extra_disk_share
  * NULL или пустая строка — её нет, ответы как у smb2_dcerpc_srvsvc_reply. */
 int smb2_dcerpc_srvsvc_reply2(struct smb2_context *smb2,

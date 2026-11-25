@@ -59,6 +59,9 @@ enum : uint8_t {
   kRemoved,     // готовую флешку вынули: ядро 1 отмонтирует её
 };
 std::atomic<uint8_t> g_state{kWaiting};
+// Сколько раз флешка становилась готовой с запуска ESP (0.1.171): новое монтирование — новый номер.
+// По нему шара SMB «USB» узнаёт, что прежняя флешка вынута и её буква FatFs могла смениться.
+std::atomic<uint32_t> g_generation{0};
 std::atomic<bool> g_pcOnPort{false};
 std::atomic<bool> g_retryPort{false};
 std::atomic<uint32_t> g_hostStartedMs{0};
@@ -376,6 +379,9 @@ void driveTask(void*) {
       if (opened == kEmpty) {
         closeDrive();
       }
+      if (opened == kReady) {
+        ++g_generation;                   // до «готова»: увидевший kReady видит и новый номер
+      }
       g_state.store(opened);
     }
     if (!waitReported && g_state.load() == kEmpty &&
@@ -441,6 +447,10 @@ bool UsbDrive::ready() {
   }
   return state == kReady;
 }
+
+bool UsbDrive::isReady() const { return g_state.load() == kReady; }
+
+uint32_t UsbDrive::generation() const { return g_generation.load(); }
 
 const char* UsbDrive::status() const {
   switch (g_state.load()) {

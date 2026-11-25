@@ -266,4 +266,12 @@ ConfigTryDevice:      db 0
 ConfigError:          db 0
 IniLength:            dw 0
 FtpPort:              dw 21
+        ; Плагин может отдать под zifi.ini свой буфер, занятый только после запуска (25.11.2026,
+        ; SMB 0.5.22: страница кода #8000 полна, а 512 байт буфера нужны лишь при старте — пока INI
+        ; читается и уходит в ESP). Тогда он задаёт DEFINE CONFIG_INI_BUFFER_AT <метка> и сам
+        ; проверяет, что там не меньше CONFIG_INI_BUFFER_SIZE байт. Остальные плагины — как прежде.
+        IFDEF CONFIG_INI_BUFFER_AT
+IniBuffer             equ CONFIG_INI_BUFFER_AT
+        ELSE
 IniBuffer:            ds CONFIG_INI_BUFFER_SIZE
+        ENDIF

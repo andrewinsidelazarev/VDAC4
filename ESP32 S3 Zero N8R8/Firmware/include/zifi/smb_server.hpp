@@ -36,6 +36,16 @@ class SmbServer {
   // Шара TANG сейчас есть (для окна плагина: ответ SMB_START).
   bool tangShareAvailable() const;
 
+  // Третья шара «USB» (0.1.171, 25.11.2026; пользователь: «третью шару — USB OTG Flash ESP32. Шара
+  // должна быть только если флешка в USB ESP32 вставлена») — флешка в разъёме USB-C ESP32 через
+  // FatFs ESP: тот же TangVfs, свой том (usb_share::vfs(), корень SmbServer::kUsbRoot у моста VFS).
+  // probe — есть ли она сейчас: флешка вставлена и смонтирована, WC не держит её как SD2 (VDAC4 VFS,
+  // режим «USB Flash»). Без вызова шары нет.
+  static constexpr const char* kUsbRoot = "/\x02USB";
+  static constexpr const char* kUsbShare = "USB";
+  void setUsbShare(SharePresence probe, void* context);
+  bool usbShareAvailable() const;
+
   // Пояс из zifi.ini (time:, целые часы). В FAT хранится местное время, а SMB
   // передаёт FILETIME в UTC: пояс нужен для перевода в обе стороны.
   void setTimezoneHours(int8_t hours);

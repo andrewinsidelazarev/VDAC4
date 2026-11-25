@@ -109,9 +109,10 @@ bool DirectoryCache::belongsToSubtree(const char* value, const char* root) {
     return false;
   }
   if (strcmp(root, "/") == 0) {
-    // Корень тома WC не включает шару SMB «TANG»: её пути начинаются с "/\x01TANG"
-    // (SmbServer::kTangRoot), и правка карты Evo не должна сбрасывать её каталоги.
-    return value[0] == '/' && value[1] != '\x01';
+    // Корень тома WC не включает местные шары SMB «TANG» и «USB»: их пути начинаются с "/\x01TANG"
+    // и "/\x02USB" (SmbServer::kTangRoot, kUsbRoot) — управляющим знаком, — и правка карты Evo не
+    // должна сбрасывать их каталоги.
+    return value[0] == '/' && !(value[1] >= '\x01' && value[1] < ' ');
   }
   size_t index = 0;
   while (root[index] != 0 && value[index] != 0) {

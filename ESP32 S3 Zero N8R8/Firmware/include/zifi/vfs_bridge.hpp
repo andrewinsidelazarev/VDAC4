@@ -77,11 +77,12 @@ class VfsBridge {
   bool begin(bool psramAvailable);
   bool ready() const { return ready_; }
 
-  // Второй источник файлов (шара SMB «TANG»: microSD Tang через FatFs ESP). Запросы с путём
-  // под root ("/\x01TANG" — такого первого имени у пути WC не бывает: SMB-сервер отвергает
-  // управляющие знаки) уходят ему с путём от его корня; операции без пути — тому источнику,
-  // где открыт текущий файл или каталог; GET_FS_INFO без пути — тому WC. Вызывать до первых
-  // запросов, с ядра 1 или до запуска задач.
+  // Ещё один источник файлов (шара SMB «TANG»: microSD Tang через FatFs ESP; с 0.1.171 и «USB»:
+  // флешка в USB-C ESP32). Запросы с путём под root ("/\x01TANG", "/\x02USB" — такого первого
+  // имени у пути WC не бывает: SMB-сервер отвергает управляющие знаки) уходят ему с путём от его
+  // корня; операции без пути — тому источнику, где открыт текущий файл или каталог; GET_FS_INFO
+  // без пути — тому WC. До kMaxLocal источников; тот же корень второй раз — замена. Вызывать до
+  // первых запросов, с ядра 1 или до запуска задач.
   void attachLocal(const char* root, VfsBackend* backend);
   bool isLocalPath(const char* path) const;
   // Наибольшее окно дописывания в конец файла path (0.1.135): у карты Evo с плагином SMB 0.5.21 —
@@ -170,10 +171,19 @@ class VfsBridge {
   static bool writeNetworkWindow(void* context, const uint8_t* data,
                                  size_t length);
 
+  // Местные источники (шары SMB без Z80): microSD Tang и флешка USB (0.1.171). Каждый — со своим
+  // корнем; путь, ни под один корень не попавший, — тому WC.
+  static constexpr size_t kMaxLocal = 2;
+  struct Local {
+    VfsBackend* backend = nullptr;
+    char root[16] = {};
+    size_t rootLength = 0;
+  };
+  // Номер местного источника, под корень которого попал path, или kMaxLocal — путь тома WC.
+  size_t localIndex(const char* path) const;
+
   VfsClient vfs_;
-  VfsBackend* local_ = nullptr;
-  char localRoot_[16] = {};
-  size_t localRootLength_ = 0;
+  Local locals_[kMaxLocal];
   VfsBackend* current_ = nullptr;   // где открыт текущий файл или каталог
   VfsBackend* active_ = nullptr;    // кто исполняет текущий запрос (для finish)
   Exchange* exchange_;

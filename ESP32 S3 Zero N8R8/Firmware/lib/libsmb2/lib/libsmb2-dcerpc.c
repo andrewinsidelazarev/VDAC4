@@ -74,6 +74,24 @@ static char zifi_extra_remark[] = "Tang microSD";
 static char zifi_ipc_remark[] = "Remote IPC";
 static char zifi_empty_string[] = "";
 
+/* Дополнительная шара extra по имени name (без учёта регистра букв ASCII); NULL — такой нет.
+ * Шары без имени пропускаются. */
+static int zifi_rpc_ascii_equal_no_case(const char *left, const char *right);
+static const struct smb2_dcerpc_share *
+zifi_rpc_find_extra(const struct smb2_dcerpc_share *extra, int extra_count,
+                    const char *name)
+{
+        int i;
+
+        for (i = 0; extra != NULL && i < extra_count; i++) {
+                if (extra[i].name != NULL && *extra[i].name != 0 &&
+                    zifi_rpc_ascii_equal_no_case(name, extra[i].name)) {
+                        return &extra[i];
+                }
+        }
+        return NULL;
+}
+
 /* Connection-oriented DCE/RPC fault codes from MS-RPCE/C706. A valid RPC
  * method failure must travel inside a FAULT PDU; returning an SMB error makes
  * Windows treat the named pipe as broken and bind it again forever. */
@@ -805,7 +823,8 @@ static int
 zifi_rpc_share_enum_response(struct smb2_context *smb2,
                              const uint8_t *request, uint16_t fragment_length,
                              uint32_t call_id, const char *disk_share,
-                             const char *extra_share,
+                             const struct smb2_dcerpc_share *extra,
+                             int extra_count,
                              uint16_t context_id,
                              uint8_t *response, size_t response_capacity,
                              size_t *response_length,
@@ -815,12 +834,15 @@ zifi_rpc_share_enum_response(struct smb2_context *smb2,
         struct dcerpc_pdu *pdu;
         struct smb2_iovec iov;
         struct zifi_rpc_share_enum_response reply;
-        struct srvsvc_SHARE_INFO_0 level0[3];
-        struct srvsvc_SHARE_INFO_1 level1[3];
-        struct srvsvc_SHARE_INFO_2 level2[3];
-        /* Дисковые шары, затем IPC$: ipc — её номер в массивах. */
-        const int extra = extra_share != NULL && *extra_share != 0;
-        const int ipc = extra ? 2 : 1;
+        /* Дисковая шара, до SMB2_DCERPC_MAX_EXTRA_SHARES дополнительных, затем IPC$. */
+        struct srvsvc_SHARE_INFO_0 level0[2 + SMB2_DCERPC_MAX_EXTRA_SHARES];
+        struct srvsvc_SHARE_INFO_1 level1[2 + SMB2_DCERPC_MAX_EXTRA_SHARES];
+        struct srvsvc_SHARE_INFO_2 level2[2 + SMB2_DCERPC_MAX_EXTRA_SHARES];
+        /* Дополнительные шары с именем — по порядку; ipc — номер IPC$ в массивах (за ними). */
+        const struct smb2_dcerpc_share *shown[SMB2_DCERPC_MAX_EXTRA_SHARES];
+        int extras = 0;
+        int ipc;
+        int i;
         uint32_t level;
         int resume_handle_present;
         char response_name[] = "Response";
@@ -841,6 +863,14 @@ zifi_rpc_share_enum_response(struct smb2_context *smb2,
                                       response, response_capacity,
                                       response_length, request_info);
         }
+
+        for (i = 0; extra != NULL && i < extra_count &&
+                    extras < SMB2_DCERPC_MAX_EXTRA_SHARES; i++) {
+                if (extra[i].name != NULL && *extra[i].name != 0) {
+                        shown[extras++] = &extra[i];
+                }
+        }
+        ipc = 1 + extras;
 
         memset(&dce, 0, sizeof(dce));
         dce.smb2 = smb2;
@@ -865,8 +895,8 @@ zifi_rpc_share_enum_response(struct smb2_context *smb2,
 
         if (level == 0) {
                 level0[0].netname = discard_const(disk_share);
-                if (extra) {
-                        level0[1].netname = discard_const(extra_share);
+                for (i = 0; i < extras; i++) {
+                        level0[1 + i].netname = discard_const(shown[i]->name);
                 }
                 level0[ipc].netname = zifi_ipc_share;
                 reply.rep.ses.ShareEnum.Level0.EntriesRead = ipc + 1;
@@ -875,10 +905,12 @@ zifi_rpc_share_enum_response(struct smb2_context *smb2,
                 level1[0].netname = discard_const(disk_share);
                 level1[0].type = SRVSVC_SHARE_TYPE_DISKTREE;
                 level1[0].remark = zifi_disk_remark;
-                if (extra) {
-                        level1[1].netname = discard_const(extra_share);
-                        level1[1].type = SRVSVC_SHARE_TYPE_DISKTREE;
-                        level1[1].remark = zifi_extra_remark;
+                for (i = 0; i < extras; i++) {
+                        level1[1 + i].netname = discard_const(shown[i]->name);
+                        level1[1 + i].type = SRVSVC_SHARE_TYPE_DISKTREE;
+                        level1[1 + i].remark = discard_const(
+                                shown[i]->remark != NULL ? shown[i]->remark
+                                                         : zifi_empty_string);
                 }
                 level1[ipc].netname = zifi_ipc_share;
                 level1[ipc].type = SRVSVC_SHARE_TYPE_IPC |
@@ -893,13 +925,15 @@ zifi_rpc_share_enum_response(struct smb2_context *smb2,
                 level2[0].max_users = 0xffffffff;
                 level2[0].path = discard_const(disk_share);
                 level2[0].passwd = zifi_empty_string;
-                if (extra) {
-                        level2[1].netname = discard_const(extra_share);
-                        level2[1].type = SRVSVC_SHARE_TYPE_DISKTREE;
-                        level2[1].remark = zifi_extra_remark;
-                        level2[1].max_users = 0xffffffff;
-                        level2[1].path = discard_const(extra_share);
-                        level2[1].passwd = zifi_empty_string;
+                for (i = 0; i < extras; i++) {
+                        level2[1 + i].netname = discard_const(shown[i]->name);
+                        level2[1 + i].type = SRVSVC_SHARE_TYPE_DISKTREE;
+                        level2[1 + i].remark = discard_const(
+                                shown[i]->remark != NULL ? shown[i]->remark
+                                                         : zifi_empty_string);
+                        level2[1 + i].max_users = 0xffffffff;
+                        level2[1 + i].path = discard_const(shown[i]->name);
+                        level2[1 + i].passwd = zifi_empty_string;
                 }
                 level2[ipc].netname = zifi_ipc_share;
                 level2[ipc].type = SRVSVC_SHARE_TYPE_IPC |
@@ -952,13 +986,15 @@ zifi_rpc_share_get_info_response(struct smb2_context *smb2,
                                  const uint8_t *request,
                                  uint16_t fragment_length, uint32_t call_id,
                                  const char *disk_share,
-                                 const char *extra_share, uint16_t context_id,
+                                 const struct smb2_dcerpc_share *extra,
+                                 int extra_count, uint16_t context_id,
                                  uint8_t *response, size_t response_capacity,
                                  size_t *response_length,
                                  struct smb2_dcerpc_request_info *request_info)
 {
         struct dcerpc_context decode_context;
         struct dcerpc_pdu *decode_pdu = NULL;
+        const struct smb2_dcerpc_share *found;
         struct zifi_rpc_share_get_info_request decoded;
         struct zifi_rpc_share_get_info_response reply;
         int result;
@@ -986,11 +1022,12 @@ zifi_rpc_share_get_info_response(struct smb2_context *smb2,
         disk = zifi_rpc_ascii_equal_no_case(decoded.net_name, disk_share);
         disk_name = discard_const(disk_share);
         disk_remark = zifi_disk_remark;
-        if (!disk && extra_share != NULL && *extra_share != 0 &&
-            zifi_rpc_ascii_equal_no_case(decoded.net_name, extra_share)) {
+        found = disk ? NULL : zifi_rpc_find_extra(extra, extra_count, decoded.net_name);
+        if (found != NULL) {
                 disk = 1;
-                disk_name = discard_const(extra_share);
-                disk_remark = zifi_extra_remark;
+                disk_name = discard_const(found->name);
+                disk_remark = discard_const(found->remark != NULL ? found->remark
+                                                                  : zifi_empty_string);
         }
         ipc = zifi_rpc_ascii_equal_no_case(decoded.net_name, zifi_ipc_share);
         if (decoded.level != 0 && decoded.level != 1 && decoded.level != 2) {
@@ -1047,7 +1084,8 @@ zifi_rpc_share_check_response(struct smb2_context *smb2,
                               const uint8_t *request,
                               uint16_t fragment_length, uint32_t call_id,
                               const char *disk_share,
-                              const char *extra_share, uint16_t context_id,
+                              const struct smb2_dcerpc_share *extra,
+                              int extra_count, uint16_t context_id,
                               uint8_t *response, size_t response_capacity,
                               size_t *response_length,
                               struct smb2_dcerpc_request_info *request_info)
@@ -1073,8 +1111,7 @@ zifi_rpc_share_check_response(struct smb2_context *smb2,
         }
         memset(&reply, 0, sizeof(reply));
         if (zifi_rpc_ascii_equal_no_case(decoded.device, disk_share) ||
-            (extra_share != NULL && *extra_share != 0 &&
-             zifi_rpc_ascii_equal_no_case(decoded.device, extra_share))) {
+            zifi_rpc_find_extra(extra, extra_count, decoded.device) != NULL) {
                 reply.type = SRVSVC_SHARE_TYPE_DISKTREE;
         } else if (zifi_rpc_ascii_equal_no_case(decoded.device,
                                                 zifi_ipc_share)) {
@@ -1172,6 +1209,29 @@ smb2_dcerpc_srvsvc_reply2(struct smb2_context *smb2,
                           size_t *response_length,
                           struct smb2_dcerpc_request_info *request_info)
 {
+        struct smb2_dcerpc_share extra;
+
+        extra.name = extra_disk_share;
+        extra.remark = zifi_extra_remark;
+        return smb2_dcerpc_srvsvc_reply3(smb2, request, request_length,
+                                         disk_share, &extra, 1, server_name,
+                                         presentation_context, response,
+                                         response_capacity, response_length,
+                                         request_info);
+}
+
+int
+smb2_dcerpc_srvsvc_reply3(struct smb2_context *smb2,
+                          const uint8_t *request, size_t request_length,
+                          const char *disk_share,
+                          const struct smb2_dcerpc_share *extra,
+                          int extra_count,
+                          const char *server_name,
+                          uint16_t *presentation_context,
+                          uint8_t *response, size_t response_capacity,
+                          size_t *response_length,
+                          struct smb2_dcerpc_request_info *request_info)
+{
         uint16_t fragment_length;
         uint16_t context_id;
         uint16_t opnum;
@@ -1242,21 +1302,21 @@ smb2_dcerpc_srvsvc_reply2(struct smb2_context *smb2,
                 case SRVSVC_NETRSHAREENUM:
                         return zifi_rpc_share_enum_response(
                                 smb2, request, fragment_length, call_id,
-                                disk_share, extra_disk_share, context_id,
+                                disk_share, extra, extra_count, context_id,
                                 response,
                                 response_capacity, response_length,
                                 request_info);
                 case SRVSVC_NETRSHAREGETINFO:
                         return zifi_rpc_share_get_info_response(
                                 smb2, request, fragment_length, call_id,
-                                disk_share, extra_disk_share, context_id,
+                                disk_share, extra, extra_count, context_id,
                                 response,
                                 response_capacity, response_length,
                                 request_info);
                 case SRVSVC_NETRSHARECHECK:
                         return zifi_rpc_share_check_response(
                                 smb2, request, fragment_length, call_id,
-                                disk_share, extra_disk_share, context_id,
+                                disk_share, extra, extra_count, context_id,
                                 response,
                                 response_capacity, response_length,
                                 request_info);

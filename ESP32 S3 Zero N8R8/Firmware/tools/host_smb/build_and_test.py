@@ -895,6 +895,7 @@ echo Compilation SUCCESS!
     print('Out-of-order progress: unique coverage 320.0K/320.0K verified')
 
     run_tang_share(out)
+    run_usb_share(out)
     print("Test finished!")
 
 
@@ -960,6 +961,71 @@ def run_tang_share(out):
         text = log_path.read_text(encoding='utf-8', errors='replace')
         if 'АВАРИЙНОЕ' in text or 'ПРОВЕРКА CRT' in text:
             raise RuntimeError('host_smb crashed on the TANG share:\n' + text[-3000:])
+
+def run_usb_share(out):
+    """Шара «USB» (флешка в USB-C ESP32, прошивка 0.1.171; пользователь: «Шара должна быть только
+    если флешка в USB ESP32 вставлена»): настоящая FatFs прошивки над образом exFAT в памяти
+    (ZIFI_HOST_USB), рядом с шарой TANG (ZIFI_HOST_TANG). Весь основной набор — по шаре USB, перечень
+    из трёх дисковых шар (test51), TANG при этом работает; без флешки подключение к USB отвергается,
+    а SD и TANG работают."""
+    usb_port = 14451
+    sd_share = Path('.test-build/test_share_usb_sd')
+    card = Path('.test-build/test_share_usb_tang_card')
+    flash = Path('.test-build/test_share_usb_flash')
+    for folder in (sd_share, card, flash):
+        if folder.exists():
+            shutil.rmtree(folder)
+        folder.mkdir(parents=True)
+        (folder / 'sample.txt').write_text("Hello World Sample Text", encoding='utf-8')
+    (flash / 'MUSIC').mkdir()
+    (flash / 'MUSIC' / 'TRACK.FLA').write_bytes(bytes(range(256)) * 400)
+
+    def run(share, mode, timeout=600):
+        return subprocess.run(
+            ['.test-build\\host_smb\\smb_reproduce_test.exe', f'127.0.0.1:{usb_port}', share, mode],
+            capture_output=True, text=True, timeout=timeout)
+
+    for absent in (False, True):
+        env = dict(os.environ)
+        env['ZIFI_HOST_TANG'] = str(card)
+        env['ZIFI_HOST_USB'] = str(flash)
+        if absent:
+            env['ZIFI_HOST_USB_ABSENT'] = '1'
+        log_path = out / ('host_smb_usb_absent.log' if absent else 'host_smb_usb.log')
+        with log_path.open('w', encoding='utf-8') as log:
+            server = subprocess.Popen(
+                ['.test-build\\host_smb\\host_smb.exe', str(sd_share), str(usb_port)],
+                stdout=log, stderr=subprocess.STDOUT, text=True, env=env)
+            try:
+                time.sleep(3.0)
+                if absent:
+                    print('Running USB share absence check...')
+                    gone = run('USB', 'basic', 120)
+                    if gone.returncode == 0 or 'FAIL: Connect' not in gone.stdout:
+                        raise RuntimeError('USB share stayed without a drive:\n' + gone.stdout[-2000:])
+                    for other in ('SD', 'TANG'):
+                        still = run(other, 'basic', 120)
+                        if still.returncode != 0:
+                            raise RuntimeError(f'{other} share broke without a USB drive:\n' + still.stdout[-2000:])
+                    print('USB share absent without a drive, SD and TANG work: PASS')
+                    continue
+                for share, mode in (('USB', 'all'), ('USB', 'test51'), ('TANG', 'basic'), ('SD', 'basic')):
+                    print(f'Running {share} share {mode} (USB drive present)...')
+                    result = run(share, mode)
+                    print(f'{share} {mode} OUTPUT TAIL:\n' + result.stdout[-1500:])
+                    if result.returncode != 0:
+                        raise RuntimeError(f'{share} share {mode} failed with the USB share on')
+            finally:
+                server.terminate()
+                try:
+                    server.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait(timeout=2)
+        text = log_path.read_text(encoding='utf-8', errors='replace')
+        if 'АВАРИЙНОЕ' in text or 'ПРОВЕРКА CRT' in text:
+            raise RuntimeError('host_smb crashed on the USB share:\n' + text[-3000:])
+
 
 if __name__ == '__main__':
     main()

@@ -142,6 +142,24 @@ int main(int argc, char** argv) {
       zifi::host::setTangCardPresent(false);
     }
   }
+  // Шара «USB» (0.1.171) — флешка в USB-C ESP32: образ exFAT в памяти, содержимое — копия папки
+  // ZIFI_HOST_USB («-» — пустая флешка); ZIFI_HOST_USB_ABSENT=1 — флешки нет.
+  if (const char* usb = std::getenv("ZIFI_HOST_USB")) {
+    const char* size = std::getenv("ZIFI_HOST_USB_MB");
+    std::string problem;
+    if (!zifi::host::createUsbFlash(std::strcmp(usb, "-") == 0 ? "" : usb,
+                                    size != nullptr ? static_cast<uint32_t>(std::atoi(size)) : 64,
+                                    problem)) {
+      std::printf("Флешка USB не создана: %s\n", problem.c_str());
+      return 1;
+    }
+    static zifi::TangVfs usbVfs(zifi::host::usbVolume(), zifi::TangVfs::kUsbSerial, "USB");
+    bridge.attachLocal(zifi::SmbServer::kUsbRoot, &usbVfs);
+    server.setUsbShare([](void*) { return zifi::host::usbFlashPresent(); }, nullptr);
+    if (std::getenv("ZIFI_HOST_USB_ABSENT") != nullptr) {
+      zifi::host::setUsbFlashPresent(false);
+    }
+  }
   // Пояс ESP из zifi.ini (time:). В FAT эмулятор хранит поля как есть, а SMB
   // передаёт UTC, поэтому пояс сдвигает время в обе стороны.
   if (const char* timezone = std::getenv("ZIFI_HOST_TZ_HOURS")) {
