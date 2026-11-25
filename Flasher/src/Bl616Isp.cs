@@ -12,10 +12,22 @@
 // Кадр: [команда][сумма][длина LE16][данные]; сумма — младший байт суммы байтов длины и данных
 // (у команд ПЗУ 0x10, 0x23, 0x50 — 0, как у bflb). Ответ: «OK» / «PD» (ещё занят) / «FL» + код LE16;
 // с данными — «OK», длина LE16, данные.
-// Перед стиранием — бэкап всего раздела прошивки VDAC4 (0x40000…0x7FFFF): чтение 0x32 [адрес][длина] по
-// 2048 байтов (flash_read bflb-mcu-tool, tx_size 2056 − 8), сверка с SHA-256 по XIP (0x60/0x3E/0x61), файл
-// на диск. Стирается раздел целиком (не только длина образа): хвост прежней, более длинной прошивки не
-// остаётся. FPGA Partner (0x0…0x3FFFF) и кэш ядер (с 0x80000) не трогаются.
+// Раскладка flash BL616 (4 МБ, GD25LQ32D): 0x0…0x3FFFF — FPGA Partner (прошивка MiSTle/Sipeed: USB-JTAG для
+// шага 3 и запуск нашей прошивки), 0x40000…0x7FFFF — прошивка VDAC4, с 0x80000 — кэш ядер ПЛИС
+// (Tang Nano 20k/BL616/app/core_cache.c).
+// С 25.11.2026 (пользователь: «Он должен стирать всю BL616 перед прошивкой и подготовить в процессе
+// прошивки условия для нормальной работы без танцев с бубном»; выбран вариант «всё, кроме Partner»):
+//  1. бэкап ВСЕЙ flash одним файлом: чтение 0x32 [адрес][длина] по 2048 байтов (flash_read bflb-mcu-tool,
+//     tx_size 2056 − 8). То, что будет стёрто (с 0x40000), сверяется независимо — SHA-256 через XIP
+//     (0x60/0x3E/0x61) окнами по 256 КБ, как на плате проверено для раздела прошивки; Partner не стирается,
+//     его часть файла сверяется вторым чтением;
+//  2. стирание всего с 0x40000 до конца flash: прежняя прошивка, кэш ядер и любые чужие данные. Почему:
+//     у пользователя (журнал 25.11.2026) с 0x80000 лежало что-то чужое без каталога кэша, и BL616 отказывал
+//     в кэше («someone else's data where the cache lives (format needed)») — ни одно ядро не запускалось;
+//  3. запись образа с 0x40000 и сверка SHA-256;
+//  4. проверка, что вся flash за образом — 0xFF: BL616 при запуске видит чистое место и заводит каталог
+//     кэша сам (core_cache.c, dir_load), FORMAT не нужен.
+// FPGA Partner (0x0…0x3FFFF) не трогается никогда.
 using System;
 using System.Security.Cryptography;
 using System.Threading;
@@ -46,8 +58,12 @@ namespace Vdac4Flasher
 
         public Bl616Isp(IByteLink link, IReport report) { this.link = link; this.report = report; }
 
-        /// <summary>Шаг BL616: бэкап раздела [address, partEnd) (backup null — без бэкапа, только для проверок),
-        /// стирание раздела, запись образа, сверка SHA-256.</summary>
+        /// <summary>Окно сверки через XIP: 256 КБ — такой размер на плате уже сверялся (раздел прошивки).</summary>
+        const uint XipWindow = 0x40000;
+
+        /// <summary>Шаг BL616: бэкап всей flash (backup null — без бэкапа, только для проверок), стирание всего
+        /// с address до конца flash, запись образа с address, сверка образа и чистоты остального.
+        /// partEnd — конец раздела прошивки VDAC4 (0x80000): образ обязан в него поместиться, дальше — кэш ядер.</summary>
         public void Flash(byte[] image, uint address, uint partEnd, Backup backup)
         {
             if (address + image.Length > partEnd)
@@ -80,48 +96,32 @@ namespace Vdac4Flasher
             if (jid.Length < 3) throw new FlashException(Lang.T("flash BL616 не ответила (JEDEC)", "BL616 flash does not answer (JEDEC)"));
             uint flashBytes = (jid[2] & 0x1F) >= 0x13 ? (1u << ((jid[2] & 0x1F) - 0x13)) * 512 * 1024 : 0;
             report.Log("JEDEC " + Util.Hex(jid, 0, 3) + (flashBytes > 0 ? ", " + Util.Size(flashBytes) : ""));
-            if (flashBytes > 0 && partEnd > flashBytes)
+            // Объём flash нужен точно: стирается всё до её конца. Неизвестен — ничего не трогать.
+            if (flashBytes == 0)
+                throw new FlashException(Lang.T("объём flash BL616 по JEDEC не определить — ничего не стёрто",
+                                                "the BL616 flash size is unknown from JEDEC — nothing erased"));
+            if (partEnd > flashBytes)
                 throw new FlashException(Lang.T("раздел прошивки за краем flash BL616", "the firmware partition is beyond BL616 flash"));
             var set88 = new byte[4 + FlashPara.Length];
             Util.Put32(set88, 0, flashSet);
             Array.Copy(FlashPara, 0, set88, 4, FlashPara.Length);
             Ack(Send(0x3B, set88, true), 2000);
 
-            uint part = partEnd - address;
-            if (backup != null) {
-                byte[] old = new byte[part];
-                for (uint off = 0; off < part; off += Chunk) {
-                    if (report.Cancelled) throw new OperationCanceledException();
-                    uint n = Math.Min((uint)Chunk, part - off);
-                    var rq = new byte[8];
-                    Util.Put32(rq, 0, address + off);
-                    Util.Put32(rq, 4, n);
-                    byte[] d = Request(0x32, rq, true, 2000);
-                    if (d.Length != n)
-                        throw new FlashException(string.Format(Lang.T("ПЗУ BL616 вернуло {0} байтов вместо {1} (чтение 0x{2:X6})",
-                                                                      "BL616 ROM returned {0} bytes instead of {1} (read at 0x{2:X6})"),
-                                                               d.Length, n, address + off));
-                    Array.Copy(d, 0, old, off, n);
-                    report.Progress(2 + (int)((long)(off + n) * 23 / part), Lang.T("Бэкап: чтение flash", "Backup: reading flash"));
-                }
-                byte[] sha = XipSha(address, part);
-                byte[] want;
-                using (var h = SHA256.Create()) want = h.ComputeHash(old);
-                if (sha.Length < 32 || Util.Hex(sha, 0, 32) != Util.Hex(want))
-                    throw new FlashException(Lang.T("бэкап прочитан с ошибкой (SHA-256 не сошёлся), flash не тронута — повторите шаг",
-                                                    "the backup was read with errors (SHA-256 mismatch), flash untouched — retry the step"));
-                string path = backup.Save(string.Format("bl616_0x{0:X5}_{1}K.bin", address, part >> 10), old, address,
-                                          Lang.T("BL616: раздел прошивки VDAC4", "BL616: VDAC4 firmware partition"));
-                report.Log(Lang.T("Бэкап: ", "Backup: ") + path + " (" + Util.Size(old.Length) + ")");
-            }
+            // 1. Бэкап всей flash. Стирать начинаем, только когда файл лёг на диск и сверен.
+            if (backup != null) BackupWhole(flashBytes, address, backup);
 
-            report.Progress(26, Lang.T("Стирание раздела прошивки", "Erasing the firmware partition"));
+            // 2. Стирание с address до конца flash. ПЗУ стирает по секторам и, пока занято, отвечает «PD»;
+            // срок — с запасом: 2 с на блок 64 КБ (у GD25LQ32D стирание блока — доли секунды) плюс 10 с.
+            report.Progress(40, Lang.T("Стирание flash BL616 (кроме FPGA Partner)", "Erasing BL616 flash (except the FPGA Partner)"));
             var er = new byte[8];
             Util.Put32(er, 0, address);
-            Util.Put32(er, 4, partEnd - 1);
-            Ack(Send(0x30, er, true), 100000);
-            report.Log(string.Format(Lang.T("Стёрт раздел 0x{0:X5}…0x{1:X5}", "Erased the partition 0x{0:X5}…0x{1:X5}"), address, partEnd - 1));
+            Util.Put32(er, 4, flashBytes - 1);
+            Ack(Send(0x30, er, true), 10000 + (int)((flashBytes - address) / 0x10000) * 2000);
+            report.Log(string.Format(Lang.T("Стёрто 0x{0:X5}…0x{1:X6}: прошивка VDAC4, кэш ядер и всё прочее; FPGA Partner (0x0…0x{2:X5}) не тронут",
+                                            "Erased 0x{0:X5}…0x{1:X6}: the VDAC4 firmware, the core cache and everything else; the FPGA Partner (0x0…0x{2:X5}) is untouched"),
+                                     address, flashBytes - 1, address - 1));
 
+            // 3. Запись образа
             SetIspTimeout(2000);
             int chunks = (image.Length + Chunk - 1) / Chunk;
             for (int i = 0; i < chunks; i++) {
@@ -139,11 +139,11 @@ namespace Vdac4Flasher
                         Drain(50);
                     }
                 }
-                report.Progress(30 + (i + 1) * 60 / chunks, Lang.T("Запись", "Writing"));
+                report.Progress(45 + (i + 1) * 40 / chunks, Lang.T("Запись", "Writing"));
             }
             Ack(Send(0x3A, new byte[0], true), 2000);
 
-            report.Progress(92, Lang.T("Сверка SHA-256", "SHA-256 check"));
+            report.Progress(88, Lang.T("Сверка SHA-256", "SHA-256 check"));
             byte[] got = XipSha(address, (uint)image.Length);
             byte[] wantImage;
             using (var h = SHA256.Create()) wantImage = h.ComputeHash(image);
@@ -151,7 +151,91 @@ namespace Vdac4Flasher
                 throw new FlashException(Lang.T("сверка не сошлась: SHA-256 flash ", "verification failed: flash SHA-256 ") +
                                          Util.Hex(got) + Lang.T(", образа ", ", image ") + Util.Hex(wantImage));
             report.Log(Lang.T("Записано и сверено (SHA-256 ", "Written and verified (SHA-256 ") + Util.Hex(wantImage) + ")");
+
+            // 4. Условия для работы кэша ядер: за образом до конца flash — только 0xFF. BL616 при запуске ищет
+            // каталог кэша с 0x80000; каталога нет, а место чистое — заводит его сам. Место не чистое — кэш
+            // выключен до FORMAT, и ни одно ядро с карты Tang не запустится (так было у пользователя 25.11.2026).
+            report.Progress(92, Lang.T("Проверка: кэш ядер чистый", "Check: the core cache is clean"));
+            VerifyBlank(address + (uint)image.Length, flashBytes);
+            report.Log(string.Format(Lang.T("За образом до 0x{0:X6} — только 0xFF: каталог кэша ядер BL616 заведёт сам при первом ядре",
+                                            "Only 0xFF after the image up to 0x{0:X6}: the BL616 creates the core cache directory itself with the first core"),
+                                     flashBytes - 1));
             report.Progress(100, Lang.T("Готово", "Done"));
+        }
+
+        /// <summary>Чтение [from, from + length) командой 0x32 кусками по 2048 байтов в buffer с того же смещения.
+        /// progressFrom…progressTo — доля полосы хода на это чтение.</summary>
+        void ReadFlash(byte[] buffer, uint from, uint length, int progressFrom, int progressTo, string what)
+        {
+            for (uint off = 0; off < length; off += Chunk) {
+                if (report.Cancelled) throw new OperationCanceledException();
+                uint n = Math.Min((uint)Chunk, length - off);
+                var rq = new byte[8];
+                Util.Put32(rq, 0, from + off);
+                Util.Put32(rq, 4, n);
+                byte[] d = Request(0x32, rq, true, 2000);
+                if (d.Length != n)
+                    throw new FlashException(string.Format(Lang.T("ПЗУ BL616 вернуло {0} байтов вместо {1} (чтение 0x{2:X6})",
+                                                                  "BL616 ROM returned {0} bytes instead of {1} (read at 0x{2:X6})"),
+                                                           d.Length, n, from + off));
+                Array.Copy(d, 0, buffer, from + off, n);
+                report.Progress(progressFrom + (int)((long)(off + n) * (progressTo - progressFrom) / length), what);
+            }
+        }
+
+        /// <summary>Бэкап всей flash одним файлом. Часть, которую шаг сотрёт (с eraseFrom), сверяется независимо —
+        /// SHA-256 через XIP окнами по 256 КБ. Часть FPGA Partner (до eraseFrom) не стирается; её сверка —
+        /// вторым чтением: если чтение по USB где-то сбилось, второе с ним не совпадёт.</summary>
+        void BackupWhole(uint flashBytes, uint eraseFrom, Backup backup)
+        {
+            string reading = Lang.T("Бэкап: чтение всей flash", "Backup: reading the whole flash");
+            byte[] all = new byte[flashBytes];
+            ReadFlash(all, 0, flashBytes, 2, 32, reading);
+            byte[] again = new byte[eraseFrom];
+            ReadFlash(again, 0, eraseFrom, 32, 34, reading);
+            for (uint i = 0; i < eraseFrom; i++)
+                if (all[i] != again[i])
+                    throw new FlashException(string.Format(Lang.T(
+                        "бэкап прочитан с ошибкой (два чтения FPGA Partner разошлись у 0x{0:X6}), flash не тронута — повторите шаг",
+                        "the backup was read with errors (two reads of the FPGA Partner differ at 0x{0:X6}), flash untouched — retry the step"), i));
+            using (var h = SHA256.Create()) {
+                for (uint at = eraseFrom; at < flashBytes; at += XipWindow) {
+                    uint n = Math.Min(XipWindow, flashBytes - at);
+                    byte[] sha = XipSha(at, n);
+                    string want = Util.Hex(h.ComputeHash(all, (int)at, (int)n));
+                    if (sha.Length < 32 || Util.Hex(sha, 0, 32) != want)
+                        throw new FlashException(string.Format(Lang.T(
+                            "бэкап прочитан с ошибкой (SHA-256 не сошёлся у 0x{0:X6}), flash не тронута — повторите шаг",
+                            "the backup was read with errors (SHA-256 mismatch at 0x{0:X6}), flash untouched — retry the step"), at));
+                    report.Progress(34 + (int)((long)(at + n - eraseFrom) * 4 / (flashBytes - eraseFrom)),
+                                    Lang.T("Бэкап: сверка SHA-256", "Backup: SHA-256 check"));
+                }
+            }
+            string path = backup.Save(string.Format("bl616_full_{0}K.bin", flashBytes >> 10), all, 0,
+                                      Lang.T("BL616: вся flash (FPGA Partner, прошивка VDAC4, кэш ядер)",
+                                             "BL616: the whole flash (FPGA Partner, VDAC4 firmware, core cache)"));
+            report.Log(Lang.T("Бэкап: ", "Backup: ") + path + " (" + Util.Size(all.Length) + ")");
+        }
+
+        /// <summary>[from, to) — только 0xFF: SHA-256 через XIP окнами по 256 КБ (по границам окон) против
+        /// SHA-256 того же числа байтов 0xFF.</summary>
+        void VerifyBlank(uint from, uint to)
+        {
+            using (var h = SHA256.Create()) {
+                for (uint at = from; at < to; ) {
+                    uint end = Math.Min(to, (at / XipWindow + 1) * XipWindow);
+                    uint n = end - at;
+                    var ff = new byte[n];
+                    for (int i = 0; i < ff.Length; i++) ff[i] = 0xFF;
+                    byte[] sha = XipSha(at, n);
+                    if (sha.Length < 32 || Util.Hex(sha, 0, 32) != Util.Hex(h.ComputeHash(ff)))
+                        throw new FlashException(string.Format(Lang.T(
+                            "flash BL616 у 0x{0:X6}…0x{1:X6} не стёрлась (не 0xFF): кэш ядер работать не будет — повторите шаг",
+                            "BL616 flash at 0x{0:X6}…0x{1:X6} was not erased (not 0xFF): the core cache will not work — retry the step"),
+                            at, end - 1));
+                    at = end;
+                }
+            }
         }
 
         /// <summary>SHA-256 области flash, посчитанный ПЗУ через XIP (0x60 вход, 0x3E, 0x61 выход).</summary>

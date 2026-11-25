@@ -440,33 +440,64 @@ namespace FlasherTests
 
         static void TestBl616(FirmwareSet fw)
         {
-            Console.WriteLine("== BL616: ISP ПЗУ по USB CDC, бэкап и стирание раздела 0x40000…0x7FFFF");
+            // 25.11.2026: у пользователя с 0x80000 лежали чужие данные без каталога кэша — BL616 отказывал в кэше,
+            // ни одно ядро с карты Tang не запускалось. Пользователь: стирать всю BL616 перед прошивкой и
+            // подготовить условия для нормальной работы; выбран вариант «всё, кроме FPGA Partner».
+            Console.WriteLine("== BL616: ISP ПЗУ по USB CDC, бэкап всей flash, стирание всего, кроме FPGA Partner");
             var m = new Bl616RomModel();
+            byte[] before = (byte[])m.Flash.Clone();
             byte[] partner = m.Flash.Take(0x40000).ToArray();
-            byte[] oldPart = m.Flash.Skip(0x40000).Take(0x40000).ToArray();
-            byte[] cache = m.Flash.Skip(0x80000).Take(0x10000).ToArray();
+            int len = fw.Bl616.Data.Length;
+            Check(m.Flash.Skip(0x80000).Take(0x2000).Any(x => x != 0xFF) && m.Flash.Skip(0x3F0000).Any(x => x != 0xFF),
+                  "модель: с 0x80000 и в последнем блоке — чужие данные (кэш BL616 выключился бы)");
             var r = new ConsoleReport();
             var bk = new Backup(Path.Combine(tmp, "bk_bl"));
             new Bl616Isp(m, r).Flash(fw.Bl616.Data, fw.Bl616.Address, FirmwareSet.Bl616PartEnd, bk);
             string file = bk.Files.Count == 1 ? bk.Files[0] : "";
-            Check(file.EndsWith("_bl616_0x40000_256K.bin") && File.ReadAllBytes(file).SequenceEqual(oldPart),
-                  "бэкап: прежний раздел 256 КБ байт в байт (" + m.Reads + " чтений по 2048)");
-            Check(m.Flash.Take(0x40000).SequenceEqual(partner), "FPGA Partner Sipeed (0x0…0x3FFFF) не тронут");
-            Check(m.Flash.Skip(0x40000).Take(fw.Bl616.Data.Length).SequenceEqual(fw.Bl616.Data), "образ лёг с 0x40000 (" + Util.Size(fw.Bl616.Data.Length) + ")");
-            Check(m.Flash.Skip(0x40000 + fw.Bl616.Data.Length).Take(0x80000 - 0x40000 - fw.Bl616.Data.Length).All(x => x == 0xFF),
-                  "раздел стёрт целиком: за образом до 0x7FFFF — 0xFF");
-            Check(m.EraseFrom == 0x40000 && m.EraseTo == 0x7FFFF, "стирание 0x40000…0x7FFFF");
-            Check(m.Flash.Skip(0x80000).Take(0x10000).SequenceEqual(cache), "кэш ядер с 0x80000 не тронут");
+            Check(file.EndsWith("_bl616_full_4096K.bin") && File.ReadAllBytes(file).SequenceEqual(before),
+                  "бэкап: вся flash 4 МБ одним файлом, байт в байт (" + m.Reads + " чтений по 2048)");
+            Check(m.Flash.Take(0x40000).SequenceEqual(partner), "FPGA Partner (0x0…0x3FFFF) не тронут");
+            Check(m.Flash.Skip(0x40000).Take(len).SequenceEqual(fw.Bl616.Data), "образ лёг с 0x40000 (" + Util.Size(len) + ")");
+            Check(m.Flash.Skip(0x40000 + len).All(x => x == 0xFF),
+                  "за образом до конца flash — только 0xFF: прежняя прошивка, кэш ядер и чужие данные стёрты, последний блок тоже");
+            Check(m.EraseFrom == 0x40000 && m.EraseTo == 0x3FFFFF && m.Erases == 1, "одно стирание 0x40000…0x3FFFFF");
             Check(m.FlashSet4 == 0x01014102 && m.FlashSet88 == 0x01014102, "параметры flash 0x01014102 (вывод 2 из сведений о загрузке)");
-            Check(m.IspTimeout == 2000 && m.CheckSent && m.Erases == 1 && m.Writes == (fw.Bl616.Data.Length + 2047) / 2048,
-                  "срок ISP 2 с перед записью, 0x3A после, одно стирание, куски по 2048");
+            Check(m.IspTimeout == 2000 && m.CheckSent && m.Writes == (len + 2047) / 2048,
+                  "срок ISP 2 с перед записью, 0x3A после, куски по 2048");
             Check(r.LastPercent == 100, "ход до 100 %");
             // повторный запуск: ПЗУ уже в ISP — отвечает на 0x10 без синхронизации
             int syncs = m.Syncs55;
             m.PdLeft = 0;
             new Bl616Isp(m, new ConsoleReport { Quiet = true }).Flash(fw.Bl616.Data, fw.Bl616.Address, FirmwareSet.Bl616PartEnd, bk);
             Check(m.Syncs55 == syncs, "повтор без новой синхронизации 0x55");
-            Check(bk.Files.Count == 2 && bk.Files[1].EndsWith("_bl616_0x40000_256K_2.bin"), "второй бэкап — отдельным файлом");
+            Check(bk.Files.Count == 2 && bk.Files[1].EndsWith("_bl616_full_4096K_2.bin"), "второй бэкап — отдельным файлом");
+
+            // Сбой чтения в стираемой части: бэкап не сходится с SHA-256 через XIP — шаг стоит до стирания.
+            var m2 = new Bl616RomModel { CorruptReadAt = 0x123456 };
+            byte[] before2 = (byte[])m2.Flash.Clone();
+            Throws(() => new Bl616Isp(m2, new ConsoleReport { Quiet = true }).Flash(fw.Bl616.Data, fw.Bl616.Address, FirmwareSet.Bl616PartEnd,
+                                                                                 new Backup(Path.Combine(tmp, "bk_bl2"))),
+                   "SHA-256 не сошёлся у 0x100000", "сбой чтения в стираемой части — ошибка бэкапа с адресом окна");
+            Check(m2.Erases == 0 && m2.Writes == 0 && m2.Flash.SequenceEqual(before2), "после сбоя бэкапа flash не тронута");
+
+            // Сбой чтения в части FPGA Partner (её XIP не сверяет): ловит второе чтение.
+            var m3 = new Bl616RomModel { CorruptReadAt = 0x1234 };
+            Throws(() => new Bl616Isp(m3, new ConsoleReport { Quiet = true }).Flash(fw.Bl616.Data, fw.Bl616.Address, FirmwareSet.Bl616PartEnd,
+                                                                                 new Backup(Path.Combine(tmp, "bk_bl3"))),
+                   "два чтения FPGA Partner разошлись у 0x001234", "сбой чтения в части Partner — ошибка бэкапа");
+            Check(m3.Erases == 0 && m3.Writes == 0, "после сбоя бэкапа Partner flash не тронута");
+
+            // Стирание не взяло байт в кэше: шаг не говорит «готово», кэш ядер так работать не будет.
+            var m4 = new Bl616RomModel { StuckByteAt = 0x200010 };
+            Throws(() => new Bl616Isp(m4, new ConsoleReport { Quiet = true }).Flash(fw.Bl616.Data, fw.Bl616.Address, FirmwareSet.Bl616PartEnd, null),
+                   "у 0x200000…0x23FFFF не стёрлась", "нестёртый байт за образом — ошибка с окном");
+
+            // Объём flash по JEDEC неизвестен: стирать до конца нельзя — ничего не трогать.
+            var m5 = new Bl616RomModel { JedecCap = 0x05 };
+            Throws(() => new Bl616Isp(m5, new ConsoleReport { Quiet = true }).Flash(fw.Bl616.Data, fw.Bl616.Address, FirmwareSet.Bl616PartEnd,
+                                                                                 new Backup(Path.Combine(tmp, "bk_bl5"))),
+                   "объём flash BL616", "неизвестный объём flash — отказ");
+            Check(m5.Erases == 0 && m5.Reads == 0, "без объёма flash ничего не прочитано и не стёрто");
         }
 
         // ---- ПЛИС ------------------------------------------------------------------------------------

@@ -86,7 +86,7 @@ namespace Vdac4Flasher
             // прошивки» обрезалась до «Стирание разде»)
             report.Progress(25, Lang.T("Бэкап", "Backup"));
             Application.DoEvents();
-            report.Progress(26, Lang.T("Стирание раздела прошивки", "Erasing the firmware partition"));
+            report.Progress(40, Lang.T("Стирание flash BL616 (кроме FPGA Partner)", "Erasing BL616 flash (except the FPGA Partner)"));
             Application.DoEvents();
             message.ForeColor = Bad;
             message.Text = "✗  " + Lang.T(
@@ -439,10 +439,12 @@ namespace Vdac4Flasher
                 "The Sipeed factory firmware (USB-JTAG for the FPGA) at the start of the BL616 memory stays — step 3 needs it.");
             warn.Visible = true;
             warn.Text = Lang.T(
-                "Перед записью программа сохраняет раздел прошивки VDAC4 (0x40000…0x7FFFF, 256 КБ) в папку Backup и стирает его целиком. " +
-                "Кэш ядер за ним не трогается.",
-                "Before writing, the program saves the VDAC4 firmware partition (0x40000…0x7FFFF, 256 KB) into the Backup folder and erases it whole. " +
-                "The core cache after it stays.");
+                "Перед записью программа сохраняет всю память BL616 (4 МБ) в папку Backup и стирает всё, кроме этой прошивки USB-JTAG " +
+                "(FPGA Partner): прежнюю прошивку VDAC4, кэш ядер и любые чужие данные. Ядра снова лягут в кэш сами при первом запуске каждого. " +
+                "Шаг идёт около минуты.",
+                "Before writing, the program saves the whole BL616 memory (4 MB) into the Backup folder and erases everything except this USB-JTAG firmware " +
+                "(FPGA Partner): the old VDAC4 firmware, the core cache and any foreign data. Cores go into the cache again by themselves on their first start. " +
+                "The step takes about a minute.");
             if (fw.Bl616 == null) { message.ForeColor = Bad; message.Text = Lang.T("Нет образа BL616 в папке firmware.", "No BL616 image in the firmware folder."); }
         }
 

@@ -35,7 +35,7 @@ namespace Vdac4Flasher
         public FlashPart Esp;            // образ ESP32-S3 целиком (загрузчик, разделы, приложение)
         public uint EspFlashSize = 8u << 20;
         public string EspVersion = "";
-        public FlashPart Bl616;          // прошивка BL616 модуля Tang (с 0x40000, FPGA Partner Sipeed с 0x0 не трогается)
+        public FlashPart Bl616;          // прошивка BL616 модуля Tang (с 0x40000; FPGA Partner с 0x0 не трогается, всё за ним стирается)
         public string Bl616Version = "";
         public List<FlashPart> Tang = new List<FlashPart>();   // ядра в слотах flash ПЛИС 0, 1, 3 (шаг 3)
         public List<FlashPart> Fonts = new List<FlashPart>();  // образ шрифтов FT812 целиком с 0x200000, слот 2 (шаг 4)
@@ -46,7 +46,8 @@ namespace Vdac4Flasher
 
         public const uint TangSlotBytes = 0x100000;
         public const uint TangFontBase = 0x200000, TangFontEnd = 0x300000;
-        /// <summary>Раздел прошивки VDAC4 во flash BL616: 0x40000…0x7FFFF (дальше — кэш ядер, его не трогаем).</summary>
+        /// <summary>Раздел прошивки VDAC4 во flash BL616: 0x40000…0x7FFFF — образ должен в него поместиться; дальше —
+        /// кэш ядер. Стирает шаг BL616 с 25.11.2026 всё с 0x40000 до конца flash (кроме FPGA Partner, 0x0…0x3FFFF).</summary>
         public const uint Bl616PartEnd = 0x80000;
 
         static string DefaultSlotFile(int slot)

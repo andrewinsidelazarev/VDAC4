@@ -288,13 +288,18 @@ namespace FlasherTests
         public uint FlashSet4, FlashSet88;
         public uint IspTimeout;
         public bool CheckSent, XipOn;
+        // Сбои для проверок (25.11.2026, шаг стирает всё, кроме FPGA Partner):
+        public long CorruptReadAt = -1;  // первое чтение 0x32, задевшее этот адрес, отдаёт его байт искажённым (один раз)
+        public long StuckByteAt = -1;    // этот байт стирание не берёт (остаётся прежним)
+        public byte JedecCap = 0x16;     // байт объёма JEDEC: 0x16 — 4 МБ (GD25LQ32D)
         readonly List<byte> rx = new List<byte>();
         static readonly byte[] BootInfo = Hex("0100160600010100279280017582f70286241c000f758010");
 
         public Bl616RomModel()
         {
             for (int i = 0; i < 0x40000; i++) Flash[i] = (byte)(0x5A ^ i);         // FPGA Partner Sipeed
-            for (int i = 0x40000; i < Flash.Length; i++) Flash[i] = (byte)(i >> 3);  // прежняя прошивка
+            // прежняя прошивка и за ней, с 0x80000, — чужие данные без каталога кэша (как у пользователя 25.11.2026)
+            for (int i = 0x40000; i < Flash.Length; i++) Flash[i] = (byte)(i >> 3);
         }
 
         static byte[] Hex(string s)
@@ -350,12 +355,14 @@ namespace FlasherTests
                 else if (p.Length == 88) { FlashSet88 = Util.Get32(p, 0); if (p[4 + 13] != 0xC8) throw new ModelError("BL616: flash_para"); }
                 else throw new ModelError("BL616: 0x3B длина");
                 Ok(); break;
-            case 0x36: if (FlashSet4 == 0) throw new ModelError("BL616: JEDEC до 0x3B"); Data(new byte[] { 0xC8, 0x60, 0x16, 0x00 }); break;
+            case 0x36: if (FlashSet4 == 0) throw new ModelError("BL616: JEDEC до 0x3B"); Data(new byte[] { 0xC8, 0x60, JedecCap, 0x00 }); break;
             case 0x30: {
                 if (FlashSet88 == 0) throw new ModelError("BL616: стирание до flash_para");
                 uint a = Util.Get32(p, 0), e = Util.Get32(p, 4);
                 if (e < a) throw new ModelError("BL616: конец стирания");
-                for (uint i = a & ~0xFFFu; i <= (e | 0xFFF); i++) Flash[i] = 0xFF;
+                if ((e | 0xFFF) >= Flash.Length) throw new ModelError("BL616: стирание за краем flash");
+                for (uint i = a & ~0xFFFu; i <= (e | 0xFFF); i++)
+                    if (i != StuckByteAt) Flash[i] = 0xFF;
                 Erases++;
                 EraseFrom = a; EraseTo = e;
                 while (PdLeft-- > 0) Emit(new byte[] { 0x50, 0x44 });
@@ -377,6 +384,10 @@ namespace FlasherTests
                 if (n == 0 || n > 2048 || a + n > Flash.Length) throw new ModelError("BL616: 0x32 длина");
                 var d = new byte[n];
                 Array.Copy(Flash, a, d, 0, n);
+                if (CorruptReadAt >= a && CorruptReadAt < a + n) {
+                    d[CorruptReadAt - a] ^= 0x10;          // сбой на USB: один байт искажён, один раз
+                    CorruptReadAt = -1;
+                }
                 Reads++;
                 Data(d);
                 break;
