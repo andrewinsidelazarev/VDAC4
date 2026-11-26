@@ -8,6 +8,7 @@
 
 #include <driver/gpio.h>
 #include <esp_cpu.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_random.h>
 #include <esp_rom_sys.h>
@@ -815,6 +816,70 @@ bool writeBurst(uint32_t address, const uint32_t* words, size_t count, const cha
     return false;
   }
   const bool ok = link_spi3::writeBurst(kCmdWrite, address, words, count);
+  giveLock();
+  return ok;
+}
+
+// Запись через DMA (0.1.176). Всё — под тем же замком LINK, что и прочие обмены: поэтому «хвост»
+// без ожидания (транзакция, что ещё идёт после возврата) не смешается с чужим обменом — тот под
+// замком сначала дождётся его в link_spi3.
+// Отказ в буферах пишется в журнал один раз за приложение: приложение может просить их на каждом
+// вызове, а журнал — во flash.
+static bool g_dmaRefusalLogged = false;
+
+bool prepareBurstDma(size_t keepInternal, const char* file, int line) {
+  if (!ready()) {
+    return false;
+  }
+  if (link_spi3::dmaPrepared()) {
+    return true;   // уже есть: без замка (меняется только под ним, а здесь лишь чтение)
+  }
+  if (!takeLock(file, line, 0)) {
+    return false;
+  }
+  const bool ok = link_spi3::dmaPrepare(keepInternal);
+  giveLock();
+  if (ok || !g_dmaRefusalLogged) {
+    g_dmaRefusalLogged = !ok;
+    bringupLog(kTag, ok ? "LINK DMA: 2 x %u bytes of internal RAM taken, %u free"
+                        : "LINK DMA refused: no 2 x %u-byte buffers or GDMA channel, %u internal free",
+               static_cast<unsigned>(link_spi3::kDmaWords * 4),
+               static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+  }
+  return ok;
+}
+
+void releaseBurstDma(const char* file, int line) {
+  g_dmaRefusalLogged = false;   // следующее приложение — с чистого листа
+  if (!link_spi3::dmaPrepared()) {
+    return;
+  }
+  // LINK не дождались — буферы остаются (DMA, может быть, ещё идёт), их возьмёт следующее
+  // приложение; освободить их без замка нельзя
+  if (!takeLock(file, line, 0)) {
+    bringupLog(kTag, "LINK DMA buffers kept: LINK busy");
+    return;
+  }
+  link_spi3::dmaRelease();
+  giveLock();
+  bringupLog(kTag, "LINK DMA buffers released");
+}
+
+bool writeBurstDma(uint32_t address, const uint32_t* words, size_t count, bool wait, const char* file,
+                   int line) {
+  if (!ready() || !takeLock(file, line, address)) {
+    return false;
+  }
+  const bool ok = link_spi3::writeBurstDma(kCmdWrite, address, words, count, wait);
+  giveLock();
+  return ok;
+}
+
+bool waitBurstDma(const char* file, int line) {
+  if (!ready() || !takeLock(file, line, 0)) {
+    return false;
+  }
+  const bool ok = link_spi3::dmaWait();
   giveLock();
   return ok;
 }

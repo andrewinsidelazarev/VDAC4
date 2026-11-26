@@ -186,6 +186,8 @@ class ModuleApp : public App {
   static int coreSd2Stream(void*, uint32_t, uint32_t, uint32_t*);
   static void coreSd2Close(void*);
   static int coreLinkBurst(uint32_t, const uint32_t*, uint32_t);
+  static int coreLinkBurstDma(uint32_t, const uint32_t*, uint32_t, uint32_t);   // ABI 1.22
+  static int coreLinkBurstWait();                                              // ABI 1.22
   static uint32_t corePcmLowLatency(int on);
   // ABI 1.19: исполняемое внутреннее ОЗУ для кода модулей (code_ram, module_open_ex)
   static int coreCodeRam(uint32_t bytes, uint32_t* granted);

@@ -25,6 +25,7 @@ idf_component_register(
         elf_loader
         app_update
         esp_adc
+        esp_driver_dma        # канал GDMA для записи по LINK транзакциями DMA (link_spi3, 0.1.176)
         esp_driver_gpio
         esp_driver_i2s
         esp_driver_pcnt

@@ -23,6 +23,7 @@
 #include "zifi/crash_record.hpp"
 #include "zifi/diagnostic_log.hpp"
 #include "zifi/ft_host.hpp"
+#include "zifi/link_spi3.hpp"
 #include "zifi/player_overlay.hpp"
 #include "zifi/tang_flash.hpp"
 #include "zifi/tang_link.hpp"
@@ -299,6 +300,19 @@ bool sendCheckedReads(int client) {
                   static_cast<unsigned>(stats.lastRejected), static_cast<unsigned>(stats.lastAccepted));
 }
 
+// Строка записи по LINK через DMA (0.1.176, link_burst_dma) в конце сводки «tang»: числа с запуска
+// ESP, из оперативной памяти (link_spi3::dmaStats). Пример:
+//   tang LINK DMA: calls 3600, transactions 104400, words 53280000, starved 0, failed 0
+// «starved» — транзакции, где DMA не успевал подавать слова и контроллер ждал (данные целы, медленнее);
+// «failed» — транзакции, не кончившиеся за 50 мс.
+bool sendLinkDma(int client) {
+  const link_spi3::DmaStats stats = link_spi3::dmaStats();
+  return sendText(client, "tang LINK DMA: calls %u, transactions %u, words %llu, starved %u, failed %u\n",
+                  static_cast<unsigned>(stats.calls), static_cast<unsigned>(stats.transactions),
+                  static_cast<unsigned long long>(stats.words), static_cast<unsigned>(stats.starved),
+                  static_cast<unsigned>(stats.failed));
+}
+
 bool runTang(int client, const char* arguments) {
   if (!tang::ready()) {
     return sendText(client, "tang: LINK is not ready\n");
@@ -498,7 +512,7 @@ bool runTang(int client, const char* arguments) {
                     static_cast<unsigned>(r[1]), static_cast<unsigned>(r[2]), static_cast<unsigned>(r[3]),
                     static_cast<unsigned>(r[4]), static_cast<unsigned>(r[5]), static_cast<unsigned>(r[6]),
                     static_cast<unsigned>(r[7]), static_cast<unsigned>(tang::clockHz() / 1000)) &&
-           sendCheckedReads(client);
+           sendCheckedReads(client) && sendLinkDma(client);
   }
   if (!tang::read(tang::kRegStatus, r, 8) || !tang::read(tang::kRegCtrl, c, 2)) {
     return transferFailed(client, "tang");
@@ -522,7 +536,7 @@ bool runTang(int client, const char* arguments) {
                   static_cast<unsigned>(c[1]), static_cast<int>(static_cast<int8_t>(c[1] & 0xFF)),
                   static_cast<int>(static_cast<int8_t>((c[1] >> 8) & 0xFF)),
                   static_cast<unsigned>(tang::clockHz() / 1000)) &&
-         sendCheckedReads(client);
+         sendCheckedReads(client) && sendLinkDma(client);
 }
 
 bool runCommand(int client, const char* command) {

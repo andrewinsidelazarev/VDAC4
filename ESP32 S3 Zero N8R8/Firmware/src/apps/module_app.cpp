@@ -348,6 +348,8 @@ ModuleApp::ModuleApp(AppHost& host, AudioPlayer& player) : host_(host), player_(
   core_.data_read = coreDataRead;
   core_.data_close = coreDataClose;
   core_.link_read_checked = coreLinkReadChecked;
+  core_.link_burst_dma = coreLinkBurstDma;
+  core_.link_burst_wait = coreLinkBurstWait;
 }
 
 void ModuleApp::begin() {
@@ -1824,6 +1826,9 @@ void ModuleApp::stopApp() {
     }
   }
   closeStreams();
+#if ZIFI_HAS_SPI_LINK
+  tang::releaseBurstDma();                // буферы DMA LINK (link_burst_dma) — назад во внутреннее ОЗУ
+#endif
   for (LoadedModule& module : moduleSlots()) {
     if (module.used) {
       unloadElf(module.elf);
@@ -2969,6 +2974,36 @@ int ModuleApp::coreLinkBurst(uint32_t address, const uint32_t* words, uint32_t c
              : ZM_ERROR;
 #else
   (void)address; (void)words; (void)count;
+  return ZM_ERROR;
+#endif
+}
+
+// ABI 1.22 (0.1.176): link_burst длинными транзакциями DMA (link_spi3.hpp — как и зачем). Буферы DMA
+// (2 × 1 КБ внутреннего ОЗУ) — при первом вызове приложения, назад — в stopApp. Запас внутреннего ОЗУ
+// после них — тот же, что у code_ram (kCodeRamKeep): Wi-Fi, обмен с Evo и DMA ядра.
+int ModuleApp::coreLinkBurstDma(uint32_t address, const uint32_t* words, uint32_t count, uint32_t flags) {
+#if ZIFI_HAS_SPI_LINK
+  constexpr size_t kLinkDmaKeep = 12 * 1024;
+  if (words == nullptr || (address & 3) != 0 || count == 0 || (flags & ~ZM_LINK_NOWAIT) != 0) {
+    return ZM_ERROR;
+  }
+  if (!tang::ready()) {
+    return ZM_ERROR;
+  }
+  if (!tang::prepareBurstDma(kLinkDmaKeep)) {
+    return ZM_NO_MEMORY;
+  }
+  return tang::writeBurstDma(address, words, count, (flags & ZM_LINK_NOWAIT) == 0) ? ZM_OK : ZM_ERROR;
+#else
+  (void)address; (void)words; (void)count; (void)flags;
+  return ZM_ERROR;
+#endif
+}
+
+int ModuleApp::coreLinkBurstWait() {
+#if ZIFI_HAS_SPI_LINK
+  return tang::waitBurstDma() ? ZM_OK : ZM_ERROR;
+#else
   return ZM_ERROR;
 #endif
 }

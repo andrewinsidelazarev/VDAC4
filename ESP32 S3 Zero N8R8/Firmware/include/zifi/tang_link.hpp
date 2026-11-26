@@ -152,6 +152,16 @@ bool writeRepeat(uint32_t address, const uint32_t* words, size_t count, const ch
 // Слова транзакциями по 16 на один адрес (окно FT_BURST ядра FT812 1.29): слов — сколько угодно.
 bool writeBurst(uint32_t address, const uint32_t* words, size_t count, const char* file = __builtin_FILE(),
                 int line = __builtin_LINE());
+// Слова на один адрес длинными транзакциями через DMA (0.1.176; как и зачем — link_spi3.hpp):
+// до link_spi3::kDmaWords слов в транзакции, каждая — с address. Сначала prepareBurstDma: буферы
+// DMA во внутреннем ОЗУ берутся только по просьбе приложения. wait = false — не ждать конца
+// последней транзакции: её дождётся любой следующий обмен по LINK (из любой задачи) или
+// waitBurstDma. false — LINK не работает или транзакция не кончилась за срок.
+bool prepareBurstDma(size_t keepInternal, const char* file = __builtin_FILE(), int line = __builtin_LINE());
+void releaseBurstDma(const char* file = __builtin_FILE(), int line = __builtin_LINE());
+bool writeBurstDma(uint32_t address, const uint32_t* words, size_t count, bool wait,
+                   const char* file = __builtin_FILE(), int line = __builtin_LINE());
+bool waitBurstDma(const char* file = __builtin_FILE(), int line = __builtin_LINE());
 
 // Короткое описание для SYS_INFO: "VDC4/1.0@40MHz", "none" или "off".
 void describe(char* out, size_t size);
