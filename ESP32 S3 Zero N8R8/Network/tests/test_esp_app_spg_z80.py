@@ -11,8 +11,13 @@
 монитор возвращается (VCONFIG #00); если ELF уже в кэше ESP, он не передаётся; если ESP
 не взяла ELF — красный бордюр, экран не трогается; приложение не запустилось — красный
 бордюр и монитор обратно у TS-Conf.
-Нужна сборка: "ESP App SPG\\build.bat" [ИМЯ.ELF] (по умолчанию — BOING.ELF демы
+Ядро ПЛИС в SPG (build.bat ИМЯ.ELF ЯДРО.BIN, ESP 0.1.164): уходит первым, с флагом 2 в
+MOD_QUERY, байт в байт; годная копия у ESP (флешка) — не передаётся; ESP не взяла ядро —
+ELF не шлётся, красный бордюр. Без ядра в последней сборке эти тесты пропускаются.
+Нужна сборка: "ESP App SPG\\build.bat" [ИМЯ.ELF] [ЯДРО.BIN] (по умолчанию — BOING.ELF демы
 demo\\boing рабочего дерева); проверяется приложение последней сборки — его имя в build\\app_cfg.inc.
+Последняя сборка — с файлами данных (build.bat ИМЯ.ELF … ДАННЫЕ): этим тестам нужна карта и
+драйвер FAT32, они пропускаются — такую сборку проверяет test_esp_app_spg_data_z80.py.
 """
 import re
 import struct
@@ -36,7 +41,17 @@ def app_name() -> str:
     return m.group(1) if m else "BOING.ELF"
 
 
+def core_cfg() -> tuple[str, int] | None:
+    """Ядро ПЛИС последней сборки: (имя ЯДРО.BIN, первая страница) или None — без ядра."""
+    text = CFG.read_text(encoding="ascii") if CFG.exists() else ""
+    m = re.search(r'CORE_NAME db "([^"]+)"', text)
+    p = re.search(r"CORE_PAGE0\s+equ #([0-9A-Fa-f]+)", text)
+    return (m.group(1), int(p.group(1), 16)) if m and p else None
+
+
 ELF = SPG_DIR / app_name()
+CORE = core_cfg()
+HAS_DATA = CFG.exists() and "DEFINE HAS_DATA" in CFG.read_text(encoding="ascii")
 
 VCONFIG, PAGE3 = 0x00AF, 0x13AF
 APP_PAGE0 = 0x20
@@ -47,12 +62,17 @@ frame = base.frame
 class ModuleEsp:
     """Прошивка ESP: кэш модулей и приложение (как ModuleApp)."""
 
-    def __init__(self, cached: bool = False, refuse: bool = False, start_fail: bool = False) -> None:
+    def __init__(self, cached: bool = False, refuse: bool = False, start_fail: bool = False,
+                 cached_names: tuple[str, ...] = (), refuse_names: tuple[str, ...] = ()) -> None:
         self.cached = cached
         self.refuse = refuse
         self.start_fail = start_fail
+        self.cached_names = cached_names
+        self.refuse_names = refuse_names
         self.query = None
-        self.data = bytearray()
+        self.queries: list[tuple[int, int, int, str]] = []
+        self.received: dict[str, bytes] = {}       # положенные файлы: имя → содержимое
+        self.data = bytearray()                    # файл текущей доставки
         self.puts = 0
         self.committed = False
         self.started = None
@@ -65,7 +85,10 @@ class ModuleEsp:
             flags, length, time = payload[0], *struct.unpack("<II", payload[1:9])
             name = payload[9:payload.index(0, 9)].decode()
             self.query = (flags, length, time, name)
-            status = 2 if self.refuse else (0 if self.cached else 1)
+            self.queries.append(self.query)
+            self.data = bytearray()
+            refused = self.refuse or name in self.refuse_names
+            status = 2 if refused else (0 if self.cached or name in self.cached_names else 1)
             return frame(CMD_MOD_QUERY | 0x80, bytes([status]) + struct.pack("<I", 1 << 20))
         if command == CMD_MOD_PUT:
             offset = struct.unpack("<I", payload[:4])[0]
@@ -75,6 +98,7 @@ class ModuleEsp:
             return frame(CMD_MOD_PUT | 0x80, b"\1" + struct.pack("<I", len(self.data)))
         if command == CMD_MOD_COMMIT:
             self.committed = True
+            self.received[self.query[3]] = bytes(self.data)
             return frame(CMD_MOD_COMMIT | 0x80, b"\1")
         if command == CMD_APP_START:
             if self.start_fail:                     # итог int8 −2: приложение не поднялось
@@ -101,6 +125,10 @@ class SpgMachine(SpiLinkMixin):
         self.machine.set_memory_block(0x8000, BIN.read_bytes())
         elf = ELF.read_bytes()
         self.pages = {APP_PAGE0 + i: elf[i * 16384:(i + 1) * 16384] for i in range((len(elf) + 16383) // 16384)}
+        if CORE is not None:                # ядро ПЛИС — в страницах вслед за ELF
+            core = (SPG_DIR / CORE[0]).read_bytes()
+            for i in range((len(core) + 16383) // 16384):
+                self.pages[CORE[1] + i] = core[i * 16384:(i + 1) * 16384]
         self.machine.set_input_callback(self.port_in)
         self.machine.set_output_callback(self.port_out)
         self.machine.set_breakpoint(self.symbols["Halt"])
@@ -150,6 +178,8 @@ class SpgMachine(SpiLinkMixin):
 class EspAppSpgTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        if HAS_DATA:
+            raise unittest.SkipTest("последняя сборка — с файлами данных: test_esp_app_spg_data_z80.py")
         need(BIN, SYM, ELF)
 
     def launch(self, esp: ModuleEsp) -> SpgMachine:
@@ -164,7 +194,7 @@ class EspAppSpgTest(unittest.TestCase):
         elf = ELF.read_bytes()
         self.assertEqual(esp.query[3], ELF.name)
         self.assertEqual(esp.query[1], len(elf))
-        self.assertEqual(bytes(esp.data), elf, "ELF дошёл до ESP не байт в байт")
+        self.assertEqual(esp.received[ELF.name], elf, "ELF дошёл до ESP не байт в байт")
         self.assertTrue(esp.committed)
         self.assertEqual(esp.started, ELF.name)
         self.assertTrue(esp.stopped, "по клавише приложение не остановлено")
@@ -174,6 +204,38 @@ class EspAppSpgTest(unittest.TestCase):
         self.assertEqual(h.vconfig_at, [start, stop + 1],
                          "VCONFIG #04 — до APP_START, VCONFIG #00 — после APP_STOP")
         self.assertEqual(h.border[-1], 0, "в конце — чёрный бордюр, не красный")
+
+    def test_core_goes_first_with_core_flag(self) -> None:
+        if CORE is None:
+            self.skipTest("последняя сборка — без ядра (build.bat ИМЯ.ELF ЯДРО.BIN)")
+        esp = ModuleEsp()
+        self.launch(esp)
+        core = (SPG_DIR / CORE[0]).read_bytes()
+        self.assertEqual(esp.queries[0][3], CORE[0], "ядро — первым")
+        self.assertEqual(esp.queries[0][0], 2, "у ядра флаг 2 в MOD_QUERY")
+        self.assertEqual(esp.queries[0][1], len(core))
+        self.assertEqual(esp.received[CORE[0]], core, "ядро дошло до ESP не байт в байт")
+        self.assertEqual(esp.queries[1][3], ELF.name)
+        self.assertEqual(esp.queries[1][0], 0, "у ELF флаги 0")
+        self.assertEqual(esp.started, ELF.name)
+
+    def test_core_on_drive_is_not_sent_again(self) -> None:
+        if CORE is None:
+            self.skipTest("последняя сборка — без ядра")
+        esp = ModuleEsp(cached_names=(CORE[0],))
+        self.launch(esp)
+        self.assertNotIn(CORE[0], esp.received, "годная копия у ESP — ядро не передаётся")
+        self.assertEqual(esp.received[ELF.name], ELF.read_bytes())
+        self.assertEqual(esp.started, ELF.name)
+
+    def test_refused_core_stops_before_elf(self) -> None:
+        if CORE is None:
+            self.skipTest("последняя сборка — без ядра")
+        esp = ModuleEsp(refuse_names=(CORE[0],))
+        h = self.launch(esp)
+        self.assertEqual([q[3] for q in esp.queries], [CORE[0]], "ESP не взяла ядро — ELF не шлётся")
+        self.assertIsNone(esp.started)
+        self.assertEqual(h.border[-1], 2, "ошибка — красный бордюр")
 
     def test_cached_elf_is_not_sent_again(self) -> None:
         esp = ModuleEsp(cached=True)
