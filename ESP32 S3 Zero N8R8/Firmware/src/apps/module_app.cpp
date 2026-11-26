@@ -369,6 +369,8 @@ void ModuleApp::begin() {
   } else {
     appData().setFetch(remoteFetch, this, remoteBlock);
   }
+  // Откуда читается каждый файл данных (0.1.175): одна строка на файл за запуск приложения.
+  appData().setLog([](void*, const char* line) { bringupLog(kTag, "%s", line); }, nullptr);
 #if ZIFI_HAS_SPI_LINK
   coreJobGo_ = xSemaphoreCreateBinary();
   coreJobDone_ = xSemaphoreCreateBinary();
@@ -584,15 +586,15 @@ void ModuleApp::replyQuery(uint8_t state) {
   host_.transport().send(kRespModQuery, reply, sizeof(reply));
 }
 
-// MOD_QUERY с флагом 0x04 (0.1.165): файл данных приложения app с карты Evo — в /SYSTEM/CACHE/<app>/ на
-// флешке. Ответ: 0 — годная копия есть, 1 — шли (WRITING.TMP открыт, куски — сразу на флешку), 2 — нет
-// места, 3 — плохое имя, 4 — флешки нет. 5 (0.1.166) — файл остаётся на карте Evo, и приложение
-// читает его по запросу у программы Z80: она назвала номер файла (index), значит, умеет.
-// С 0.1.167 программа Z80 назвала номер — всегда 5, флешку не трогать, даже если она вставлена
-// (пользователь 24.11.2026: «кэш флешки OTG не используем — ждать полдня на копирование»: pak Quake 2 —
-// десятки мегабайт, копия на флешку шла часами, а читать с карты по запросу можно сразу). Не встал на
-// учёт (плохое имя, таблица полна) — 3. Кэш на флешке остался только для запускателей 0.1.165, что
-// номер файла не шлют.
+// MOD_QUERY с флагом 0x04 (0.1.165): файл данных приложения app с карты Evo. Ответ: 0 — файл есть на
+// флешке, 3 — плохое имя, 4 — на флешке нет (или флешки нет). 5 (0.1.166) — файл остаётся на карте Evo,
+// и приложение читает его по запросу у программы Z80: она назвала номер файла (index), значит, умеет.
+// С 0.1.167 программа Z80 назвала номер — всегда 5 (пользователь 24.11.2026: «кэш флешки OTG не
+// используем — ждать полдня на копирование»). Не встал на учёт (плохое имя, таблица полна) — 3.
+// С 0.1.175 на флешку ничего не копируется и для запускателей 0.1.165 без номера файла (ответ 1 «шли»
+// больше не даётся; пользователь 26.11.2026: «Сама игра эти файлы туда не копирует»). Лежит ли файл на
+// флешке — решает data_open: она ищет его во всех папках /SYSTEM/CACHE (AppDataFiles::findOnDrive), и
+// найденный читается с флешки, даже если стоит на учёте с карты.
 void ModuleApp::handleDataQuery(const char* name, uint32_t size, uint32_t stamp, const char* app,
                                 int index) {
 #if ZIFI_HAS_USB_DRIVE
@@ -602,9 +604,9 @@ void ModuleApp::handleDataQuery(const char* name, uint32_t size, uint32_t stamp,
 #endif
   if (index >= 0) {
     if (appData().addRemote(app, name, size, stamp, static_cast<uint8_t>(index))) {
-      bringupLog(kTag, "data file %s of %s, %u bytes: read from the Evo card on request "
-                 "(file %d of the Z80 program)%s", name, app, static_cast<unsigned>(size), index,
-                 drive ? ", USB drive not used" : "");
+      bringupLog(kTag, "data file %s of %s, %u bytes: registered from the Evo card (file %d of the Z80 "
+                 "program)%s", name, app, static_cast<unsigned>(size), index,
+                 drive ? "; a copy on the USB drive goes first" : "");
       replyQuery(AppDataFiles::kRemote);
       return;
     }
@@ -618,27 +620,19 @@ void ModuleApp::handleDataQuery(const char* name, uint32_t size, uint32_t stamp,
     return;
   }
 #if ZIFI_HAS_USB_DRIVE
-  appData().forgetRemote(app, name);           // флешка есть — файл с неё, а не у Z80
-  uint64_t total = 0, freeBytes = 0;
-  if (esp_vfs_fat_info(UsbDrive::kMountPoint, &total, &freeBytes) != ESP_OK) {
-    freeBytes = 0;
+  appData().forgetRemote(app, name);           // номера нет — у программы Z80 файл не прочитать
+  appData().setVolume(usbDrive().generation());
+  char path[300];
+  uint32_t length = 0;
+  const bool found = appData().findOnDrive(app, name, path, sizeof(path), &length, nullptr);
+  if (found) {
+    bringupLog(kTag, "data file %s of %s, %u bytes: on the USB drive %s, %u bytes", name, app,
+               static_cast<unsigned>(size), path, static_cast<unsigned>(length));
+  } else {
+    bringupLog(kTag, "data file %s of %s, %u bytes: not on the USB drive (nothing is copied there)",
+               name, app, static_cast<unsigned>(size));
   }
-  const uint8_t answer = appData().begin(app, name, size, stamp, freeBytes);
-  bringupLog(kTag, "data file %s of %s, %u bytes: %s (%u MB free)", name, app,
-             static_cast<unsigned>(size),
-             answer == AppDataFiles::kHave   ? "fresh copy on the drive"
-             : answer == AppDataFiles::kSend ? "send"
-             : answer == AppDataFiles::kNoRoom ? "NO ROOM"
-                                               : "BAD NAME",
-             static_cast<unsigned>(freeBytes >> 20));
-  if (answer == AppDataFiles::kSend) {
-    deliveryData_ = true;
-    memcpy(deliveryName_, name, sizeof(deliveryName_));
-    deliverySize_ = size;
-    deliveryStamp_ = stamp;
-    deliveryReceived_ = 0;
-  }
-  replyQuery(answer);
+  replyQuery(found ? AppDataFiles::kHave : AppDataFiles::kNoDrive);
 #endif
 }
 
@@ -653,13 +647,17 @@ int ModuleApp::coreDataOpen(const char* name, void** file, uint32_t* size) {
   for (size_t i = 0; i + 1 < sizeof(app) && elf[i] != 0 && elf[i] != '.'; ++i) {
     app[i] = elf[i];
   }
-  // Файл на учёте (флешки не было, 0.1.166) — у программы Z80; иначе — копия на флешке (без флешки
-  // её нет: fopen не найдёт).
+  // 0.1.175: сначала флешка — папка приложения и все папки /SYSTEM/CACHE (номер монтирования: вынули и
+  // вставили — найденное забыто; флешки нет — 0, не ищется); нет на ней — файл на учёте с карты Evo
+  // (0.1.166) у программы Z80. Откуда читается файл, AppDataFiles пишет в журнал сама, раз на файл.
+#if ZIFI_HAS_USB_DRIVE
+  appData().setVolume(usbDrive().isReady() ? usbDrive().generation() : 0);
+#else
+  appData().setVolume(0);
+#endif
   const int result = appData().open(app, name, file, size);
-  if (result != ZM_OK) {
-    bringupLog(kTag, "data_open %s of %s: %s", name != nullptr ? name : "?", app,
-               result == ZM_NOT_FOUND ? "neither on the USB drive nor registered from the Evo card"
-                                      : "no free handle");
+  if (result == ZM_ERROR) {
+    bringupLog(kTag, "data_open %s of %s: no free handle", name != nullptr ? name : "?", app);
   }
   return result;
 }

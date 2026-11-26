@@ -33,8 +33,19 @@ namespace zifi {
 // module_app.cpp). Куски — целыми секторами карты: смещение кратно 512, до kRemoteRequestMax байтов за
 // запрос; короткие и невыровненные чтения приложения берутся из блока kRemoteBlock байтов.
 //
-// Переносимый код (stdio, stat, utime, rename): работает в прошивке поверх FatFs и в тесте на ПК
-// (tests/app_data_files_host.cpp) поверх папки ПК.
+// Поиск на флешке (0.1.175; пользователь 26.11.2026: «Если игра находит файлы данных в любой из вложенных
+// папок в OTG Flash Drive /SYSTEM/CACHE/* то начинает читать их оттуда. Сама игра эти файлы туда не
+// копирует»). open ищет файл сначала в <root>/<ПРИЛОЖЕНИЕ>/, потом в самом <root> и во всех вложенных
+// папках на любой глубине (до kMaxScanDepth), по алфавиту без учёта регистра. Нашёлся — читается с
+// флешки, даже если такой же файл стоит на учёте с карты Evo. Папка, где нашёлся первый файл
+// приложения, — его «домашняя»: остальные файлы ищутся только в ней (у Quake 2 PAK0.PAK демо и полной
+// версии разные — смешивать нельзя). Найденное и ненайденное помнится до выгрузки приложения
+// (closeAll), смены флешки (setVolume) или нового файла на ней (commit): Quake 2 открывает pak заново
+// на каждый файл внутри и ищет несуществующие pak3…pak9 — обход флешки на каждый вызов замедлил бы
+// загрузку уровня. В журнал — одна строка на файл: откуда он читается.
+//
+// Переносимый код (stdio, stat, utime, rename, обход каталогов): работает в прошивке поверх FatFs и в
+// тесте на ПК (tests/app_data_files_host.cpp) поверх папки ПК.
 class AppDataFiles {
  public:
   // root — каталог, в котором лежат папки приложений, без «/» в конце (на плате /usb/SYSTEM/CACHE).
@@ -88,6 +99,18 @@ class AppDataFiles {
   // открываются.
   void setFetch(Fetch fetch, void* context, uint8_t* block);
 
+  // --- поиск на флешке (0.1.175) ---
+  // Том для поиска: stamp — номер монтирования флешки (0 — флешки нет: на ней не ищется). Сменился —
+  // всё найденное забыто. По умолчанию 1 (тест на ПК: «флешка» — папка ПК).
+  void setVolume(uint32_t stamp);
+  // Строки журнала: откуда читается файл (одна на файл за запуск приложения). На плате — bringupLog.
+  using Log = void (*)(void* context, const char* line);
+  void setLog(Log log, void* context);
+  // Найти файл name приложения app на флешке (порядок — выше, у класса). true — полный путь в path,
+  // длина в *length. *fresh — файл искали сейчас, а не взяли из запомненного (для журнала; можно nullptr).
+  bool findOnDrive(const char* app, const char* name, char* path, size_t size, uint32_t* length,
+                   bool* fresh);
+
   static constexpr size_t kMaxOpen = 8;
   static constexpr size_t kMaxRemote = 8;
   static constexpr uint32_t kChunkBytes = 4096;
@@ -95,6 +118,12 @@ class AppDataFiles {
   static constexpr uint32_t kRemoteBlock = 8192;
   static constexpr uint32_t kRemoteRequestMax = 32768;
   static constexpr const char* kTempName = "WRITING.TMP";
+  // Поиск: папок не больше kMaxScanDirs (с папкой приложения), глубина от <root> — до kMaxScanDepth,
+  // путь папки — до kDirPath байтов; запомненных имён за запуск — до kMaxKnown.
+  static constexpr size_t kMaxScanDirs = 64;
+  static constexpr int kMaxScanDepth = 8;
+  static constexpr size_t kDirPath = 192;
+  static constexpr size_t kMaxKnown = 32;
 
  private:
   struct Handle {
@@ -113,8 +142,21 @@ class AppDataFiles {
     char name[13] = {};
   };
 
+  // Имя, которое уже искали за этот запуск: dir — номер папки в dirs_ (-1 — на флешке нет).
+  struct Known {
+    char name[13] = {};
+    int dir = -1;
+    uint32_t length = 0;
+  };
+
   bool folderOf(const char* app, char* out, size_t size) const;
   void closeCached();
+  // Поиск (под searchLock_): забыть всё; начать поиск файлов приложения upperApp; список папок.
+  void resetSearch();
+  bool prepareSearch(const char* upperApp);
+  void listDirs();
+  const char* dirAt(size_t index) const { return dirs_ + index * kDirPath; }
+  void log(const char* format, ...);
   int readRemote(uint8_t index, uint32_t size, uint32_t offset, uint8_t* out, uint32_t count,
                  uint32_t* got);
 
@@ -145,6 +187,22 @@ class AppDataFiles {
   uint32_t blockGeneration_ = 0;
   uint32_t blockAt_ = 0;
   uint32_t blockLength_ = 0;
+  // поиск на флешке (0.1.175; задачи приложения и обмена с Z80 — под searchLock_)
+  std::mutex searchLock_;
+  std::atomic<uint32_t> volume_{1};
+  std::atomic<bool> resetPending_{false};  // closeAll не дождался замка: сбросить при следующем поиске
+  uint32_t searchVolume_ = 0;  // для какого тома запомненное
+  bool searching_ = false;     // запомненное годно (searchApp_, searchVolume_)
+  char searchApp_[9] = {};
+  // Папки поиска (12 КБ — в самом объекте, а он на плате в PSRAM): [0] — папка приложения.
+  char dirs_[kMaxScanDirs * kDirPath] = {};
+  size_t dirCount_ = 0;
+  bool dirsListed_ = false;    // остальные папки уже обойдены
+  int home_ = -1;              // «домашняя» папка приложения (номер в dirs_), -1 — ещё нет
+  Known known_[kMaxKnown];
+  size_t knownCount_ = 0;
+  Log log_ = nullptr;
+  void* logContext_ = nullptr;
 };
 
 // Один запрос куска файла у программы Z80 и приём ответа (0.1.166). Событие ESP → Z80 kEventDataRead:

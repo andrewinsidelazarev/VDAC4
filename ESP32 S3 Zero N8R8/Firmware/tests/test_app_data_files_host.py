@@ -15,7 +15,12 @@ tests/app_data_files_host.cpp: «флешка» — временная папк�
 - (0.1.166) файлы на карте Evo по запросу у программы Z80 (FakeZ80 отвечает через AppDataRequest, как
   задача обмена прошивки): 400 случайных чтений байт в байт кусками DMA и кадрами, запросы — целые
   секторы до 32 КБ внутри файла, короткие подряд — из блока, отказ Z80 — kError, чужие, повторные и
-  запоздавшие куски — мимо; учёт: вместо копии на флешке, forgetRemote, вытеснение чужих, плохие имена.
+  запоздавшие куски — мимо; учёт: файл на флешке читается раньше учёта (0.1.175), forgetRemote,
+  вытеснение чужих, плохие имена;
+- (0.1.175) поиск на флешке: папка приложения первая, потом все вложенные папки корня по алфавиту на
+  любой глубине, имя без учёта регистра; первая папка с файлом — «домашняя», файлы из разных папок не
+  смешиваются; ненайденное помнится до closeAll; том 0 (флешки нет) — не ищется; папка с именем файла
+  — не файл; в журнал — одна строка на файл.
 Без Visual Studio Build Tools тест пропускается.
 """
 import shutil
@@ -31,7 +36,7 @@ SCENARIOS = [
     'delivered_file_reads_back', 'put_out_of_order_is_refused', 'incomplete_delivery_leaves_nothing',
     'newer_card_file_is_sent_again', 'room_counts_the_old_copy', 'bad_names_are_refused',
     'interleaved_handles_read_their_files', 'handles_run_out',
-    'remote_reads_match_the_card', 'remote_registry', 'remote_request_pieces',
+    'remote_reads_match_the_card', 'remote_registry', 'remote_request_pieces', 'drive_search',
 ]
 
 

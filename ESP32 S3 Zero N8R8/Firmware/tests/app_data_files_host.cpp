@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -462,12 +463,13 @@ bool remoteRegistry() {
   if (!deliver(files, "Q2", "PAK0.PAK", local, fatStamp(2026, 1, 1, 0, 0), {})) {
     return fail("remote_registry", "delivery");
   }
+  // PAK1.PAK — только на карте Evo (на учёте): без обработчика не открывается, с ним — у Z80
   const std::vector<uint8_t> card = pattern(9000, 2);
-  if (!files.addRemote("Q2", "PAK0.PAK", static_cast<uint32_t>(card.size()), 0, 0)) {
+  if (!files.addRemote("Q2", "PAK1.PAK", static_cast<uint32_t>(card.size()), 0, 0)) {
     return fail("remote_registry", "addRemote");
   }
   void* file = nullptr;
-  if (files.open("Q2", "PAK0.PAK", &file, nullptr) != AppDataFiles::kNotFound) {
+  if (files.open("Q2", "PAK1.PAK", &file, nullptr) != AppDataFiles::kNotFound) {
     return fail("remote_registry", "a registered file opens without a fetch handler");
   }
   std::vector<uint8_t> block(AppDataFiles::kRemoteBlock);
@@ -477,26 +479,31 @@ bool remoteRegistry() {
   uint32_t size = 0;
   std::vector<uint8_t> out(9000);
   uint32_t got = 0;
-  if (files.open("Q2", "PAK0.PAK", &file, &size) != AppDataFiles::kOk || size != card.size() ||
+  if (files.open("Q2", "PAK1.PAK", &file, &size) != AppDataFiles::kOk || size != card.size() ||
       files.read(file, 10, out.data(), 100, &got) != AppDataFiles::kOk || memcmp(out.data(), card.data() + 10, 100) != 0) {
     return fail("remote_registry", "registered file is not read from the Z80");
   }
   files.close(file);
-  files.forgetRemote("q2", "pak0.pak");
+  // 0.1.175: PAK0.PAK и на флешке, и на учёте (другой длины) — читается флешка
+  files.addRemote("Q2", "PAK0.PAK", static_cast<uint32_t>(card.size()), 0, 1);
   if (files.open("Q2", "PAK0.PAK", &file, &size) != AppDataFiles::kOk || size != local.size() ||
       files.read(file, 10, out.data(), 100, &got) != AppDataFiles::kOk || memcmp(out.data(), local.data() + 10, 100) != 0) {
-    return fail("remote_registry", "after forgetRemote the drive copy is not used");
+    return fail("remote_registry", "the drive copy does not go before the registration");
   }
   files.close(file);
+  files.forgetRemote("q2", "pak1.pak");
+  if (files.open("Q2", "PAK1.PAK", &file, &size) != AppDataFiles::kNotFound) {
+    return fail("remote_registry", "a file opens after forgetRemote");
+  }
   // другой файл под тем же номером: блок прежнего не годится
   const std::vector<uint8_t> other = pattern(9000, 99);
-  files.addRemote("Q2", "PAK0.PAK", static_cast<uint32_t>(card.size()), 0, 0);
-  if (files.open("Q2", "PAK0.PAK", &file, nullptr) != AppDataFiles::kOk ||
+  files.addRemote("Q2", "PAK1.PAK", static_cast<uint32_t>(card.size()), 0, 0);
+  if (files.open("Q2", "PAK1.PAK", &file, nullptr) != AppDataFiles::kOk ||
       files.read(file, 20, out.data(), 50, &got) != AppDataFiles::kOk) {
     return fail("remote_registry", "reopen");
   }
   z.files[0] = &other;
-  files.addRemote("Q2", "PAK0.PAK", static_cast<uint32_t>(other.size()), 0, 0);
+  files.addRemote("Q2", "PAK1.PAK", static_cast<uint32_t>(other.size()), 0, 0);
   if (files.read(file, 30, out.data(), 50, &got) != AppDataFiles::kOk ||
       memcmp(out.data(), other.data() + 30, 50) != 0) {
     return fail("remote_registry", "the block of the previous registration was reused");
@@ -573,6 +580,150 @@ bool remoteRequestPieces() {
   return true;
 }
 
+// --- поиск на флешке (0.1.175) ---------------------------------------------------------------------
+
+namespace fs = std::filesystem;
+
+// Положить файл rel (путь от корня, через «/») с содержимым data; папки создаются.
+bool putFile(const char* rel, const std::vector<uint8_t>& data) {
+  const fs::path path = fs::u8path(g_root) / fs::u8path(rel);
+  std::error_code error;
+  fs::create_directories(path.parent_path(), error);
+  FILE* out = fopen(path.string().c_str(), "wb");
+  if (out == nullptr) {
+    return false;
+  }
+  const bool ok = fwrite(data.data(), 1, data.size(), out) == data.size();
+  return fclose(out) == 0 && ok;
+}
+
+void removeTree(const char* rel) {
+  std::error_code error;
+  fs::remove_all(fs::u8path(g_root) / fs::u8path(rel), error);
+}
+
+struct LogLines {
+  std::vector<std::string> lines;
+  size_t count(const char* part) const {
+    size_t n = 0;
+    for (const std::string& line : lines) {
+      n += line.find(part) != std::string::npos ? 1 : 0;
+    }
+    return n;
+  }
+};
+
+void keepLine(void* context, const char* line) { static_cast<LogLines*>(context)->lines.push_back(line); }
+
+// Открыть name приложения Q2 и прочитать целиком: совпало с want — true.
+bool opensAs(AppDataFiles& files, const char* name, const std::vector<uint8_t>& want) {
+  void* file = nullptr;
+  uint32_t size = 0;
+  if (files.open("Q2", name, &file, &size) != AppDataFiles::kOk) {
+    return false;
+  }
+  std::vector<uint8_t> out(size);
+  uint32_t got = 0;
+  const bool same = size == want.size() &&
+                    files.read(file, 0, out.data(), size, &got) == AppDataFiles::kOk && got == size &&
+                    memcmp(out.data(), want.data(), size) == 0;
+  files.close(file);
+  return same;
+}
+
+bool notFound(AppDataFiles& files, const char* name) {
+  void* file = nullptr;
+  return files.open("Q2", name, &file, nullptr) == AppDataFiles::kNotFound;
+}
+
+// Файл ищется в папке приложения и во всех вложенных в корень на любой глубине (регистр не важен);
+// первая папка, где нашёлся файл, — «домашняя»: остальные файлы — только из неё; найденное и
+// ненайденное помнится до closeAll; без флешки (том 0) не ищется; в журнал — строка на файл.
+bool driveSearch() {
+  removeAll();
+  for (const char* dir : {"Q2", "AAA", "X", "MUSIC"}) {
+    removeTree(dir);
+  }
+  const std::vector<uint8_t> deep0 = pattern(3000, 5);
+  const std::vector<uint8_t> deep1 = pattern(2000, 6);
+  const std::vector<uint8_t> app0 = pattern(1500, 7);
+  const std::vector<uint8_t> demo0 = pattern(1000, 8);
+  if (!putFile("X/Y/Z/BASEQ2/PAK0.PAK", deep0) || !putFile("X/Y/Z/BASEQ2/pak1.pak", deep1) ||
+      !putFile("MUSIC/TRACK.MOD", pattern(100, 9))) {
+    return fail("drive_search", "setup");
+  }
+  AppDataFiles files(g_root.c_str());
+  LogLines log;
+  files.setLog(keepLine, &log);
+  // 1. глубоко вложенная папка; имя на флешке строчными — тоже находится
+  if (!opensAs(files, "PAK0.PAK", deep0) || !opensAs(files, "pak1.pak", deep1)) {
+    return fail("drive_search", "files four folders deep are not read");
+  }
+  // 2. одна строка на файл за запуск, как ни открывай
+  for (int i = 0; i < 5; ++i) {
+    opensAs(files, "PAK0.PAK", deep0);
+  }
+  if (log.count("data file Q2/PAK0.PAK: USB drive") != 1 || log.count("data file Q2/PAK1.PAK: USB drive") != 1 ||
+      log.count("data files of Q2: USB drive folder") != 1 || log.count("BASEQ2") < 3) {
+    return fail("drive_search", "not one log line per file");
+  }
+  // 3. папка приложения — первая; домашняя — Q2: PAK1.PAK из другой папки не берётся
+  if (!putFile("Q2/PAK0.PAK", app0)) {
+    return fail("drive_search", "setup Q2");
+  }
+  files.closeAll();
+  if (!opensAs(files, "PAK0.PAK", app0) || !notFound(files, "PAK1.PAK")) {
+    return fail("drive_search", "the app folder is not first or files are mixed across folders");
+  }
+  // 4. по алфавиту: AAA раньше X; домашняя — AAA, PAK1.PAK из X не смешивается с её PAK0.PAK
+  removeTree("Q2");
+  if (!putFile("AAA/PAK0.PAK", demo0)) {
+    return fail("drive_search", "setup AAA");
+  }
+  files.closeAll();
+  if (!opensAs(files, "PAK0.PAK", demo0) || !notFound(files, "PAK1.PAK")) {
+    return fail("drive_search", "folders are not taken in order or files are mixed across folders");
+  }
+  // 5. ненайденное помнится до closeAll: новый файл виден только в следующем запуске
+  if (!notFound(files, "PAK5.PAK") || !putFile("AAA/PAK5.PAK", demo0) || !notFound(files, "PAK5.PAK")) {
+    return fail("drive_search", "a missing file is searched again in the same run");
+  }
+  files.closeAll();
+  if (!opensAs(files, "PAK5.PAK", demo0)) {
+    return fail("drive_search", "after closeAll the new file is not found");
+  }
+  // 6. флешки нет (том 0) — не ищется; вставили (новый номер) — снова
+  files.closeAll();
+  files.setVolume(0);
+  if (!notFound(files, "PAK0.PAK")) {
+    return fail("drive_search", "searched without a drive");
+  }
+  files.setVolume(7);
+  if (!opensAs(files, "PAK0.PAK", demo0)) {
+    return fail("drive_search", "not found after the drive came back");
+  }
+  // 7. папка с именем файла — не файл
+  files.closeAll();
+  removeTree("AAA");
+  std::error_code error;
+  fs::create_directories(fs::u8path(g_root) / "Q2" / "PAK2.PAK", error);
+  if (!notFound(files, "PAK2.PAK")) {
+    return fail("drive_search", "a folder named like the file is opened");
+  }
+  // 8. файла нет нигде — одна строка в журнал
+  log.lines.clear();
+  notFound(files, "PAK9.PAK");
+  notFound(files, "PAK9.PAK");
+  if (log.count("data file Q2/PAK9.PAK: neither on the USB drive nor registered") != 1) {
+    return fail("drive_search", "a missing file is logged more than once");
+  }
+  files.closeAll();
+  for (const char* dir : {"Q2", "AAA", "X", "MUSIC"}) {
+    removeTree(dir);
+  }
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -597,6 +748,7 @@ int main(int argc, char** argv) {
       {"remote_reads_match_the_card", remoteReadsMatchTheCard},
       {"remote_registry", remoteRegistry},
       {"remote_request_pieces", remoteRequestPieces},
+      {"drive_search", driveSearch},
   };
   for (const Scenario& scenario : scenarios) {
     if (!scenario.run()) {

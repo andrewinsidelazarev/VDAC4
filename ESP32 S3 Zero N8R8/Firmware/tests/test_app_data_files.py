@@ -51,14 +51,38 @@ class AppDataFilesTest(unittest.TestCase):
         self.assertIn("indexAt < packet.length ? packet.data[indexAt] : -1", query, "старый запрос — без")
         self.assertIn("const size_t appAt = 9 + nameLength + 1;", query, "приложение — за именем файла")
 
-    def test_data_query_streams_to_drive(self) -> None:
+    def test_data_query_never_copies_to_drive(self) -> None:
+        # 0.1.175 (пользователь 26.11.2026: «Сама игра эти файлы туда не копирует»): на флешку ничего не
+        # пишется и для запускателей без номера файла — есть на флешке (поиск) — 0, нет — 4
         query = function_body(self.modules, "void ModuleApp::handleDataQuery(")
         self.assertIn("usbDrive().ready()", query)
         self.assertIn("replyQuery(AppDataFiles::kNoDrive);", query)
-        self.assertIn("esp_vfs_fat_info(UsbDrive::kMountPoint, &total, &freeBytes)", query)
-        self.assertIn("appData().begin(app, name, size, stamp, freeBytes)", query)
-        self.assertIn("deliveryData_ = true;", query)
+        self.assertNotIn("appData().begin(", query)
+        self.assertNotIn("deliveryData_ = true;", query)
+        self.assertNotIn("kSend", query)
+        self.assertIn("appData().findOnDrive(app, name, path, sizeof(path), &length, nullptr)", query)
+        self.assertIn("replyQuery(found ? AppDataFiles::kHave : AppDataFiles::kNoDrive);", query)
         self.assertNotIn("allocateDelivery", query, "PSRAM под весь файл не берётся")
+
+    def test_data_open_searches_drive(self) -> None:
+        # 0.1.175: data_open — сначала флешка (номер монтирования; без флешки — 0, не ищется), журнал —
+        # строкой на файл из AppDataFiles
+        opened = function_body(self.modules, "int ModuleApp::coreDataOpen(")
+        self.assertIn("appData().setVolume(usbDrive().isReady() ? usbDrive().generation() : 0);", opened)
+        self.assertLess(opened.index("setVolume("), opened.index("appData().open(app, name, file, size)"))
+        self.assertNotIn("neither on the USB drive", opened, "строку «нет нигде» пишет AppDataFiles, раз")
+        self.assertIn('appData().setLog([](void*, const char* line) { bringupLog(kTag, "%s", line); }, nullptr);',
+                      self.modules)
+        files = read("src", "app_data_files.cpp")
+        opener = function_body(files, "int AppDataFiles::open(")
+        self.assertLess(opener.index("findOnDrive(upperApp, upperName"), opener.index("remotes_"),
+                        "флешка — раньше учёта с карты Evo")
+        finder = function_body(files, "bool AppDataFiles::findOnDrive(")
+        self.assertLess(finder.index("tryDir(static_cast<size_t>(home_));"), finder.index("listDirs();"),
+                        "есть домашняя папка — только в ней")
+        self.assertIn("resetSearch();", function_body(files, "void AppDataFiles::closeAll()"))
+        self.assertIn("std::try_to_lock", function_body(files, "void AppDataFiles::closeAll()"),
+                      "выгрузка не ждёт замок поиска")
 
     def test_put_and_commit_route_data(self) -> None:
         put = function_body(self.modules, "void ModuleApp::handlePut(const PacketView& packet)")

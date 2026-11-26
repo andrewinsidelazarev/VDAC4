@@ -1,5 +1,7 @@
 #include "zifi/app_data_files.hpp"
 
+#include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -8,8 +10,10 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <io.h>
 #include <sys/utime.h>
 #else
+#include <dirent.h>
 #include <unistd.h>
 #include <utime.h>
 #endif
@@ -25,9 +29,28 @@ int setFileTime(const char* path, time_t when) {
   struct __utimbuf64 times = {when, when};
   return _utime64(path, &times);
 }
+// Длина обычного файла (-1 — нет или это папка: папка с именем PAK0.PAK файлом не считается).
 long long fileSize(const char* path) {
   struct _stat64 info;
-  return _stat64(path, &info) == 0 ? info.st_size : -1;
+  return _stat64(path, &info) == 0 && (info.st_mode & _S_IFREG) != 0 ? info.st_size : -1;
+}
+// Вложенные папки каталога dir: each(context, имя) на каждую.
+void forEachSubdir(const char* dir, void (*each)(void*, const char*), void* context) {
+  char pattern[260];
+  if (snprintf(pattern, sizeof(pattern), "%s/*", dir) >= static_cast<int>(sizeof(pattern))) {
+    return;
+  }
+  struct _finddata_t info;
+  const intptr_t find = _findfirst(pattern, &info);
+  if (find == -1) {
+    return;
+  }
+  do {
+    if ((info.attrib & _A_SUBDIR) != 0 && strcmp(info.name, ".") != 0 && strcmp(info.name, "..") != 0) {
+      each(context, info.name);
+    }
+  } while (_findnext(find, &info) == 0);
+  _findclose(find);
 }
 #else
 int makeDir(const char* path) { return mkdir(path, 0777); }
@@ -37,7 +60,20 @@ int setFileTime(const char* path, time_t when) {
 }
 long long fileSize(const char* path) {
   struct stat info;
-  return stat(path, &info) == 0 ? static_cast<long long>(info.st_size) : -1;
+  return stat(path, &info) == 0 && S_ISREG(info.st_mode) ? static_cast<long long>(info.st_size) : -1;
+}
+// Вложенные папки каталога dir (на плате — VFS FatFs: d_type у записи есть).
+void forEachSubdir(const char* dir, void (*each)(void*, const char*), void* context) {
+  DIR* folder = opendir(dir);
+  if (folder == nullptr) {
+    return;
+  }
+  while (struct dirent* entry = readdir(folder)) {
+    if (entry->d_type == DT_DIR && strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+      each(context, entry->d_name);
+    }
+  }
+  closedir(folder);
 }
 #endif
 
@@ -45,6 +81,22 @@ bool nameChar(char c) {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
          c == '-';
 }
+
+// Порядок папок поиска: по путям без учёта регистра, «/» — меньше любого знака. Так папка идёт сразу за
+// своей родительской, раньше соседних (A, A/B, A B — а не A, A B, A/B).
+int folderOrder(const void* a, const void* b) {
+  const unsigned char* x = static_cast<const unsigned char*>(a);
+  const unsigned char* y = static_cast<const unsigned char*>(b);
+  for (;; ++x, ++y) {
+    unsigned cx = *x == '/' ? 1u : (*x >= 'a' && *x <= 'z' ? *x - 'a' + 'A' : *x);
+    unsigned cy = *y == '/' ? 1u : (*y >= 'a' && *y <= 'z' ? *y - 'a' + 'A' : *y);
+    if (cx != cy || cx == 0) {
+      return static_cast<int>(cx) - static_cast<int>(cy);
+    }
+  }
+}
+
+bool samePath(const char* a, const char* b) { return folderOrder(a, b) == 0; }
 
 // Имя в верхний регистр (на карте Evo и в MOD_QUERY имена 8.3 — заглавными; FatFs регистр не различает,
 // но папка и файл на флешке пусть называются одинаково при любом запросе).
@@ -64,6 +116,170 @@ void upper(const char* in, char* out, size_t size) {
 
 AppDataFiles::AppDataFiles(const char* root) {
   snprintf(root_, sizeof(root_), "%s", root);
+}
+
+// --- поиск на флешке (0.1.175) ----------------------------------------------------------------------
+
+void AppDataFiles::setVolume(uint32_t stamp) { volume_.store(stamp); }
+
+void AppDataFiles::setLog(Log log, void* context) {
+  log_ = log;
+  logContext_ = context;
+}
+
+void AppDataFiles::log(const char* format, ...) {
+  if (log_ == nullptr) {
+    return;
+  }
+  char line[400];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(line, sizeof(line), format, args);
+  va_end(args);
+  log_(logContext_, line);
+}
+
+void AppDataFiles::resetSearch() {
+  searching_ = false;
+  searchApp_[0] = 0;
+  dirCount_ = 0;
+  dirsListed_ = false;
+  home_ = -1;
+  knownCount_ = 0;
+}
+
+// Запомненное годно для приложения upperApp и нынешнего тома? Нет — начать заново: папка приложения —
+// первая. false — путь папки приложения длиннее kDirPath.
+bool AppDataFiles::prepareSearch(const char* upperApp) {
+  const uint32_t volume = volume_.load();
+  if (resetPending_.exchange(false)) {
+    resetSearch();
+  }
+  if (searching_ && searchVolume_ == volume && strcmp(searchApp_, upperApp) == 0) {
+    return true;
+  }
+  resetSearch();
+  if (snprintf(dirs_, kDirPath, "%s/%s", root_, upperApp) >= static_cast<int>(kDirPath)) {
+    return false;
+  }
+  dirCount_ = 1;
+  snprintf(searchApp_, sizeof(searchApp_), "%s", upperApp);
+  searchVolume_ = volume;
+  searching_ = true;
+  return true;
+}
+
+// Все папки <root> на глубину kMaxScanDepth (сам <root> — тоже), кроме папки приложения (она уже
+// первая): сначала собрать по уровням, потом расставить по folderOrder.
+void AppDataFiles::listDirs() {
+  if (dirsListed_) {
+    return;
+  }
+  dirsListed_ = true;
+  if (snprintf(dirs_ + dirCount_ * kDirPath, kDirPath, "%s", root_) >= static_cast<int>(kDirPath)) {
+    return;
+  }
+  const size_t first = dirCount_++;
+  const size_t rootLength = strlen(root_);
+  struct Walk {
+    AppDataFiles* self;
+    size_t parent;
+  };
+  for (size_t i = first; i < dirCount_; ++i) {
+    int depth = 0;
+    for (const char* c = dirAt(i) + rootLength; *c != 0; ++c) {
+      depth += *c == '/' ? 1 : 0;
+    }
+    if (depth >= kMaxScanDepth) {
+      continue;
+    }
+    Walk walk{this, i};
+    forEachSubdir(dirAt(i), [](void* context, const char* child) {
+      Walk* w = static_cast<Walk*>(context);
+      AppDataFiles* s = w->self;
+      if (s->dirCount_ >= kMaxScanDirs) {
+        return;
+      }
+      char* out = s->dirs_ + s->dirCount_ * kDirPath;
+      if (snprintf(out, kDirPath, "%s/%s", s->dirAt(w->parent), child) >= static_cast<int>(kDirPath) ||
+          samePath(out, s->dirAt(0))) {
+        return;                                // длинный путь не берём; папка приложения — уже первая
+      }
+      ++s->dirCount_;
+    }, &walk);
+  }
+  qsort(dirs_ + first * kDirPath, dirCount_ - first, kDirPath, folderOrder);
+}
+
+bool AppDataFiles::findOnDrive(const char* app, const char* name, char* path, size_t size,
+                               uint32_t* length, bool* fresh) {
+  if (fresh != nullptr) {
+    *fresh = false;
+  }
+  if (!validApp(app) || !validName(name) || path == nullptr || size == 0) {
+    return false;
+  }
+  char upperApp[9];
+  char upperName[13];
+  upper(app, upperApp, sizeof(upperApp));
+  upper(name, upperName, sizeof(upperName));
+  std::lock_guard<std::mutex> guard(searchLock_);
+  if (!prepareSearch(upperApp)) {
+    return false;
+  }
+  const Known* known = nullptr;
+  for (size_t i = 0; i < knownCount_; ++i) {
+    if (strcmp(known_[i].name, upperName) == 0) {
+      known = &known_[i];
+      break;
+    }
+  }
+  Known found;
+  if (known == nullptr) {
+    snprintf(found.name, sizeof(found.name), "%s", upperName);
+    if (searchVolume_ != 0) {
+      char candidate[kDirPath + 16];
+      auto tryDir = [&](size_t dir) {
+        snprintf(candidate, sizeof(candidate), "%s/%s", dirAt(dir), upperName);
+        const long long bytes = fileSize(candidate);
+        if (bytes < 0 || bytes > 0xFFFFFFFFLL) {
+          return false;
+        }
+        found.dir = static_cast<int>(dir);
+        found.length = static_cast<uint32_t>(bytes);
+        return true;
+      };
+      if (home_ >= 0) {
+        tryDir(static_cast<size_t>(home_));    // домашняя папка есть — только в ней
+      } else if (!tryDir(0)) {
+        listDirs();
+        for (size_t dir = 1; dir < dirCount_ && !tryDir(dir); ++dir) {
+        }
+      }
+      if (found.dir >= 0 && home_ < 0) {
+        home_ = found.dir;
+        log("data files of %s: USB drive folder %s", upperApp, dirAt(static_cast<size_t>(home_)));
+      }
+    }
+    if (knownCount_ < kMaxKnown) {
+      known_[knownCount_++] = found;
+    }
+    known = &found;
+    if (fresh != nullptr) {
+      *fresh = true;
+    }
+  }
+  if (known->dir < 0) {
+    return false;
+  }
+  if (snprintf(path, size, "%s/%s", dirAt(static_cast<size_t>(known->dir)), upperName) >=
+      static_cast<int>(size)) {
+    return false;
+  }
+  if (length != nullptr) {
+    *length = known->length;
+  }
+  return true;
 }
 
 bool AppDataFiles::validApp(const char* app) {
@@ -187,6 +403,10 @@ bool AppDataFiles::commit() {
     remove(temp);
     return false;
   }
+  {
+    std::lock_guard<std::mutex> guard(searchLock_);
+    resetSearch();                             // на флешке новый файл: запомненное «нет» уже неверно
+  }
   // Дата FAT без месяца или числа негодна — у копии остаётся время записи (как у ResourceDiskCache).
   const uint32_t date = outStamp_ >> 16;
   if (((date >> 5) & 0x0F) == 0 || (date & 0x1F) == 0) {
@@ -220,14 +440,31 @@ int AppDataFiles::open(const char* app, const char* name, void** file, uint32_t*
     return kNotFound;
   }
   upper(name, upperName, sizeof(upperName));
-  // Файл на учёте (флешки не было, 0.1.166) — читается у программы Z80, на флешку не смотрим.
   char upperApp[9];
   upper(app, upperApp, sizeof(upperApp));
+  // 0.1.175: файл на флешке (в папке приложения или любой вложенной в <root>) — читается с неё, даже
+  // если такой же стоит на учёте с карты Evo.
+  char drivePath[300];
+  uint32_t driveLength = 0;
+  bool fresh = false;
+  const bool onDrive = findOnDrive(upperApp, upperName, drivePath, sizeof(drivePath), &driveLength, &fresh);
   {
     std::lock_guard<std::mutex> guard(lock_);
     for (const Remote& remote : remotes_) {
       if (!remote.used || strcmp(remote.app, upperApp) != 0 || strcmp(remote.name, upperName) != 0) {
         continue;
+      }
+      if (onDrive) {
+        if (fresh && remote.size != driveLength) {
+          log("data file %s/%s: the Evo card file is %u bytes, the USB drive copy %u bytes; reading the "
+              "USB drive", upperApp, upperName, static_cast<unsigned>(remote.size),
+              static_cast<unsigned>(driveLength));
+        }
+        break;                                 // учёт есть, но читается флешка
+      }
+      if (fresh) {
+        log("data file %s/%s: Evo card (file %u of the Z80 program), %u bytes", upperApp, upperName,
+            static_cast<unsigned>(remote.index), static_cast<unsigned>(remote.size));
       }
       if (fetch_ == nullptr || block_ == nullptr) {
         return kNotFound;
@@ -249,19 +486,24 @@ int AppDataFiles::open(const char* app, const char* name, void** file, uint32_t*
       return kError;                           // все kMaxOpen дескрипторов заняты
     }
   }
-  char path[300];
-  snprintf(path, sizeof(path), "%s/%s", dir, upperName);
-  const long long length = fileSize(path);
-  if (length < 0 || length > 0xFFFFFFFFLL) {
+  if (!onDrive) {
+    if (fresh) {
+      log("data file %s/%s: neither on the USB drive nor registered from the Evo card", upperApp,
+          upperName);
+    }
     return kNotFound;
+  }
+  if (fresh) {
+    log("data file %s/%s: USB drive %s, %u bytes", upperApp, upperName, drivePath,
+        static_cast<unsigned>(driveLength));
   }
   std::lock_guard<std::mutex> guard(lock_);
   for (size_t i = 0; i < kMaxOpen; ++i) {
     if (!handles_[i].used) {
       handles_[i] = Handle{};
       handles_[i].used = true;
-      handles_[i].size = static_cast<uint32_t>(length);
-      snprintf(handles_[i].path, sizeof(handles_[i].path), "%s", path);
+      handles_[i].size = driveLength;
+      snprintf(handles_[i].path, sizeof(handles_[i].path), "%s", drivePath);
       *file = &handles_[i];
       if (size != nullptr) {
         *size = handles_[i].size;
@@ -353,10 +595,20 @@ void AppDataFiles::close(void* file) {
 }
 
 void AppDataFiles::closeAll() {
-  std::lock_guard<std::mutex> guard(lock_);
-  closeCached();
-  for (Handle& handle : handles_) {
-    handle = Handle{};
+  {
+    std::lock_guard<std::mutex> guard(lock_);
+    closeCached();
+    for (Handle& handle : handles_) {
+      handle = Handle{};
+    }
+  }
+  // Следующий запуск ищет заново: флешку могли пополнить. Замок поиска не ждать — его могла держать
+  // задача приложения, снятая посреди поиска (stopApp): тогда сброс сделает следующий поиск.
+  std::unique_lock<std::mutex> guard(searchLock_, std::try_to_lock);
+  if (guard.owns_lock()) {
+    resetSearch();
+  } else {
+    resetPending_.store(true);
   }
 }
 
