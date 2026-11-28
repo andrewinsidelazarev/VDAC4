@@ -18,6 +18,7 @@
 
 #include "esp_private/msc_scsi_bot.h"
 #include "ff.h"                 // ff_mutex_take / ff_mutex_give: замок тома FatFs
+#include "diskio_impl.h"        // ff_diskio_set_max_transfer: предел передачи (0.1.179)
 // Устройство драйвера (поле xfer — буфер передачи) и номер его диска FatFs: заголовки
 // private_include компонента usb_host_msc (путь — main/CMakeLists.txt, 0.1.174).
 #include "msc_common.h"
@@ -239,8 +240,27 @@ bool growTransferBuffer(msc_host_device_handle_t device, uint32_t sectorSize) {
   return read;
 }
 
+// Предел одной передачи FatFs для тома флешки — длина буфера драйвера (0.1.179). Почему: драйвер
+// (msc_bulk_transfer) для передачи длиннее буфера сначала освобождает старый и при неудаче нового
+// остаётся с освобождённым — 0.1.177 так упала с двойным освобождением, когда core_store читал ядро
+// по 8 КБ при буфере 4 КБ. С пределом FatFs делит длинные чтения и записи сам (components/fatfs,
+// diskio.c), и драйвер свой буфер не трогает никогда — какой бы длины fread/fwrite ни позвала
+// прошивка или приложение. Звать после регистрации тома и при каждой смене буфера (под замком тома).
+std::atomic<uint32_t> g_sectorBytes{0};   // длина сектора смонтированной флешки; 0 — её нет
+
+void limitTransfers(msc_host_device_handle_t device, uint32_t bufferBytes) {
+  const uint32_t sector = g_sectorBytes.load();
+  const BYTE pdrv = ff_diskio_get_pdrv_disk(&device->disk);
+  if (sector == 0 || pdrv >= FF_VOLUMES) {
+    return;
+  }
+  const uint32_t sectors = bufferBytes / sector;
+  ff_diskio_set_max_transfer(pdrv, sectors > 0 ? sectors : 1, sector);
+}
+
 void closeDrive() {
   g_transferBytes.store(0);
+  g_sectorBytes.store(0);
   if (g_vfs != nullptr) {
     msc_host_vfs_unregister(g_vfs);
     g_vfs = nullptr;
@@ -293,6 +313,9 @@ uint8_t openDrive(uint8_t address) {
     return kUnusable;
   }
   g_vfs = vfs;
+  // Том зарегистрирован (регистрация сбрасывает предел) — предел передачи = буфер драйвера
+  g_sectorBytes.store(info.sector_size);
+  limitTransfers(device, g_transferBytes.load());
   mkdir("/usb/SYSTEM", 0777);
   mkdir("/usb/SYSTEM/CACHE", 0777);
   mkdir(UsbDrive::kMusicCache, 0777);
@@ -504,6 +527,7 @@ uint32_t UsbDrive::setTransferBytes(uint32_t bytes) {
                  static_cast<unsigned>(have), static_cast<unsigned>(bytes));
     }
   }
+  limitTransfers(device, now);            // новый буфер — новый предел, ещё под замком тома
   g_transferBytes.store(now);
   ff_mutex_give(pdrv);
   return now;

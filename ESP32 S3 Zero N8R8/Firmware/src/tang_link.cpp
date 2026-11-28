@@ -79,6 +79,13 @@ enum class State : uint8_t { kOff, kNone, kReady };
 std::atomic<bool> g_ownsCs{false};
 std::atomic<bool> g_boardPowered{false};
 std::atomic<State> g_state{State::kOff};
+// Запуск LINK кончен (0.1.182): после kReady задача ещё ~2 с делает свои шаги — замер, настройки
+// flash, копию шрифтов ПЗУ FT812 через мост TS-Config, взвод перехода в FT812 — и последней пишет
+// метку SCRATCH, по которой потом видит перезагрузку ПЛИС. 28.11.2026 приложение (WALL-E), дождавшись
+// kReady, перевело Tang в ядро FT812 посреди этих шагов: метка легла уже в ядро FT812, перезагрузку
+// задача не увидела, версия осталась TS-Config, и ft_open до срока ждал ядро 02. waitReady ждёт этот
+// флажок, а не только kReady.
+std::atomic<bool> g_settled{false};
 std::atomic<uint32_t> g_version{0};
 std::atomic<uint32_t> g_reloads{0};
 std::atomic<bool> g_coreClaimed{false};   // у ядра из кэша есть хозяин (claimCore)
@@ -595,6 +602,7 @@ void taskMain(void*) {
   // проверка канала сетевой консоли и TANG_WRITE от Evo — это лишь лишний перезапуск.
   uint32_t marker = 0x5C000000U | (esp_random() & 0x00FFFFFFU);
   lockedWrite(tang::kRegScratch, &marker, 1);
+  g_settled = true;   // метка на месте: смену ядра теперь видно, приложениям можно его менять
 
   uint32_t last[7] = {0xFFFFFFFF, 0, 0, 0, 0, 0, 0};
   TickType_t statusAt = xTaskGetTickCount();
@@ -691,6 +699,17 @@ bool starting() {
   // Запуск длится около 2 с после kStartDelayMs; позже kOff — модуля нет или запуск запрещён.
   constexpr uint32_t kStartWindowMs = 10000;
   return g_lock != nullptr && g_state == State::kOff && nowMs() < kStartDelayMs + kStartWindowMs;
+}
+
+bool waitReady(uint32_t maxWaitMs) {
+  // Опрос раз в 100 мс: запуск LINK — секунды (задержка kStartDelayMs, поиск Tang, выбор частоты),
+  // затем ещё шаги задачи после kReady (g_settled). Ждать, пока канал поднимается (starting) или уже
+  // готов, но задача ещё не кончила запуск; Tang нет (kNone) — сразу.
+  for (uint32_t waited = 0;
+       !(ready() && g_settled.load()) && (starting() || ready()) && waited < maxWaitMs; waited += 100) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+  return ready();
 }
 
 void claimCore() { g_coreClaimed = true; }
@@ -874,6 +893,10 @@ bool writeBurstDma(uint32_t address, const uint32_t* words, size_t count, bool w
   giveLock();
   return ok;
 }
+
+// 0.1.180: для окна FT812 (ft_host::writeQueued) — без замка, только чтение: буферы
+// меняются под замком LINK, а writeBurstDma всё равно перепроверяет их под ним.
+bool burstDmaPrepared() { return ready() && link_spi3::dmaPrepared(); }
 
 bool waitBurstDma(const char* file, int line) {
   if (!ready() || !takeLock(file, line, 0)) {

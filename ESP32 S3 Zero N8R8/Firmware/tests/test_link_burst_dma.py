@@ -67,14 +67,40 @@ class LinkBurstDmaTest(unittest.TestCase):
         self.assertIn('(address & 3) != 0', body)
         self.assertIn('(flags & ~ZM_LINK_NOWAIT) != 0', body, 'неизвестные флаги — отказ')
         self.assertIn('return ZM_NO_MEMORY;', body)
-        self.assertIn('kLinkDmaKeep = 12 * 1024', body, 'запас внутреннего ОЗУ — как у code_ram')
+        # 0.1.180: запас — общий с ft_write, константа файла
+        self.assertIn('tang::prepareBurstDma(kLinkDmaKeep)', body)
+        self.assertIn('constexpr size_t kLinkDmaKeep = 12 * 1024;', modules, 'запас внутреннего ОЗУ — как у code_ram')
         self.assertIn('(flags & ZM_LINK_NOWAIT) == 0', body)
         stop = function_body(modules, 'void ModuleApp::stopApp()')
         # буферы — назад, когда задачи приложения уже сняты (иначе DMA мог бы ещё идти из них)
         self.assertLess(stop.index('vTaskDelete'), stop.index('tang::releaseBurstDma();'))
+        # 0.1.180: ft_write просит буферы один раз за приложение, сброс — вместе с отдачей
+        self.assertLess(stop.index('tang::releaseBurstDma();'), stop.index('g_ftDmaAsked = false;'))
+        write = function_body(modules, 'int ModuleApp::coreFtWrite(')
+        self.assertIn('count > 16 && !g_ftDmaAsked.exchange(true)', write)
+        self.assertLess(write.index('tang::prepareBurstDma(kLinkDmaKeep);'), write.index('ft_host::writeBlock('))
+        self.assertNotIn('return ZM_NO_MEMORY', write, 'отказ в буферах — не ошибка ft_write')
+
+    def test_ft_host(self) -> None:
+        """0.1.180: ft_write через DMA — src/ft_host.cpp на ПК с моделью очереди окна FT812."""
+        exe = build_exe(ROOT / '.test-build' / 'ft_host_host', 'ft_host_host.exe',
+                        [ROOT / 'tests' / 'stubs_ft_host', ROOT / 'include'],
+                        [(ROOT / 'tests' / 'ft_host_host.cpp', 'host.obj')])
+        if exe is None:
+            self.skipTest('нет MSVC (vcvars64.bat)')
+        result = subprocess.run([str(exe)], capture_output=True, text=True, encoding='utf-8', timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), 'OK')
+        host = text('src', 'ft_host.cpp')
+        queued = function_body(host, 'bool writeQueued(')
+        # DMA — только для пачек длиннее 16 и с ожиданием конца; длина — в пределах FT_FREE (credit)
+        self.assertIn('dma && n > kBurstWords ? tang::writeBurstDma(tang::kRegFtBurst, words + at, n, true)', queued)
+        self.assertLess(queued.index('const size_t n = count - at < credit ? count - at : credit;'),
+                        queued.index('tang::writeBurstDma('))
 
     def test_locking(self) -> None:
         link = text('src', 'tang_link.cpp')
+        self.assertIn('bool burstDmaPrepared() { return ready() && link_spi3::dmaPrepared(); }', link)
         for head in ('bool writeBurstDma(uint32_t address', 'bool waitBurstDma(', 'void releaseBurstDma(',
                      'bool prepareBurstDma('):
             body = function_body(link, head)

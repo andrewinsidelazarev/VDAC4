@@ -55,6 +55,12 @@ void ff_diskio_register(BYTE pdrv, const ff_diskio_impl_t* discio_impl);
 
 #define ff_diskio_unregister(pdrv_) ff_diskio_register(pdrv_, NULL)
 
+/* VDAC4 (0.1.179). Предел одной передачи диска pdrv: не больше max_sectors секторов по sector_bytes
+ * байт. ff_disk_read и ff_disk_write делят более длинные чтения и записи на куски не длиннее предела
+ * (зачем — в diskio.c, у ff_disk_read). max_sectors = 0 — без предела (так у всех дисков, пока предел
+ * не задан; ff_diskio_register его сбрасывает). */
+void ff_diskio_set_max_transfer(BYTE pdrv, UINT max_sectors, UINT sector_bytes);
+
 
 /**
  * Get next available drive number

@@ -34,7 +34,16 @@ constexpr uint32_t kSwitchMs = 15000;   // LOAD: новое ядро на LINK
 constexpr uint32_t kRegCpInfo = 0x30;   // CP_INFO: ответ BL616 {0xC2, состояние, номер команды}
 constexpr uint32_t kCcInfoMagic = 0xC2;
 constexpr uint32_t kCcLoadFail = 0x20;  // LOAD_FAIL | код core_jtag (core_mailbox.h)
-constexpr size_t kReadChunk = 8192;
+// Кусок чтения файла ядра для SHA-256 (fileSha). Не больше буфера драйвера флешки
+// (UsbDrive::kTransferBytes): до 0.1.179 здесь было 8 КБ, и 27.11.2026 чтение ядра Q2 с флешки при
+// буфере 4 КБ заставило драйвер растить буфер; во внутреннем ОЗУ игры места не нашлось, и драйвер
+// освободил буфер дважды (паника в zm-coreload). Предел передачи FatFs (usb_drive.cpp) теперь
+// делит такие чтения и сам; здесь — чтобы не делить зря. Буфер статический, во внутреннем ОЗУ:
+// 4 КБ вместо 8 освобождают ещё 4 КБ всем.
+constexpr size_t kReadChunk = 4096;
+#if ZIFI_HAS_USB_DRIVE
+static_assert(kReadChunk <= UsbDrive::kTransferBytes, "fileSha reads the USB drive in buffer-sized pieces");
+#endif
 
 bool linkRead(void*, uint32_t address, uint32_t* words, size_t count) { return tang::read(address, words, count); }
 bool linkWrite(void*, uint32_t address, const uint32_t* words, size_t count) {

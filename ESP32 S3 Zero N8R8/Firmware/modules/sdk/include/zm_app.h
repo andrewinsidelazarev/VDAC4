@@ -274,9 +274,14 @@ struct zm_core {
    * ft_open — стать хостом: при нужде перевести Tang в ядро FT812 (multiboot, до timeout_ms),
    * отключить SPI Evo к FT812 и запустить его в 1024×768@59 (64 МГц). ZM_OK, ZM_NOT_FOUND —
    * ядра FT812 нет (ядро Tang старше 1.12 или слот 1 пуст), ZM_ERROR — FT812 не ответил.
+   * С прошивки 0.1.181 ft_open и core_load сразу после перезапуска ESP ждут, пока поднимется связь
+   * с Tang (LINK — ~14 с от старта ESP), сверх timeout_ms; раньше — сразу ZM_NOT_FOUND/ZM_ERROR.
    * ft_write — слова подряд с address (кратен 4; RAM_G 0x000000, RAM_DL 0x300000, регистры
    * 0x302000…); ft_read — слово; ft_host_cmd — команда хоста (ACTIVE 00, CORERST 68, …);
-   * ft_close — вернуть FT812 Evo (ядро само зовёт его при выгрузке приложения). */
+   * ft_close — вернуть FT812 Evo (ядро само зовёт его при выгрузке приложения).
+   * С прошивки 0.1.180 первая ft_write длиннее 16 слов берёт буферы DMA LINK (2 × 1 КБ внутреннего
+   * ОЗУ, как link_burst_dma; только если после них останется 12 КБ) до выгрузки приложения, и блоки
+   * идут транзакциями DMA — быстрее. Приложению ничего делать не нужно. */
   int (*ft_open)(uint32_t timeout_ms);
   int (*ft_write)(uint32_t address, const uint32_t* words, uint32_t count);
   int (*ft_read)(uint32_t address, uint32_t* value);

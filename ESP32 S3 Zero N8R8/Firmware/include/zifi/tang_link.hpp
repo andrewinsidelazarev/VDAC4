@@ -92,6 +92,13 @@ bool ready();
 // частоты), не дольше 20 с от старта. Кто хочет знать о Tang сразу после перезапуска ESP
 // (SMB_START: шара TANG), ждёт, пока это true.
 bool starting();
+// Дождаться готовности канала, пока он ещё поднимается (starting), но не дольше maxWaitMs (0.1.181).
+// С 0.1.182 — и конца запуска задачи LINK после готовности (метка перезагрузки ПЛИС на месте: до неё
+// смену ядра задача не увидит). Сразу — если запуск кончен, Tang нет или окно запуска прошло.
+// true — канал готов. Для приложений, запущенных сразу после перезапуска ESP: 28.11.2026 после сброса
+// Evo программы SPG (BOING, DEMO3D, WALL-E) стартовали через 4–8 с, раньше LINK (~14 с), ft_open
+// отвечал «ядра FT812 нет», и экран оставался чёрным.
+bool waitReady(uint32_t maxWaitMs);
 // Частота LINK_SCK, примерно (0 — канал не работает).
 uint32_t clockHz();
 // VERSION ядра Tang (0x01010101 — 1.1); 0 — канал не работает.
@@ -162,6 +169,9 @@ void releaseBurstDma(const char* file = __builtin_FILE(), int line = __builtin_L
 bool writeBurstDma(uint32_t address, const uint32_t* words, size_t count, bool wait,
                    const char* file = __builtin_FILE(), int line = __builtin_LINE());
 bool waitBurstDma(const char* file = __builtin_FILE(), int line = __builtin_LINE());
+// 0.1.180: буферы DMA взяты (prepareBurstDma) и канал работает. Так окно FT812 (ft_host)
+// узнаёт, можно ли слать пачку записи через DMA; сам этот вызов буферов не берёт.
+bool burstDmaPrepared();
 
 // Короткое описание для SYS_INFO: "VDC4/1.0@40MHz", "none" или "off".
 void describe(char* out, size_t size);

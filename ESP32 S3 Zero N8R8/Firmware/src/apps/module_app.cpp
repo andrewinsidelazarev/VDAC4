@@ -499,6 +499,16 @@ void ModuleApp::pollNetworkCore(uint32_t now) {
 // память ядра 1 на счету (бюджет Application в main.cpp).
 namespace {
 
+#if ZIFI_HAS_SPI_LINK
+// Запас внутреннего ОЗУ после буферов DMA LINK (2 × 1 КБ) — тот же, что у code_ram (kCodeRamKeep):
+// Wi-Fi, обмен с Evo и DMA ядра. Общий для link_burst_dma и ft_write.
+constexpr size_t kLinkDmaKeep = 12 * 1024;
+// 0.1.180: ft_write уже просил буферы DMA у этого приложения. Просит один раз: отказ (мало
+// внутреннего ОЗУ, нет канала GDMA) на каждой записи кадра стоил бы лишнего замка LINK. Сброс — в
+// stopApp, вместе с отдачей буферов.
+std::atomic<bool> g_ftDmaAsked{false};
+#endif
+
 struct DriveModule {
   char name[13];                          // пусто — место свободно
   uint32_t size;
@@ -1827,7 +1837,8 @@ void ModuleApp::stopApp() {
   }
   closeStreams();
 #if ZIFI_HAS_SPI_LINK
-  tang::releaseBurstDma();                // буферы DMA LINK (link_burst_dma) — назад во внутреннее ОЗУ
+  tang::releaseBurstDma();                // буферы DMA LINK (link_burst_dma, ft_write) — назад во внутреннее ОЗУ
+  g_ftDmaAsked = false;                   // 0.1.180: следующее приложение попросит буферы заново
 #endif
   for (LoadedModule& module : moduleSlots()) {
     if (module.used) {
@@ -2374,9 +2385,17 @@ void ModuleApp::coreNetClose(void* stream) {
 }
 
 // --- FT812 эмулятора Tang: приложение — хост (ft_host.hpp) --------------------------------------
+// Сколько приложение ждёт поднятия LINK после перезапуска ESP (0.1.181, tang::waitReady): весь запуск
+// LINK укладывается в окно tang::starting (20 с от старта ESP), так что ждать — не дольше конца окна.
+// Срок приложения (timeout_ms у ft_open) на это не тратится: он — на смену ядра Tang, как и прежде.
+// Ждёт задача приложения; если зовут из start (обработчик команды Z80), канал Z80 молчит до ~14 с —
+// меньше 15 с сторожа канала (link_watchdog).
+constexpr uint32_t kLinkStartWaitMs = 20000;
+
 int ModuleApp::coreFtOpen(uint32_t timeoutMs) {
 #if ZIFI_HAS_SPI_LINK
-  if (!tang::ready()) {
+  // Сразу после перезапуска ESP LINK ещё поднимается (~14 с): подождать, а не отказать сразу
+  if (!tang::waitReady(kLinkStartWaitMs)) {
     return ZM_NOT_FOUND;
   }
   if (!ft_host::switchToFtCore(timeoutMs)) {
@@ -2399,9 +2418,16 @@ int ModuleApp::coreFtOpen(uint32_t timeoutMs) {
 
 int ModuleApp::coreFtWrite(uint32_t address, const uint32_t* words, uint32_t count) {
 #if ZIFI_HAS_SPI_LINK
-  return words != nullptr && (address & 3) == 0 && ft_host::writeBlock(address, words, count)
-             ? ZM_OK
-             : ZM_ERROR;
+  if (words == nullptr || (address & 3) != 0) {
+    return ZM_ERROR;
+  }
+  // 0.1.180: первая запись длиннее 16 слов берёт буферы DMA LINK, и дальше ft_host шлёт
+  // пачки очереди окна FT812 через DMA (ft_host.cpp, writeQueued) — для этого приложению ничего не
+  // нужно менять. Отказ — не ошибка: запись идёт пачками по 16, как прежде.
+  if (count > 16 && !g_ftDmaAsked.exchange(true)) {
+    tang::prepareBurstDma(kLinkDmaKeep);
+  }
+  return ft_host::writeBlock(address, words, count) ? ZM_OK : ZM_ERROR;
 #else
   (void)address; (void)words; (void)count;
   return ZM_ERROR;
@@ -2467,7 +2493,8 @@ void ModuleApp::coreLoaderTask(void* context) {
 int ModuleApp::coreCoreLoad(const char* name, uint32_t* version) {
 #if ZIFI_HAS_SPI_LINK
   ModuleApp* self = instance_;
-  if (name == nullptr || !tang::ready() || self->coreLoader_ == nullptr) {
+  // 0.1.181: LINK ещё поднимается после перезапуска ESP — подождать (как ft_open)
+  if (name == nullptr || !tang::waitReady(kLinkStartWaitMs) || self->coreLoader_ == nullptr) {
     return ZM_ERROR;
   }
   if (self->coreJob_.running) {
@@ -2983,7 +3010,6 @@ int ModuleApp::coreLinkBurst(uint32_t address, const uint32_t* words, uint32_t c
 // после них — тот же, что у code_ram (kCodeRamKeep): Wi-Fi, обмен с Evo и DMA ядра.
 int ModuleApp::coreLinkBurstDma(uint32_t address, const uint32_t* words, uint32_t count, uint32_t flags) {
 #if ZIFI_HAS_SPI_LINK
-  constexpr size_t kLinkDmaKeep = 12 * 1024;
   if (words == nullptr || (address & 3) != 0 || count == 0 || (flags & ~ZM_LINK_NOWAIT) != 0) {
     return ZM_ERROR;
   }

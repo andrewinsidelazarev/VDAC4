@@ -373,16 +373,32 @@ bool runTang(int client, const char* arguments) {
     // Скорость записи в RAM_G окном FT_ADDR/FT_DATA — тем же путём, что у приложений
     // (ft_host::writeBlock, блоки по 256 слов, как у DOOM): N КБ с 0x080000, затем сверка
     // чтением 64 случайных слов. Содержимое RAM_G там портится — только для проверки.
+    // 0.1.180: «tang ftspeed KB dma» — то же через DMA LINK, как у приложения после первой
+    // длинной ft_write: буферы берутся на время замера (если их ещё нет) и отдаются после него.
+    // Без «dma» — путь без буферов DMA (пачки по 16), если приложение их сейчас не держит.
     unsigned kb = 0;
     sscanf(arguments, " %*7s %u", &kb);
     if (kb == 0 || kb > 512) {
       kb = 64;
     }
+    const bool wantDma = strstr(arguments, "dma") != nullptr;
     uint32_t boot = 0;
     if (tang::read(tang::kRegBoot, &boot, 1) && (boot >> 20) == tang::kBootTag &&
         ((boot >> 17) & 1U) == 0) {
       return sendText(client, "tang ftspeed: no FT812 in this core (tang boot to the FT812 core)\n");
     }
+    const bool hadDma = tang::burstDmaPrepared();
+    if (wantDma && !hadDma && !tang::prepareBurstDma(12 * 1024)) {
+      return sendText(client, "tang ftspeed: LINK DMA refused (internal RAM or GDMA channel)\n");
+    }
+    const bool viaDma = tang::burstDmaPrepared();
+    // Буферы, взятые только для замера, — назад при любом выходе
+    struct DmaRestore {
+      bool release;
+      ~DmaRestore() {
+        if (release) tang::releaseBurstDma();
+      }
+    } restore{wantDma && !hadDma};
     static uint32_t block[256];
     constexpr uint32_t kBase = 0x080000;
     const uint32_t words = kb * 256U;
@@ -407,10 +423,10 @@ bool runTang(int client, const char* arguments) {
         ++good;
       }
     }
-    return sendText(client, "tang ftspeed: %u KB in %u us, %u ns/word, %u KB/s; check %u/64 ok, %u kHz\n",
+    return sendText(client, "tang ftspeed: %u KB in %u us, %u ns/word, %u KB/s; check %u/64 ok, %u kHz, %s\n",
                     kb, static_cast<unsigned>(us), static_cast<unsigned>(1000ULL * us / words),
                     static_cast<unsigned>(us ? 1000000ULL * kb / us : 0), good,
-                    static_cast<unsigned>(tang::clockHz() / 1000));
+                    static_cast<unsigned>(tang::clockHz() / 1000), viaDma ? "DMA" : "16-word bursts");
   }
   if (strcmp(verb, "boot") == 0) {
     const uint32_t personality = tang::coreVersion() >> 24;
@@ -491,7 +507,7 @@ bool runTang(int client, const char* arguments) {
   }
   if (arguments[0] != 0) {
     return sendText(client,
-                    "tang [rd ADDR | wr ADDR VALUE | flash | boot | lock | fthost on|off | test N | ftspeed KB | "
+                    "tang [rd ADDR | wr ADDR VALUE | flash | boot | lock | fthost on|off | test N | ftspeed KB [dma] | "
                     "sd [ls DIR | speed | off] | core [put NAME | load NAME | format yes] | player], hex; "
                     "no arguments: "
                     "summary\n");

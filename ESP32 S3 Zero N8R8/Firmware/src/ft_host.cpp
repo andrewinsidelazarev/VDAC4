@@ -73,12 +73,21 @@ uint32_t fromGray(uint32_t gray) {
 // меньше 16 слов; места освобождаются, пока ESP пишет (очередь уходит в память FT812 быстрее,
 // чем приходит по LINK). Места не освободились за kBusyWaitUs — ошибка (writeBlock повторит
 // блок медленно).
+// 0.1.180: пачка больше 16 слов идёт одним вызовом DMA (транзакции до 256 слов,
+// tang::writeBurstDma), если буферы DMA взяты для приложения (ModuleApp::coreFtWrite): у HMM2 запись
+// FT812 шла ~1,3 мкс на слово, у Quake 2 DMA дал ~0,38 против ~0,56 у пачек по 16. Число слов — так
+// же не больше свободных мест (FT_FREE), окно FT_BURST берёт транзакцию любой длины. С ожиданием
+// конца: следующий обмен — FT_FREE или FT_STAT, и ошибку «хвоста» без ожидания он бы не вернул.
+// Буферов нет (не просили, отказ ОЗУ или канала) или слов до 16 — пачки по 16, как в 0.1.82.
+constexpr size_t kBurstWords = 16;
+
 bool writeQueued(const uint32_t* words, size_t count) {
+  const bool dma = tang::burstDmaPrepared();
   size_t credit = 0;
   uint32_t waitStart = 0;
   bool waiting = false;
   for (size_t at = 0; at < count;) {
-    const size_t need = count - at < 16 ? count - at : 16;
+    const size_t need = count - at < kBurstWords ? count - at : kBurstWords;
     if (credit < need) {
       uint32_t gray = 0;
       if (!tang::read(tang::kRegFtFree, &gray, 1)) {
@@ -100,7 +109,9 @@ bool writeQueued(const uint32_t* words, size_t count) {
       waiting = false;
     }
     const size_t n = count - at < credit ? count - at : credit;
-    if (!tang::writeBurst(tang::kRegFtBurst, words + at, n)) {
+    const bool sent = dma && n > kBurstWords ? tang::writeBurstDma(tang::kRegFtBurst, words + at, n, true)
+                                             : tang::writeBurst(tang::kRegFtBurst, words + at, n);
+    if (!sent) {
       return false;
     }
     credit -= n;
@@ -117,7 +128,8 @@ bool writeWords(uint32_t address, const uint32_t* words, size_t count, bool pace
     return false;
   }
   if (!paced) {
-    // Быстро. Ядро 1.29+: пакетами по 16 слов в очередь окна (~0,4 мкс на слово). Старые ядра:
+    // Быстро. Ядро 1.29+: пакетами по 16 слов в очередь окна (~0,4 мкс на слово), с 0.1.180 —
+    // пачками DMA, если буферы DMA взяты (writeQueued). Старые ядра:
     // слова в FT_DATA подряд, контроллер настроен один раз — на слово только данные, старт и CS
     // (~3 мкс на слово; по tang::write на слово выходило ~9 мкс). Слово, пришедшее в занятое
     // окно (старые ядра) или в полную очередь, теряется: ядро 1.25+ отмечает это в FT_STAT 14
