@@ -113,8 +113,6 @@ class App {
   virtual bool stopForFileServer() { return true; }
   // Идёт работа, при которой радио не должно спать.
   virtual bool keepsWifiAwake() const { return false; }
-  // Идёт работа, которой помешает запись во flash (журнала): звук.
-  virtual bool blocksFlashWrites() const { return false; }
 };
 
 }  // namespace zifi

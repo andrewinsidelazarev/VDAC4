@@ -101,8 +101,9 @@ void watchTask(void* context) {
                static_cast<unsigned>(link.pendingToZ80()),
                static_cast<unsigned>(link.pendingFromZ80()), head[0], head[1], head[2], head[3],
                state[0], state[1], state[2], state[3]);
-    // Строку во flash обычно переносит сетевая задача; перед перезапуском — сами.
-    diagnosticLogFlush();
+    // Отметка в RTC-памяти: следующий запуск сочтёт этот перезапуск падением и запишет во flash
+    // последние строки журнала, и эту тоже (0.1.183: в обычной работе журнал во flash не пишется).
+    diagnosticLogHangRestart();
     vTaskDelay(pdMS_TO_TICKS(100));
     esp_restart();
   }

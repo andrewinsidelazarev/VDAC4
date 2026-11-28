@@ -136,7 +136,7 @@ bool sendText(int client, const char* format, ...) {
 bool sendStoredLog(int client) {
   DiagnosticLogSnapshot snapshot{};
   if (!diagnosticLogSnapshot(snapshot)) {
-    return sendText(client, "stored log is not available\n");
+    return sendText(client, "log is not available\n");
   }
   const bool ok = sendAll(client, snapshot.data, snapshot.length);
   diagnosticLogFreeSnapshot(snapshot);
@@ -589,7 +589,7 @@ bool runCommand(int client, const char* command) {
   }
   if (command[0] != 0) {
     return sendText(client,
-                    "commands: help, mem, ver, top (CPU by task, 100 = one core), log (stored log from flash), "
+                    "commands: help, mem, ver, top (CPU by task, 100 = one core), log (this run from RAM, the last crash from flash), "
                     "tang [rd ADDR | wr ADDR VALUE] (Tang registers over LINK)\n");
   }
   return true;

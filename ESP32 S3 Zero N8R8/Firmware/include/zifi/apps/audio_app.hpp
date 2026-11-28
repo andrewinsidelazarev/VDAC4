@@ -29,7 +29,6 @@ class AudioApp : public App {
   void begin() override;
   bool handleCommand(const PacketView& packet) override;
   void pollNetworkCore(uint32_t now) override;
-  bool blocksFlashWrites() const override { return player_.sounding(); }
 
   // Поле AUDIO: в SYS_INFO.
   void describe(char* output, size_t capacity) const {

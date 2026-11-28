@@ -58,8 +58,9 @@ target_include_directories(${COMPONENT_LIB} PRIVATE "${ZIFI_MSC_DIR}/private_inc
 # -Wrestrict — копирование между разными полями одного объекта он считает наложением.
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -std=gnu++17 -Wno-format-truncation -Wno-restrict)
-# ZIFI_DIAGNOSTIC_LOG=1: постоянный журнал во flash. На этой плате он нужен для наладки —
-# пока модуль стоит в плате, USB к нему не подключён (см. include/zifi/bringup_log.hpp).
+# ZIFI_DIAGNOSTIC_LOG=1: журнал прошивки (в ОЗУ; во flash — только запись о последнем падении). На этой
+# плате он нужен для наладки — пока модуль стоит в плате, USB к нему не подключён (см.
+# include/zifi/bringup_log.hpp и include/zifi/diagnostic_log.hpp).
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     ZIFI_BUILD_VERSION="${ZIFI_VDAC4_VERSION}"
     ZIFI_BOARD_VDAC4=1

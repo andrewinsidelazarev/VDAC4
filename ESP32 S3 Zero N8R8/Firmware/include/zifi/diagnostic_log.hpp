@@ -9,8 +9,9 @@
 
 namespace zifi {
 
-// Текстовая копия кольцевого журнала. Память выделяется преимущественно в
-// PSRAM и должна быть освобождена diagnosticLogFreeSnapshot().
+// Текстовая копия журнала: запись о последнем падении (если она есть во flash) и строки этого
+// запуска. Память выделяется преимущественно в PSRAM и должна быть освобождена
+// diagnosticLogFreeSnapshot().
 struct DiagnosticLogSnapshot {
   uint8_t* data;
   size_t length;
@@ -18,28 +19,35 @@ struct DiagnosticLogSnapshot {
 
 #if ZIFI_DIAGNOSTIC_LOG
 
-// Подготовить постоянный кольцевой файл во flash. Ошибка журнала не должна
-// мешать основной работе ZiFi, поэтому вызывающий код получает только false.
+// Журнал наладки (0.1.183). Строки — в ОЗУ: кольцо в PSRAM и хвост последних строк в RTC-памяти,
+// которая переживает перезапуск ESP. Во flash журнал попадает только при запуске после падения (см.
+// diagnosticLogCrashFile). Подготовить кольцо и хвост; хвост прошлого запуска откладывается до
+// diagnosticLogCrashFile. Ошибка журнала не мешает основной работе ZiFi — вызывающий получает только
+// false.
 bool diagnosticLogBegin();
 
-// Поставить одно существенное событие в RAM-очередь. К каждой строке
-// автоматически добавляются uptime, свободная и минимальная RAM, свободная и
-// минимальная PSRAM. Этот вызов не обращается к flash и безопасен во время
-// активного VFS-обмена с Z80.
+// Поставить одно событие в журнал. К каждой строке автоматически добавляются время от запуска,
+// свободная и минимальная RAM, свободная и минимальная PSRAM. flash этот вызов не трогает и безопасен во
+// время активного VFS-обмена с Z80.
 void diagnosticLogEvent(const char* format, ...);
 
-// То же, но если журнал занят (идёт перенос во flash), ждёт его до timeoutMs,
-// а не теряет запись. Для редких записей из несрочных задач.
+// То же, но если журнал занят другой задачей, ждёт его до timeoutMs, а не теряет запись. Для записей из
+// несрочных задач.
 void diagnosticLogEventWait(uint32_t timeoutMs, const char* format, ...);
 
-// Пакетно перенести RAM-очередь в постоянный кольцевой файл. Вызывать только
-// когда SMB/FTP/OTA и VFS-обмен с Z80 простаивают: операции LittleFS временно
-// блокируют flash cache обоих ядер.
-bool diagnosticLogFlush();
+// Один раз при запуске, после crashRecordReport (он пишет в журнал причину паники). Запуск после
+// падения — паника, сторож задач или прерываний, аппаратный сторож или diagnosticLogHangRestart —
+// пишет во flash один файл: последние строки прошлого запуска и первые строки этого. При обычном
+// запуске прошлый такой файл (если он есть) только читается в PSRAM — его покажет
+// diagnosticLogSnapshot. Единственное место, где журнал пишет во flash.
+void diagnosticLogCrashFile();
 
-// Собрать записи по порядку от старой к новой. Повреждённая незавершённая
-// запись отбрасывается по CRC и в снимок не попадает. Перед чтением RAM-очередь
-// автоматически сохраняется; OTA вызывает эту функцию уже без активного VFS.
+// Прошивка сейчас сама перезапустит ESP, потому что та зависла (сторож обмена с Z80): следующий
+// запуск сохранит журнал, как после падения.
+void diagnosticLogHangRestart();
+
+// Собрать текст: запись о последнем падении, затем строки этого запуска от старой к новой. flash не
+// читает: запись о падении уже лежит в PSRAM.
 bool diagnosticLogSnapshot(DiagnosticLogSnapshot& snapshot);
 void diagnosticLogFreeSnapshot(DiagnosticLogSnapshot& snapshot);
 
@@ -51,7 +59,8 @@ void diagnosticLogFreeSnapshot(DiagnosticLogSnapshot& snapshot);
 inline bool diagnosticLogBegin() { return false; }
 #define diagnosticLogEvent(...) ((void)0)
 #define diagnosticLogEventWait(...) ((void)0)
-inline bool diagnosticLogFlush() { return false; }
+inline void diagnosticLogCrashFile() {}
+inline void diagnosticLogHangRestart() {}
 inline bool diagnosticLogSnapshot(DiagnosticLogSnapshot& snapshot) {
   snapshot.data = nullptr;
   snapshot.length = 0;

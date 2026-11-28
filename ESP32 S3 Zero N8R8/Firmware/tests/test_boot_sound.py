@@ -3,9 +3,10 @@
 Сигнала при включении (три тона: левый канал, правый, оба) больше нет: последний тон на
 плате шёл с запинками, хотя ESP подавала его в I2S без разрывов (журнал: «tone: …
 gap3558us udf0»), и пользователь велел убрать сигнал совсем. Сеть подключается сразу, как
-и до 0.1.144. Печать постоянного журнала при запуске по-прежнему ждёт тишины (0.1.143):
-её снимок пишет во flash, а запись во flash останавливает кэш обоих ядер дольше запаса
-I2S. Проверяется исходный текст: сама прошивка на ПК не собирается.
+и до 0.1.144. Печать журнала при запуске с 0.1.143 ждала тишины: её снимок писал во flash, а
+запись во flash останавливает кэш обоих ядер дольше запаса I2S. С 0.1.183 журнал живёт в ОЗУ,
+снимок flash не трогает, и печать тишины не ждёт. Проверяется исходный текст: сама прошивка на ПК
+не собирается.
 """
 import pathlib
 import unittest
@@ -42,9 +43,10 @@ class BootSoundTest(unittest.TestCase):
         self.assertNotIn("chimePlaying", self.main)
         self.assertLess(head.index("beginSavedWifi"), head.index("networkReady_ = true"))
 
-    def test_stored_log_print_waits_for_silence(self) -> None:
-        self.assertRegex(self.led, r"\} else if \(owner->audio == nullptr \|\| !owner->audio->sounding\(\)\) \{"
-                                   r"(?:\s*//[^\n]*)*\s*bringupPrintStoredLog\(\);")
+    def test_stored_log_print_needs_no_silence(self) -> None:
+        # 0.1.183: снимок журнала flash не трогает — ждать конца звука незачем
+        self.assertRegex(self.led, r"\} else \{(?:\s*//[^\n]*)*\s*bringupPrintStoredLog\(\);")
+        self.assertNotIn("sounding()", self.led)
 
 
 if __name__ == "__main__":

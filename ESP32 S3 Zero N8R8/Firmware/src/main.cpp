@@ -227,7 +227,6 @@ class Application : private AppHost {
   App* networkApp(uint8_t command) const;
   const char* stopAppsForFileServer();
   bool appsKeepWifiAwake() const;
-  bool appsBlockFlashWrites() const;
 
   static void networkTaskEntry(void* context);
   static bool networkEventEntry(void* context, uint8_t command,
@@ -504,9 +503,7 @@ void Application::begin() {
   }
 
 #if ZIFI_DIAGNOSTIC_LOG
-  // Журнал монтирует тот же именованный LittleFS-раздел, поэтому запускаем
-  // его только после окончания загрузки конфигурации. Запись BOOT переживает
-  // последующий panic/watchdog reset и показывает его причину при чтении.
+  // Журнал (0.1.183) — в ОЗУ. Запись BOOT с причиной перезапуска — первая строка запуска.
   if (diagnosticLogBegin()) {
     diagnosticLogEvent("BOOT firmware=%s reset_reason=%d",
                        ZIFI_BUILD_VERSION,
@@ -518,6 +515,10 @@ void Application::begin() {
   // Обновление прошивки Tang по сети (порт 8268, tools/tang_tool.py)
   tangUpdateBegin();
   crashRecordReport();
+  // После причины паники: запуск после падения — запись о нём во flash (хвост прошлого запуска и эти
+  // первые строки), иначе прошлая такая запись только читается. Файл лежит в том же разделе LittleFS,
+  // что настройки, поэтому — после загрузки конфигурации.
+  diagnosticLogCrashFile();
 
   for (App* app : apps_) {
     app->begin();
@@ -694,15 +695,6 @@ bool Application::appsKeepWifiAwake() const {
   return false;
 }
 
-bool Application::appsBlockFlashWrites() const {
-  for (App* app : apps_) {
-    if (app->blocksFlashWrites()) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // Энергосбережение Wi-Fi: выключено, пока с файловым сервером работают (не дольше
 // kWifiAwakeIdleMs без обмена) и всё время, пока приложение работает с сетью
 // (appAwake: обновление WC, поток радио модуля). До 0.1.34 приложения шли тем же
@@ -795,7 +787,6 @@ void Application::networkTaskLoop() {
   networkReady_ = true;
 
   uint8_t token = 0;
-  uint32_t lastDiagnosticFlushMs = 0;
   uint32_t lastWifiSignalMs = 0;
   bool wifiSignalActive = false;
   for (;;) {
@@ -839,21 +830,8 @@ void Application::networkTaskLoop() {
     for (App* app : apps_) {
       app->pollNetworkCore(signalNow);
     }
-#if ZIFI_DIAGNOSTIC_LOG
-    // LittleFS блокирует flash cache. Сохранять журнал можно только когда ни
-    // один сетевой файловый сервер и канал/VFS не способны принять работу и
-    // не идёт звук: запись во flash слышна в нём как запинка.
-    const uint32_t now = millis();
-    if (!appsBlockFlashWrites() && !smb_.running() && !ftp_.running() &&
-        !ota_.running() &&
-        !vfsBridge_.requestPending() &&
-        vfsBridge_.networkToVfsAvailable() == 0 &&
-        vfsBridge_.vfsToNetworkAvailable() == 0 &&
-        static_cast<uint32_t>(now - lastDiagnosticFlushMs) >= 1000) {
-      diagnosticLogFlush();
-      lastDiagnosticFlushMs = now;
-    }
-#endif
+    // До 0.1.183 здесь раз в секунду журнал переносился во flash. Теперь он живёт в ОЗУ, а во flash
+    // попадает только при запуске после падения (diagnostic_log.cpp).
   }
 }
 
@@ -1155,11 +1133,6 @@ void Application::processUpdateStart() {
     setNetworkError("ota:smb stopping");
     return;
   }
-#if ZIFI_DIAGNOSTIC_LOG
-  // Здесь SMB/FTP уже остановлены, поэтому можно сохранить весь журнал
-  // завершившегося прогона до того, как OTA начнёт писать другой flash-раздел.
-  diagnosticLogFlush();
-#endif
   char error[64] = {};
   const bool started = ota_.running() ||
       ota_.start(OtaServer::kDefaultPort, error, sizeof(error));
@@ -1258,9 +1231,6 @@ void Application::processOnlineUpdate() {
     setNetworkError("update:smb stopping");
     return;
   }
-#if ZIFI_DIAGNOSTIC_LOG
-  diagnosticLogFlush();
-#endif
 
   char error[64] = {};
   uint8_t digest[32] = {};

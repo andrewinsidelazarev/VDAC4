@@ -21,7 +21,6 @@
 
 #include "zifi/board_state.hpp"
 #include "zifi/bringup_log.hpp"
-#include "zifi/diagnostic_log.hpp"
 #include "zifi/ft_rom.hpp"
 #include "zifi/link_spi3.hpp"
 #include "zifi/link_vote.hpp"
@@ -92,10 +91,11 @@ std::atomic<bool> g_coreClaimed{false};   // у ядра из кэша есть 
 SemaphoreHandle_t g_lock = nullptr;
 int g_dummy = kDummyCycles;
 
-// Шаг запуска — в журнал и сразу во flash: если следующий шаг зависнет, этот останется
+// Шаг запуска — в журнал. До 0.1.183 шаг сразу уходил во flash; теперь журнал в ОЗУ, а последние строки
+// лежат и в RTC-памяти: если следующий шаг уронит или повесит ESP, после перезапуска эта строка
+// попадёт в запись о падении (diagnostic_log.cpp).
 void step(const char* text) {
   bringupLog(kTag, "LINK step: %s", text);
-  diagnosticLogFlush();
 }
 
 bool guardIsSet() {

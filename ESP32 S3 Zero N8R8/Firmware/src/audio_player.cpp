@@ -629,8 +629,7 @@ void AudioPlayer::taskLoop() {
 // Раз в 2 с звука — в журнал, что уходит в ЦАП: пик отсчётов, кадры, записи в
 // I2S и самая долгая из них, недоливы DMA (каждый — буфер тишины, около
 // 11 мс), фронты на LRCK и DATA за 2 мс (DATA без фронтов — в ЦАП нули).
-// Записи во flash во время звука отложены (blocksFlashWrites), в журнал они
-// попадут после.
+// Журнал живёт в ОЗУ (0.1.183): строка звуку не мешает.
 void AudioPlayer::watchStep() {
   const bool sounding = (mode_ == kModeStream || mode_ == kModeModule || mode_ == kModePcm) &&
                         !paused_.load() && !buffering_.load();

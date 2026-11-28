@@ -13,7 +13,7 @@ namespace zifi {
 namespace {
 
 constexpr char kTag[] = "zifi-diag";
-// В запись постоянного журнала входит 156 знаков вместе с меткой источника.
+// В строку журнала входит 156 знаков вместе с меткой источника.
 constexpr size_t kLineSize = 136;
 constexpr uint32_t kStoreWaitMs = 200;
 
@@ -36,13 +36,13 @@ void bringupPrintStoredLog() {
   }
   DiagnosticLogSnapshot snapshot{};
   if (!diagnosticLogSnapshot(snapshot)) {
-    ESP_LOGW(kTag, "stored log is not available");
+    ESP_LOGW(kTag, "log is not available");
     return;
   }
-  printf("----- stored log: %u bytes -----\n",
+  printf("----- log: %u bytes -----\n",
          static_cast<unsigned>(snapshot.length));
   fwrite(snapshot.data, 1, snapshot.length, stdout);
-  printf("----- stored log end -----\n");
+  printf("----- log end -----\n");
   fflush(stdout);
   diagnosticLogFreeSnapshot(snapshot);
 #endif
